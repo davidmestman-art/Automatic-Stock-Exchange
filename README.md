@@ -15,7 +15,6 @@ Algorithmic NYSE trading engine — automated buy/sell execution powered by smar
 ```bash
 git clone https://github.com/davidmestman-art/Automatic-Stock-Exchange
 cd Automatic-Stock-Exchange
-git checkout claude/nyse-trading-engine-S8e2B
 
 pip install -r requirements.txt
 
