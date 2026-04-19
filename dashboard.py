@@ -279,37 +279,37 @@ tr:hover td{background:#263044}
     </div>
   </div>
 
-  <!-- signals + positions -->
+  <!-- signal analysis -->
+  <div class="panel grid1">
+    <div class="panel-title">Signal Analysis <span class="count" id="sig-count">0</span></div>
+    <table>
+      <thead><tr>
+        <th>Ticker</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th>
+      </tr></thead>
+      <tbody id="sig-body"><tr><td colspan="5" class="empty">No data yet — click Refresh</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- positions + trades -->
   <div class="grid2">
     <div class="panel">
-      <div class="panel-title">Signals <span class="count" id="sig-count">0</span></div>
+      <div class="panel-title">Positions <span class="count" id="pos-count">0</span></div>
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th>
-        </tr></thead>
-        <tbody id="sig-body"><tr><td colspan="5" class="empty">No data yet — click Refresh</td></tr></tbody>
-      </table>
-    </div>
-    <div class="panel">
-      <div class="panel-title">Open Positions <span class="count" id="pos-count">0</span></div>
-      <table>
-        <thead><tr>
-          <th>Symbol</th><th>Shares</th><th>Entry</th><th>Current</th><th>P&amp;L</th>
+          <th>Ticker</th><th>Entry Price</th><th>Current Price</th><th>Qty</th><th>Unrealized P&amp;L</th>
         </tr></thead>
         <tbody id="pos-body"><tr><td colspan="5" class="empty">No open positions</td></tr></tbody>
       </table>
     </div>
-  </div>
-
-  <!-- recent trades -->
-  <div class="panel grid1">
-    <div class="panel-title">Recent Trades <span class="count" id="trade-count">0</span></div>
-    <table>
-      <thead><tr>
-        <th>Time</th><th>Action</th><th>Symbol</th><th>Shares</th><th>Price</th><th>P&amp;L</th><th>Reason</th>
-      </tr></thead>
-      <tbody id="trade-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
-    </table>
+    <div class="panel">
+      <div class="panel-title">Trades <span class="count" id="trade-count">0</span></div>
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>Realized P&amp;L</th>
+        </tr></thead>
+        <tbody id="trade-body"><tr><td colspan="6" class="empty">No trades yet</td></tr></tbody>
+      </table>
+    </div>
   </div>
 </main>
 
@@ -377,7 +377,7 @@ function applyState(s) {
     }).join('');
   }
 
-  // positions
+  // positions — columns: Ticker, Entry Price, Current Price, Qty, Unrealized P&L
   document.getElementById('pos-count').textContent = s.positions.length;
   const pb = document.getElementById('pos-body');
   if (!s.positions.length) {
@@ -385,27 +385,26 @@ function applyState(s) {
   } else {
     pb.innerHTML = s.positions.map(p => `<tr>
       <td style="font-weight:600">${p.symbol}</td>
-      <td>${p.shares}</td>
       <td>$${fmt(p.entry_price)}</td>
       <td>$${fmt(p.current_price)}</td>
+      <td>${p.shares}</td>
       <td class="${cls(p.pnl)}">${p.pnl >= 0 ? '+' : ''}$${fmt(Math.abs(p.pnl))} (${p.pnl_pct >= 0 ? '+' : ''}${fmt(p.pnl_pct)}%)</td>
     </tr>`).join('');
   }
 
-  // trades
+  // trades — columns: Time, Ticker, Side, Qty, Price, Realized P&L
   document.getElementById('trade-count').textContent = s.trades.length;
   const tb = document.getElementById('trade-body');
   if (!s.trades.length) {
-    tb.innerHTML = '<tr><td colspan="7" class="empty">No trades yet</td></tr>';
+    tb.innerHTML = '<tr><td colspan="6" class="empty">No trades yet</td></tr>';
   } else {
     tb.innerHTML = s.trades.map(t => `<tr>
       <td style="color:#64748b;font-size:12px">${t.timestamp}</td>
-      <td><span class="pill pill-${t.action}">${t.action}</span></td>
       <td style="font-weight:600">${t.symbol}</td>
+      <td><span class="pill pill-${t.action}">${t.action}</span></td>
       <td>${t.shares}</td>
       <td>$${fmt(t.price)}</td>
       <td class="${t.pnl != null ? cls(t.pnl) : 'neu'}">${t.pnl != null ? (t.pnl >= 0 ? '+' : '') + '$' + fmt(Math.abs(t.pnl)) + ' (' + (t.pnl_pct >= 0 ? '+' : '') + fmt(t.pnl_pct) + '%)' : '—'}</td>
-      <td style="color:#64748b;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.reason}</td>
     </tr>`).join('');
   }
 
