@@ -2,10 +2,10 @@
 """NYSE Algorithmic Trading Engine — entry point.
 
 Usage:
-  python main.py trade                       # single paper-trading cycle
-  python main.py trade --cycles 5            # 5 consecutive cycles
-  python main.py trade --cycles 5 --interval 3600   # every hour
-  python main.py backtest                    # last 6 months
+  python main.py trade                         # single cycle (Alpaca paper if keys set)
+  python main.py trade --cycles 5              # 5 consecutive cycles
+  python main.py trade --cycles 390 --interval 60  # run every minute for a full session
+  python main.py backtest                      # backtest last 6 months
   python main.py backtest --start 2024-01-01 --end 2024-12-31
 """
 
@@ -34,20 +34,59 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
-def run_paper_trading(cycles: int = 1, interval_seconds: int = 0) -> None:
+def print_alpaca_status(logger) -> None:
+    """Print Alpaca account summary and market clock before trading starts."""
+    from src.trading.alpaca_executor import AlpacaExecutor
+
+    exec_ = AlpacaExecutor(
+        config.alpaca_api_key, config.alpaca_secret_key, paper=config.paper_trading
+    )
+
+    try:
+        acct = exec_.get_account_summary()
+        logger.info("── Alpaca Account ──────────────────────────────────")
+        logger.info(f"  Mode          : {'Paper' if config.paper_trading else 'LIVE'}")
+        logger.info(f"  Equity        : ${acct['equity']:>12,.2f}")
+        logger.info(f"  Cash          : ${acct['cash']:>12,.2f}")
+        logger.info(f"  Buying Power  : ${acct['buying_power']:>12,.2f}")
+        logger.info(f"  Daytrade cnt  : {acct['daytrade_count']}")
+    except Exception as e:
+        logger.error(f"  Could not fetch Alpaca account: {e}")
+        logger.error("  Check ALPACA_API_KEY and ALPACA_SECRET_KEY in your .env file.")
+        sys.exit(1)
+
+    try:
+        clock = exec_.get_clock_info()
+        status = "OPEN" if clock["is_open"] else "CLOSED"
+        logger.info(f"  Market        : {status}")
+        if not clock["is_open"]:
+            logger.info(f"  Next open     : {clock['next_open']}")
+        logger.info("────────────────────────────────────────────────────")
+    except Exception:
+        pass
+
+
+def run_trading(cycles: int = 1, interval_seconds: int = 0) -> None:
     logger = logging.getLogger(__name__)
-    logger.info("NYSE Algorithmic Trading Engine  —  Paper Trading Mode")
-    logger.info(f"Symbols       : {', '.join(config.symbols)}")
-    logger.info(f"Capital       : ${config.initial_capital:,.2f}")
-    logger.info(f"Max positions : {config.max_open_positions}")
-    logger.info(f"Stop loss     : {config.stop_loss_pct * 100:.1f}%")
-    logger.info(f"Take profit   : {config.take_profit_pct * 100:.1f}%")
+
+    mode = "Alpaca Paper" if config.use_alpaca and config.paper_trading else (
+        "Alpaca LIVE" if config.use_alpaca else "Local Simulation"
+    )
+    logger.info(f"NYSE Algorithmic Trading Engine  —  {mode}")
+    logger.info(f"Symbols      : {', '.join(config.symbols)}")
+    logger.info(f"Max positions: {config.max_open_positions}")
+    logger.info(f"Stop loss    : {config.stop_loss_pct * 100:.1f}%  "
+                f"Take profit: {config.take_profit_pct * 100:.1f}%")
+
+    if config.use_alpaca:
+        print_alpaca_status(logger)
 
     engine = TradingEngine(config)
+
     for i in range(cycles):
         engine.run_cycle()
         if i < cycles - 1 and interval_seconds > 0:
-            logger.info(f"Sleeping {interval_seconds}s until next cycle…")
+            logger.info(f"  Sleeping {interval_seconds}s until next cycle…")
             time.sleep(interval_seconds)
 
     logger.info("Session complete.")
@@ -69,10 +108,11 @@ def main() -> None:
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    trade_p = sub.add_parser("trade", help="Run paper trading engine")
-    trade_p.add_argument("--cycles", type=int, default=1, help="Number of cycles to run")
+    trade_p = sub.add_parser("trade", help="Run trading engine")
+    trade_p.add_argument("--cycles", type=int, default=1, help="Number of cycles")
     trade_p.add_argument(
-        "--interval", type=int, default=0, help="Seconds between cycles (0 = immediate)"
+        "--interval", type=int, default=0,
+        help="Seconds between cycles (0 = run immediately back-to-back)",
     )
 
     bt_p = sub.add_parser("backtest", help="Run historical backtest")
@@ -85,7 +125,7 @@ def main() -> None:
     setup_logging(args.verbose)
 
     if args.command == "trade":
-        run_paper_trading(cycles=args.cycles, interval_seconds=args.interval)
+        run_trading(cycles=args.cycles, interval_seconds=args.interval)
     elif args.command == "backtest":
         run_backtest(args.start, args.end)
 

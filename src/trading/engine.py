@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional, Union
 
 from ..data.fetcher import MarketDataFetcher
 from ..signals.analyzer import SignalAnalyzer, SignalResult
@@ -17,6 +17,7 @@ _SEP = "=" * 64
 class TradingEngine:
     def __init__(self, config):
         self.config = config
+
         self.fetcher = MarketDataFetcher(
             lookback_days=config.lookback_days,
             interval=config.data_interval,
@@ -43,8 +44,25 @@ class TradingEngine:
             daily_loss_limit_pct=config.daily_loss_limit_pct,
         )
         self.portfolio = Portfolio(initial_capital=config.initial_capital)
-        self.executor = PaperExecutor()
+
+        # Choose executor: Alpaca (paper or live) vs pure local simulation
+        if config.use_alpaca:
+            from .alpaca_executor import AlpacaExecutor
+            self.executor: Union[AlpacaExecutor, PaperExecutor] = AlpacaExecutor(
+                api_key=config.alpaca_api_key,
+                secret_key=config.alpaca_secret_key,
+                paper=config.paper_trading,
+            )
+            mode = "Alpaca Paper" if config.paper_trading else "Alpaca LIVE"
+        else:
+            self.executor = PaperExecutor()
+            mode = "Local Simulation"
+
+        self._use_alpaca = config.use_alpaca
         self._cycle = 0
+        logger.info(f"TradingEngine initialised  [mode={mode}]")
+
+    # ── Public API ────────────────────────────────────────────────────────────
 
     def run_cycle(self) -> Dict[str, SignalResult]:
         self._cycle += 1
@@ -53,21 +71,30 @@ class TradingEngine:
         logger.info(f"  Trading Cycle #{self._cycle}  —  {ts}")
         logger.info(_SEP)
 
+        # Market hours gate
+        if self._use_alpaca and not self._market_is_open():
+            return {}
+
+        # Sync local portfolio from Alpaca before every cycle so bracket exits
+        # (stop-loss / take-profit triggered between cycles) are reflected
+        if self._use_alpaca:
+            self.executor.sync_portfolio(self.portfolio, risk_mgr=self.risk)
+
+        # Fetch historical bars for indicator calculation
         market_data = self.fetcher.fetch_many(self.config.symbols, force_refresh=True)
         if not market_data:
             logger.error("No market data returned — skipping cycle")
             return {}
 
-        prices: Dict[str, float] = {}
-        for symbol in market_data:
-            p = self.fetcher.get_current_price(symbol)
-            if p:
-                prices[symbol] = p
+        # Prefer live Alpaca quotes for current prices; fall back to yfinance
+        prices = self._get_prices(list(market_data.keys()))
 
         if self._cycle == 1:
             self.portfolio.update_day_start(prices)
 
-        self._check_exit_conditions(prices)
+        # Pure-simulation mode: check local SL/TP manually
+        if not self._use_alpaca:
+            self._check_exit_conditions(prices)
 
         results: Dict[str, SignalResult] = {}
 
@@ -79,7 +106,7 @@ class TradingEngine:
             current_price = prices[symbol]
 
             ind = self.indicators.compute(df)
-            ind.close = current_price  # use live price for signal generation
+            ind.close = current_price
 
             signal = self.analyzer.analyze(ind)
             results[symbol] = signal
@@ -125,24 +152,54 @@ class TradingEngine:
                     portfolio=self.portfolio,
                 )
 
-        summary = self.portfolio.get_summary(prices)
-        logger.info(f"\n  Portfolio Summary")
-        logger.info(f"  {'Total Value':15s} ${summary['total_value']:>12,.2f}")
-        logger.info(f"  {'Cash':15s} ${summary['cash']:>12,.2f}")
-        logger.info(
-            f"  {'Positions':15s} ${summary['position_value']:>12,.2f}"
-            f"  ({summary['open_positions']} open)"
-        )
-        sign = "+" if summary["total_pnl"] >= 0 else ""
-        logger.info(
-            f"  {'Total P&L':15s} {sign}${summary['total_pnl']:>11,.2f}"
-            f"  ({sign}{summary['total_pnl_pct']:.2f}%)"
-        )
-        logger.info(_SEP)
-
+        self._log_summary(prices)
         return results
 
-    def _check_exit_conditions(self, prices: Dict[str, float]):
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def get_signals(self):
+        """Fetch market data and compute signals without placing any orders.
+
+        Returns (signals, prices, indicators) — safe to call at any time,
+        ignores market hours, never submits orders.
+        """
+        market_data = self.fetcher.fetch_many(self.config.symbols, force_refresh=True)
+        prices = self._get_prices(list(market_data.keys()))
+        signals, ind_map = {}, {}
+        for symbol in self.config.symbols:
+            if symbol not in market_data or symbol not in prices:
+                continue
+            ind = self.indicators.compute(market_data[symbol])
+            ind.close = prices.get(symbol, ind.close)
+            signals[symbol] = self.analyzer.analyze(ind)
+            ind_map[symbol] = ind
+        return signals, prices, ind_map
+
+    def _market_is_open(self) -> bool:
+        clock = self.executor.get_clock_info()
+        if clock["is_open"]:
+            return True
+        logger.warning(
+            f"  Market is CLOSED  "
+            f"(next open: {clock['next_open']})"
+        )
+        return False
+
+    def _get_prices(self, symbols: list) -> Dict[str, float]:
+        if self._use_alpaca:
+            prices = self.executor.get_live_prices(symbols)
+            if prices:
+                return prices
+            logger.warning("Alpaca quotes unavailable — falling back to yfinance")
+
+        prices: Dict[str, float] = {}
+        for symbol in symbols:
+            p = self.fetcher.get_current_price(symbol)
+            if p:
+                prices[symbol] = p
+        return prices
+
+    def _check_exit_conditions(self, prices: Dict[str, float]) -> None:
         exits = []
         for symbol, pos in self.portfolio.positions.items():
             price = prices.get(symbol, pos.entry_price)
@@ -153,3 +210,19 @@ class TradingEngine:
 
         for symbol, price, reason in exits:
             self.executor.execute_sell(symbol, price, reason, self.portfolio)
+
+    def _log_summary(self, prices: Dict[str, float]) -> None:
+        s = self.portfolio.get_summary(prices)
+        sign = "+" if s["total_pnl"] >= 0 else ""
+        logger.info(f"\n  Portfolio Summary")
+        logger.info(f"  {'Total Value':15s} ${s['total_value']:>12,.2f}")
+        logger.info(f"  {'Cash':15s} ${s['cash']:>12,.2f}")
+        logger.info(
+            f"  {'Positions':15s} ${s['position_value']:>12,.2f}"
+            f"  ({s['open_positions']} open)"
+        )
+        logger.info(
+            f"  {'Total P&L':15s} {sign}${s['total_pnl']:>11,.2f}"
+            f"  ({sign}{s['total_pnl_pct']:.2f}%)"
+        )
+        logger.info(_SEP)
