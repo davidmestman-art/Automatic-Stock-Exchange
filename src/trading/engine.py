@@ -1,8 +1,9 @@
 import logging
 from datetime import datetime
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 from ..data.fetcher import MarketDataFetcher
+from ..data.scanner import StockScanner
 from ..signals.analyzer import SignalAnalyzer, SignalResult
 from ..signals.indicators import TechnicalIndicators
 from .executor import PaperExecutor
@@ -43,9 +44,14 @@ class TradingEngine:
             take_profit_pct=config.take_profit_pct,
             daily_loss_limit_pct=config.daily_loss_limit_pct,
         )
+        self.scanner = StockScanner(
+            universe=config.sp500_universe,
+            volume_top_n=config.universe_size,
+            signal_top_n=config.watchlist_size,
+            lookback_days=config.lookback_days,
+        )
         self.portfolio = Portfolio(initial_capital=config.initial_capital)
 
-        # Choose executor: Alpaca (paper or live) vs pure local simulation
         if config.use_alpaca:
             from .alpaca_executor import AlpacaExecutor
             self.executor: Union[AlpacaExecutor, PaperExecutor] = AlpacaExecutor(
@@ -60,6 +66,9 @@ class TradingEngine:
 
         self._use_alpaca = config.use_alpaca
         self._cycle = 0
+        self._session_date: Optional[str] = None   # tracks when watchlist was last refreshed
+        self.watchlist: List[str] = list(config.symbols)  # starts as static fallback
+
         logger.info(f"TradingEngine initialised  [mode={mode}]")
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -71,34 +80,31 @@ class TradingEngine:
         logger.info(f"  Trading Cycle #{self._cycle}  —  {ts}")
         logger.info(_SEP)
 
-        # Market hours gate
         if self._use_alpaca and not self._market_is_open():
             return {}
 
-        # Sync local portfolio from Alpaca before every cycle so bracket exits
-        # (stop-loss / take-profit triggered between cycles) are reflected
+        # Refresh watchlist once per calendar day (session start)
+        self._maybe_refresh_watchlist()
+
         if self._use_alpaca:
             self.executor.sync_portfolio(self.portfolio, risk_mgr=self.risk)
 
-        # Fetch historical bars for indicator calculation
-        market_data = self.fetcher.fetch_many(self.config.symbols, force_refresh=True)
+        market_data = self.fetcher.fetch_many(self.watchlist, force_refresh=True)
         if not market_data:
             logger.error("No market data returned — skipping cycle")
             return {}
 
-        # Prefer live Alpaca quotes for current prices; fall back to yfinance
         prices = self._get_prices(list(market_data.keys()))
 
         if self._cycle == 1:
             self.portfolio.update_day_start(prices)
 
-        # Pure-simulation mode: check local SL/TP manually
         if not self._use_alpaca:
             self._check_exit_conditions(prices)
 
         results: Dict[str, SignalResult] = {}
 
-        for symbol in self.config.symbols:
+        for symbol in self.watchlist:
             if symbol not in market_data or symbol not in prices:
                 continue
 
@@ -155,18 +161,13 @@ class TradingEngine:
         self._log_summary(prices)
         return results
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
     def get_signals(self):
-        """Fetch market data and compute signals without placing any orders.
-
-        Returns (signals, prices, indicators) — safe to call at any time,
-        ignores market hours, never submits orders.
-        """
-        market_data = self.fetcher.fetch_many(self.config.symbols, force_refresh=True)
+        """Fetch data and compute signals without placing any orders."""
+        symbols = self.watchlist or self.config.symbols
+        market_data = self.fetcher.fetch_many(symbols, force_refresh=True)
         prices = self._get_prices(list(market_data.keys()))
         signals, ind_map = {}, {}
-        for symbol in self.config.symbols:
+        for symbol in symbols:
             if symbol not in market_data or symbol not in prices:
                 continue
             ind = self.indicators.compute(market_data[symbol])
@@ -175,14 +176,37 @@ class TradingEngine:
             ind_map[symbol] = ind
         return signals, prices, ind_map
 
+    def refresh_watchlist(self) -> List[str]:
+        """Force an immediate session scan and return the new watchlist."""
+        result = self.scanner.scan(self.indicators, self.analyzer, force=True)
+        self.watchlist = result.watchlist
+        self._session_date = datetime.now().strftime("%Y-%m-%d")
+        logger.info(f"Watchlist force-refreshed: {self.watchlist}")
+        return self.watchlist
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _maybe_refresh_watchlist(self) -> None:
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._session_date == today:
+            return
+        logger.info(f"  New session ({today}) — running watchlist scan…")
+        try:
+            result = self.scanner.scan(self.indicators, self.analyzer)
+            if result.watchlist:
+                self.watchlist = result.watchlist
+                self._session_date = today
+                logger.info(f"  Watchlist set to: {self.watchlist}")
+            else:
+                logger.warning("  Scan returned empty watchlist — keeping previous")
+        except Exception as e:
+            logger.error(f"  Watchlist scan failed: {e} — keeping previous")
+
     def _market_is_open(self) -> bool:
         clock = self.executor.get_clock_info()
         if clock["is_open"]:
             return True
-        logger.warning(
-            f"  Market is CLOSED  "
-            f"(next open: {clock['next_open']})"
-        )
+        logger.warning(f"  Market is CLOSED  (next open: {clock['next_open']})")
         return False
 
     def _get_prices(self, symbols: list) -> Dict[str, float]:
@@ -191,7 +215,6 @@ class TradingEngine:
             if prices:
                 return prices
             logger.warning("Alpaca quotes unavailable — falling back to yfinance")
-
         prices: Dict[str, float] = {}
         for symbol in symbols:
             p = self.fetcher.get_current_price(symbol)
@@ -207,7 +230,6 @@ class TradingEngine:
                 exits.append((symbol, price, "Stop loss triggered"))
             elif self.risk.check_take_profit(pos.entry_price, price):
                 exits.append((symbol, price, "Take profit triggered"))
-
         for symbol, price, reason in exits:
             self.executor.execute_sell(symbol, price, reason, self.portfolio)
 

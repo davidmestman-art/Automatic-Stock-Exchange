@@ -138,6 +138,8 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "last_cycle_at": _last_cycle_at.isoformat() if _last_cycle_at else None,
         "next_cycle_at": _next_cycle_at.isoformat() if _next_cycle_at else None,
         "cycle_interval": CYCLE_INTERVAL,
+        "watchlist": _engine.watchlist,
+        "scan": _engine.scanner.last_result.to_dict() if _engine.scanner.last_result else None,
     }
 
 
@@ -160,13 +162,25 @@ def api_cycle():
     global _last_state
     with _lock:
         try:
-            signals = _engine.run_cycle()
-            prices = getattr(_engine, "_last_prices", {})
+            _engine.run_cycle()
             _last_state = _build_state(error=None)
             return jsonify({"ok": True, "state": _last_state})
         except Exception as e:
             err = traceback.format_exc()
             return jsonify({"ok": False, "error": str(e), "detail": err}), 500
+
+
+@app.route("/api/rescan", methods=["POST"])
+def api_rescan():
+    global _last_state
+    with _lock:
+        try:
+            _engine.refresh_watchlist()
+            signals, prices, ind_map = _engine.get_signals()
+            _last_state = _build_state(signals, prices, ind_map)
+            return jsonify({"ok": True, "state": _last_state})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
@@ -198,6 +212,9 @@ header{background:#1e293b;border-bottom:1px solid #334155;padding:14px 24px;disp
 button{cursor:pointer;padding:6px 16px;border-radius:6px;border:none;font-size:13px;font-weight:600;transition:opacity .15s}
 .btn-refresh{background:#334155;color:#e2e8f0}
 .btn-refresh:hover{opacity:.8}
+.btn-rescan{background:#7c3aed;color:#fff}
+.btn-rescan:hover{opacity:.85}
+.btn-rescan:disabled{opacity:.5;cursor:not-allowed}
 .btn-cycle{background:#0ea5e9;color:#fff}
 .btn-cycle:hover{opacity:.85}
 .btn-cycle:disabled{opacity:.5;cursor:not-allowed}
@@ -272,6 +289,7 @@ tr:hover td{background:#263044}
     <span class="ts" id="cycle-info" style="color:#475569">—</span>
     <span class="ts" id="last-ts">—</span>
     <button class="btn-refresh" onclick="refresh()">Refresh</button>
+    <button class="btn-rescan" id="btn-rescan" onclick="rescan()">Re-scan</button>
     <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
   </div>
 </header>
@@ -307,6 +325,16 @@ tr:hover td{background:#263044}
       <div class="card-label">Total Trades</div>
       <div class="card-value neu" id="c-trades">—</div>
     </div>
+  </div>
+
+  <!-- watchlist scan -->
+  <div class="panel grid1" id="scan-panel">
+    <div class="panel-title">
+      Watchlist
+      <span class="count" id="wl-count">0</span>
+      <span id="scan-meta" style="font-size:11px;color:#475569;margin-left:8px">—</span>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px" id="wl-chips"></div>
   </div>
 
   <!-- signal analysis -->
@@ -386,6 +414,29 @@ function applyState(s) {
   document.getElementById('c-open').textContent = p.open_positions;
   document.getElementById('c-trades').textContent = p.total_trades;
 
+  // watchlist chips
+  const wl = s.watchlist || [];
+  document.getElementById('wl-count').textContent = wl.length;
+  const scan = s.scan;
+  if (scan) {
+    document.getElementById('scan-meta').textContent =
+      `scanned ${scan.scanned_at}  ·  volume filter: top ${scan.volume_candidates_count}  ·  signal ranked to ${wl.length}`;
+  }
+  const chips = document.getElementById('wl-chips');
+  if (!wl.length) {
+    chips.innerHTML = '<span style="color:#475569;font-size:12px">No watchlist yet — waiting for session scan</span>';
+  } else {
+    chips.innerHTML = wl.map(sym => {
+      const action = scan && scan.actions ? scan.actions[sym] : null;
+      const score  = scan && scan.scores  ? scan.scores[sym]  : null;
+      const col = action === 'BUY' ? '#22c55e' : action === 'SELL' ? '#ef4444' : '#94a3b8';
+      const scoreStr = score != null ? ` ${score >= 0 ? '+' : ''}${score}` : '';
+      return `<span style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600">
+        <span style="color:${col}">${sym}</span><span style="color:#475569;font-size:11px">${scoreStr}</span>
+      </span>`;
+    }).join('');
+  }
+
   // signals
   document.getElementById('sig-count').textContent = s.signals.length;
   const sb = document.getElementById('sig-body');
@@ -455,6 +506,30 @@ async function refresh() {
   } catch(e) {
     document.getElementById('err-banner').textContent = 'Failed to fetch state: ' + e;
     document.getElementById('err-banner').style.display = 'block';
+  }
+}
+
+async function rescan() {
+  const btn = document.getElementById('btn-rescan');
+  const overlay = document.getElementById('overlay');
+  document.getElementById('overlay-msg').textContent = 'Scanning S&P 500 universe…';
+  btn.disabled = true;
+  overlay.classList.add('active');
+  try {
+    const res = await fetch('/api/rescan', {method:'POST'});
+    const data = await res.json();
+    if (data.ok) applyState(data.state);
+    else {
+      document.getElementById('err-banner').textContent = 'Scan error: ' + data.error;
+      document.getElementById('err-banner').style.display = 'block';
+    }
+  } catch(e) {
+    document.getElementById('err-banner').textContent = 'Scan failed: ' + e;
+    document.getElementById('err-banner').style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    overlay.classList.remove('active');
+    document.getElementById('overlay-msg').textContent = 'Running cycle…';
   }
 }
 
