@@ -43,15 +43,18 @@ class TradingConfig:
     data_interval: str = "1d"
     lookback_days: int = 120
 
-    # Execution mode
+    # ── Alpaca integration ────────────────────────────────────────────────────
+    # use_alpaca: True  → submit real orders to Alpaca (paper or live account)
+    # use_alpaca: False → pure local simulation (no API calls, offline-safe)
+    use_alpaca: bool = field(
+        default_factory=lambda: bool(os.getenv("ALPACA_API_KEY"))
+    )
+    # paper_trading: True  → Alpaca paper account  (fake money, real market data)
+    # paper_trading: False → Alpaca live account   (real money — use with caution)
     paper_trading: bool = True
 
-    # Alpaca API (live trading only)
     alpaca_api_key: str = field(default_factory=lambda: os.getenv("ALPACA_API_KEY", ""))
     alpaca_secret_key: str = field(default_factory=lambda: os.getenv("ALPACA_SECRET_KEY", ""))
-    alpaca_base_url: str = field(
-        default_factory=lambda: os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-    )
 
 
 config = TradingConfig()
