@@ -5,19 +5,45 @@ Run:  python dashboard.py
 Then open http://localhost:8080
 """
 
+import logging
 import threading
+import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Optional
 
 from flask import Flask, jsonify, render_template_string
 
 from config import config
 from src.trading.engine import TradingEngine
 
+CYCLE_INTERVAL = 60  # seconds between automatic trading cycles
+
 app = Flask(__name__)
 _lock = threading.Lock()
 _engine = TradingEngine(config)
 _last_state: dict = {}
+_last_cycle_at: Optional[datetime] = None
+_next_cycle_at: Optional[datetime] = None
+
+log = logging.getLogger(__name__)
+
+
+def _background_loop() -> None:
+    """Daemon thread: run a full trading cycle every CYCLE_INTERVAL seconds."""
+    global _last_cycle_at, _next_cycle_at
+    # Short warm-up so the server is ready before the first cycle fires
+    _next_cycle_at = datetime.now() + timedelta(seconds=10)
+    time.sleep(10)
+    while True:
+        with _lock:
+            try:
+                _engine.run_cycle()
+                _last_cycle_at = datetime.now()
+            except Exception as e:
+                log.error(f"Background cycle error: {e}")
+        _next_cycle_at = datetime.now() + timedelta(seconds=CYCLE_INTERVAL)
+        time.sleep(CYCLE_INTERVAL)
 
 # ── State builder ─────────────────────────────────────────────────────────────
 
@@ -109,6 +135,11 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "signals": sig_list,
         "trades": trades_list,
         "error": error,
+        "last_cycle_at": _last_cycle_at.isoformat() if _last_cycle_at else None,
+        "next_cycle_at": _next_cycle_at.isoformat() if _next_cycle_at else None,
+        "cycle_interval": CYCLE_INTERVAL,
+        "watchlist": _engine.watchlist,
+        "scan": _engine.scanner.last_result.to_dict() if _engine.scanner.last_result else None,
     }
 
 
@@ -131,13 +162,25 @@ def api_cycle():
     global _last_state
     with _lock:
         try:
-            signals = _engine.run_cycle()
-            prices = getattr(_engine, "_last_prices", {})
+            _engine.run_cycle()
             _last_state = _build_state(error=None)
             return jsonify({"ok": True, "state": _last_state})
         except Exception as e:
             err = traceback.format_exc()
             return jsonify({"ok": False, "error": str(e), "detail": err}), 500
+
+
+@app.route("/api/rescan", methods=["POST"])
+def api_rescan():
+    global _last_state
+    with _lock:
+        try:
+            _engine.refresh_watchlist()
+            signals, prices, ind_map = _engine.get_signals()
+            _last_state = _build_state(signals, prices, ind_map)
+            return jsonify({"ok": True, "state": _last_state})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
@@ -169,6 +212,9 @@ header{background:#1e293b;border-bottom:1px solid #334155;padding:14px 24px;disp
 button{cursor:pointer;padding:6px 16px;border-radius:6px;border:none;font-size:13px;font-weight:600;transition:opacity .15s}
 .btn-refresh{background:#334155;color:#e2e8f0}
 .btn-refresh:hover{opacity:.8}
+.btn-rescan{background:#7c3aed;color:#fff}
+.btn-rescan:hover{opacity:.85}
+.btn-rescan:disabled{opacity:.5;cursor:not-allowed}
 .btn-cycle{background:#0ea5e9;color:#fff}
 .btn-cycle:hover{opacity:.85}
 .btn-cycle:disabled{opacity:.5;cursor:not-allowed}
@@ -240,8 +286,10 @@ tr:hover td{background:#263044}
     <span id="market-label">Market —</span>
   </span>
   <div class="hdr-right">
+    <span class="ts" id="cycle-info" style="color:#475569">—</span>
     <span class="ts" id="last-ts">—</span>
     <button class="btn-refresh" onclick="refresh()">Refresh</button>
+    <button class="btn-rescan" id="btn-rescan" onclick="rescan()">Re-scan</button>
     <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
   </div>
 </header>
@@ -279,37 +327,47 @@ tr:hover td{background:#263044}
     </div>
   </div>
 
-  <!-- signals + positions -->
+  <!-- watchlist scan -->
+  <div class="panel grid1" id="scan-panel">
+    <div class="panel-title">
+      Watchlist
+      <span class="count" id="wl-count">0</span>
+      <span id="scan-meta" style="font-size:11px;color:#475569;margin-left:8px">—</span>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px" id="wl-chips"></div>
+  </div>
+
+  <!-- signal analysis -->
+  <div class="panel grid1">
+    <div class="panel-title">Signal Analysis <span class="count" id="sig-count">0</span></div>
+    <table>
+      <thead><tr>
+        <th>Ticker</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th>
+      </tr></thead>
+      <tbody id="sig-body"><tr><td colspan="5" class="empty">No data yet — click Refresh</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- positions + trades -->
   <div class="grid2">
     <div class="panel">
-      <div class="panel-title">Signals <span class="count" id="sig-count">0</span></div>
+      <div class="panel-title">Positions <span class="count" id="pos-count">0</span></div>
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th>
-        </tr></thead>
-        <tbody id="sig-body"><tr><td colspan="5" class="empty">No data yet — click Refresh</td></tr></tbody>
-      </table>
-    </div>
-    <div class="panel">
-      <div class="panel-title">Open Positions <span class="count" id="pos-count">0</span></div>
-      <table>
-        <thead><tr>
-          <th>Symbol</th><th>Shares</th><th>Entry</th><th>Current</th><th>P&amp;L</th>
+          <th>Ticker</th><th>Entry Price</th><th>Current Price</th><th>Qty</th><th>Unrealized P&amp;L</th>
         </tr></thead>
         <tbody id="pos-body"><tr><td colspan="5" class="empty">No open positions</td></tr></tbody>
       </table>
     </div>
-  </div>
-
-  <!-- recent trades -->
-  <div class="panel grid1">
-    <div class="panel-title">Recent Trades <span class="count" id="trade-count">0</span></div>
-    <table>
-      <thead><tr>
-        <th>Time</th><th>Action</th><th>Symbol</th><th>Shares</th><th>Price</th><th>P&amp;L</th><th>Reason</th>
-      </tr></thead>
-      <tbody id="trade-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
-    </table>
+    <div class="panel">
+      <div class="panel-title">Trades <span class="count" id="trade-count">0</span></div>
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>Realized P&amp;L</th>
+        </tr></thead>
+        <tbody id="trade-body"><tr><td colspan="6" class="empty">No trades yet</td></tr></tbody>
+      </table>
+    </div>
   </div>
 </main>
 
@@ -338,6 +396,9 @@ function applyState(s) {
   }
 
   document.getElementById('last-ts').textContent = s.timestamp;
+  _nextCycleAt = s.next_cycle_at ? new Date(s.next_cycle_at) : null;
+  _lastCycleAt = s.last_cycle_at ? new Date(s.last_cycle_at) : null;
+  updateCycleInfo();
 
   // cards
   document.getElementById('c-total').textContent = '$' + fmt(p.total_value);
@@ -352,6 +413,29 @@ function applyState(s) {
 
   document.getElementById('c-open').textContent = p.open_positions;
   document.getElementById('c-trades').textContent = p.total_trades;
+
+  // watchlist chips
+  const wl = s.watchlist || [];
+  document.getElementById('wl-count').textContent = wl.length;
+  const scan = s.scan;
+  if (scan) {
+    document.getElementById('scan-meta').textContent =
+      `scanned ${scan.scanned_at}  ·  volume filter: top ${scan.volume_candidates_count}  ·  signal ranked to ${wl.length}`;
+  }
+  const chips = document.getElementById('wl-chips');
+  if (!wl.length) {
+    chips.innerHTML = '<span style="color:#475569;font-size:12px">No watchlist yet — waiting for session scan</span>';
+  } else {
+    chips.innerHTML = wl.map(sym => {
+      const action = scan && scan.actions ? scan.actions[sym] : null;
+      const score  = scan && scan.scores  ? scan.scores[sym]  : null;
+      const col = action === 'BUY' ? '#22c55e' : action === 'SELL' ? '#ef4444' : '#94a3b8';
+      const scoreStr = score != null ? ` ${score >= 0 ? '+' : ''}${score}` : '';
+      return `<span style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600">
+        <span style="color:${col}">${sym}</span><span style="color:#475569;font-size:11px">${scoreStr}</span>
+      </span>`;
+    }).join('');
+  }
 
   // signals
   document.getElementById('sig-count').textContent = s.signals.length;
@@ -377,7 +461,7 @@ function applyState(s) {
     }).join('');
   }
 
-  // positions
+  // positions — columns: Ticker, Entry Price, Current Price, Qty, Unrealized P&L
   document.getElementById('pos-count').textContent = s.positions.length;
   const pb = document.getElementById('pos-body');
   if (!s.positions.length) {
@@ -385,27 +469,26 @@ function applyState(s) {
   } else {
     pb.innerHTML = s.positions.map(p => `<tr>
       <td style="font-weight:600">${p.symbol}</td>
-      <td>${p.shares}</td>
       <td>$${fmt(p.entry_price)}</td>
       <td>$${fmt(p.current_price)}</td>
+      <td>${p.shares}</td>
       <td class="${cls(p.pnl)}">${p.pnl >= 0 ? '+' : ''}$${fmt(Math.abs(p.pnl))} (${p.pnl_pct >= 0 ? '+' : ''}${fmt(p.pnl_pct)}%)</td>
     </tr>`).join('');
   }
 
-  // trades
+  // trades — columns: Time, Ticker, Side, Qty, Price, Realized P&L
   document.getElementById('trade-count').textContent = s.trades.length;
   const tb = document.getElementById('trade-body');
   if (!s.trades.length) {
-    tb.innerHTML = '<tr><td colspan="7" class="empty">No trades yet</td></tr>';
+    tb.innerHTML = '<tr><td colspan="6" class="empty">No trades yet</td></tr>';
   } else {
     tb.innerHTML = s.trades.map(t => `<tr>
       <td style="color:#64748b;font-size:12px">${t.timestamp}</td>
-      <td><span class="pill pill-${t.action}">${t.action}</span></td>
       <td style="font-weight:600">${t.symbol}</td>
+      <td><span class="pill pill-${t.action}">${t.action}</span></td>
       <td>${t.shares}</td>
       <td>$${fmt(t.price)}</td>
       <td class="${t.pnl != null ? cls(t.pnl) : 'neu'}">${t.pnl != null ? (t.pnl >= 0 ? '+' : '') + '$' + fmt(Math.abs(t.pnl)) + ' (' + (t.pnl_pct >= 0 ? '+' : '') + fmt(t.pnl_pct) + '%)' : '—'}</td>
-      <td style="color:#64748b;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.reason}</td>
     </tr>`).join('');
   }
 
@@ -423,6 +506,30 @@ async function refresh() {
   } catch(e) {
     document.getElementById('err-banner').textContent = 'Failed to fetch state: ' + e;
     document.getElementById('err-banner').style.display = 'block';
+  }
+}
+
+async function rescan() {
+  const btn = document.getElementById('btn-rescan');
+  const overlay = document.getElementById('overlay');
+  document.getElementById('overlay-msg').textContent = 'Scanning S&P 500 universe…';
+  btn.disabled = true;
+  overlay.classList.add('active');
+  try {
+    const res = await fetch('/api/rescan', {method:'POST'});
+    const data = await res.json();
+    if (data.ok) applyState(data.state);
+    else {
+      document.getElementById('err-banner').textContent = 'Scan error: ' + data.error;
+      document.getElementById('err-banner').style.display = 'block';
+    }
+  } catch(e) {
+    document.getElementById('err-banner').textContent = 'Scan failed: ' + e;
+    document.getElementById('err-banner').style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    overlay.classList.remove('active');
+    document.getElementById('overlay-msg').textContent = 'Running cycle…';
   }
 }
 
@@ -448,9 +555,26 @@ async function runCycle() {
   }
 }
 
-// Initial load + auto-refresh every 30s
+// Countdown ticker — updates every second without a server round-trip
+let _nextCycleAt = null;
+let _lastCycleAt = null;
+function updateCycleInfo() {
+  const el = document.getElementById('cycle-info');
+  if (!_nextCycleAt) { el.textContent = ''; return; }
+  const secsLeft = Math.max(0, Math.round((_nextCycleAt - Date.now()) / 1000));
+  let parts = [];
+  if (_lastCycleAt) {
+    const ago = Math.round((Date.now() - _lastCycleAt) / 1000);
+    parts.push('Last cycle ' + (ago < 60 ? ago + 's ago' : Math.round(ago/60) + 'm ago'));
+  }
+  parts.push('Next in ' + secsLeft + 's');
+  el.textContent = parts.join('  ·  ');
+}
+setInterval(updateCycleInfo, 1000);
+
+// Initial load + auto-refresh every 5s (picks up background cycle results quickly)
 refresh();
-setInterval(refresh, 30000);
+setInterval(refresh, 5000);
 </script>
 </body>
 </html>"""
@@ -462,11 +586,13 @@ def index():
 
 
 if __name__ == "__main__":
-    import logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-8s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    print("Dashboard running at http://localhost:8080")
+    t = threading.Thread(target=_background_loop, daemon=True, name="cycle-scheduler")
+    t.start()
+    log.info(f"Cycle scheduler started — running every {CYCLE_INTERVAL}s")
+    print(f"Dashboard running at http://localhost:8080  (auto-cycle every {CYCLE_INTERVAL}s)")
     app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
