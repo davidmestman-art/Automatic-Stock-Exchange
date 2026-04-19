@@ -157,6 +157,24 @@ class TradingEngine:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    def get_signals(self):
+        """Fetch market data and compute signals without placing any orders.
+
+        Returns (signals, prices, indicators) — safe to call at any time,
+        ignores market hours, never submits orders.
+        """
+        market_data = self.fetcher.fetch_many(self.config.symbols, force_refresh=True)
+        prices = self._get_prices(list(market_data.keys()))
+        signals, ind_map = {}, {}
+        for symbol in self.config.symbols:
+            if symbol not in market_data or symbol not in prices:
+                continue
+            ind = self.indicators.compute(market_data[symbol])
+            ind.close = prices.get(symbol, ind.close)
+            signals[symbol] = self.analyzer.analyze(ind)
+            ind_map[symbol] = ind
+        return signals, prices, ind_map
+
     def _market_is_open(self) -> bool:
         clock = self.executor.get_clock_info()
         if clock["is_open"]:
