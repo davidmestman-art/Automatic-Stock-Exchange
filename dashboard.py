@@ -5,19 +5,45 @@ Run:  python dashboard.py
 Then open http://localhost:8080
 """
 
+import logging
 import threading
+import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Optional
 
 from flask import Flask, jsonify, render_template_string
 
 from config import config
 from src.trading.engine import TradingEngine
 
+CYCLE_INTERVAL = 60  # seconds between automatic trading cycles
+
 app = Flask(__name__)
 _lock = threading.Lock()
 _engine = TradingEngine(config)
 _last_state: dict = {}
+_last_cycle_at: Optional[datetime] = None
+_next_cycle_at: Optional[datetime] = None
+
+log = logging.getLogger(__name__)
+
+
+def _background_loop() -> None:
+    """Daemon thread: run a full trading cycle every CYCLE_INTERVAL seconds."""
+    global _last_cycle_at, _next_cycle_at
+    # Short warm-up so the server is ready before the first cycle fires
+    _next_cycle_at = datetime.now() + timedelta(seconds=10)
+    time.sleep(10)
+    while True:
+        with _lock:
+            try:
+                _engine.run_cycle()
+                _last_cycle_at = datetime.now()
+            except Exception as e:
+                log.error(f"Background cycle error: {e}")
+        _next_cycle_at = datetime.now() + timedelta(seconds=CYCLE_INTERVAL)
+        time.sleep(CYCLE_INTERVAL)
 
 # ── State builder ─────────────────────────────────────────────────────────────
 
@@ -109,6 +135,9 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "signals": sig_list,
         "trades": trades_list,
         "error": error,
+        "last_cycle_at": _last_cycle_at.isoformat() if _last_cycle_at else None,
+        "next_cycle_at": _next_cycle_at.isoformat() if _next_cycle_at else None,
+        "cycle_interval": CYCLE_INTERVAL,
     }
 
 
@@ -240,6 +269,7 @@ tr:hover td{background:#263044}
     <span id="market-label">Market —</span>
   </span>
   <div class="hdr-right">
+    <span class="ts" id="cycle-info" style="color:#475569">—</span>
     <span class="ts" id="last-ts">—</span>
     <button class="btn-refresh" onclick="refresh()">Refresh</button>
     <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
@@ -338,6 +368,9 @@ function applyState(s) {
   }
 
   document.getElementById('last-ts').textContent = s.timestamp;
+  _nextCycleAt = s.next_cycle_at ? new Date(s.next_cycle_at) : null;
+  _lastCycleAt = s.last_cycle_at ? new Date(s.last_cycle_at) : null;
+  updateCycleInfo();
 
   // cards
   document.getElementById('c-total').textContent = '$' + fmt(p.total_value);
@@ -447,9 +480,26 @@ async function runCycle() {
   }
 }
 
-// Initial load + auto-refresh every 30s
+// Countdown ticker — updates every second without a server round-trip
+let _nextCycleAt = null;
+let _lastCycleAt = null;
+function updateCycleInfo() {
+  const el = document.getElementById('cycle-info');
+  if (!_nextCycleAt) { el.textContent = ''; return; }
+  const secsLeft = Math.max(0, Math.round((_nextCycleAt - Date.now()) / 1000));
+  let parts = [];
+  if (_lastCycleAt) {
+    const ago = Math.round((Date.now() - _lastCycleAt) / 1000);
+    parts.push('Last cycle ' + (ago < 60 ? ago + 's ago' : Math.round(ago/60) + 'm ago'));
+  }
+  parts.push('Next in ' + secsLeft + 's');
+  el.textContent = parts.join('  ·  ');
+}
+setInterval(updateCycleInfo, 1000);
+
+// Initial load + auto-refresh every 5s (picks up background cycle results quickly)
 refresh();
-setInterval(refresh, 30000);
+setInterval(refresh, 5000);
 </script>
 </body>
 </html>"""
@@ -461,11 +511,13 @@ def index():
 
 
 if __name__ == "__main__":
-    import logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-8s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    print("Dashboard running at http://localhost:8080")
+    t = threading.Thread(target=_background_loop, daemon=True, name="cycle-scheduler")
+    t.start()
+    log.info(f"Cycle scheduler started — running every {CYCLE_INTERVAL}s")
+    print(f"Dashboard running at http://localhost:8080  (auto-cycle every {CYCLE_INTERVAL}s)")
     app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
