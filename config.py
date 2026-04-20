@@ -38,8 +38,8 @@ class TradingConfig:
     daily_loss_limit_pct: float = 0.03
 
     # ── Signal thresholds ─────────────────────────────────────────────────────
-    buy_threshold: float = 0.35
-    sell_threshold: float = -0.35
+    buy_threshold: float = 0.20
+    sell_threshold: float = -0.20
 
     # ── Technical indicator periods ───────────────────────────────────────────
     rsi_period: int = 14
