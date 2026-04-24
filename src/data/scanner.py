@@ -72,6 +72,9 @@ class ScanResult:
         actions: Dict[str, str],
         scan_date: str,
         scanned_at: str,
+        fund_passed: int = 0,
+        fund_failed: int = 0,
+        fund_enabled: bool = False,
     ):
         self.watchlist = watchlist
         self.volume_candidates = volume_candidates
@@ -79,6 +82,9 @@ class ScanResult:
         self.actions = actions
         self.scan_date = scan_date
         self.scanned_at = scanned_at
+        self.fund_passed = fund_passed
+        self.fund_failed = fund_failed
+        self.fund_enabled = fund_enabled
 
     def to_dict(self) -> dict:
         return {
@@ -88,6 +94,9 @@ class ScanResult:
             "actions": self.actions,
             "scan_date": self.scan_date,
             "scanned_at": self.scanned_at,
+            "fund_enabled": self.fund_enabled,
+            "fund_passed": self.fund_passed,
+            "fund_failed": self.fund_failed,
         }
 
 
@@ -98,11 +107,15 @@ class StockScanner:
         volume_top_n: int = 100,
         signal_top_n: int = 10,
         lookback_days: int = 120,
+        fundamental_filter=None,
+        earnings_calendar=None,
     ):
         self.universe = list(dict.fromkeys(universe))   # deduplicate, preserve order
         self.volume_top_n = volume_top_n
         self.signal_top_n = signal_top_n
         self.lookback_days = lookback_days
+        self.fundamental_filter = fundamental_filter
+        self.earnings_calendar = earnings_calendar
         self._last_result: Optional[ScanResult] = None
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -126,8 +139,28 @@ class StockScanner:
 
         # Step 1 — volume filter
         volume_candidates = self._top_by_volume()
+        fund_passed = fund_failed = 0
+        fund_enabled = self.fundamental_filter is not None
 
-        # Step 2 — signal ranking
+        # Step 2 — fundamental filter (optional)
+        if self.fundamental_filter is not None:
+            before_fund = len(volume_candidates)
+            volume_candidates = self.fundamental_filter.filter(volume_candidates)
+            fund_passed = len(volume_candidates)
+            fund_failed = before_fund - fund_passed
+
+        # Step 3 — earnings protection (optional): remove symbols with imminent earnings
+        if self.earnings_calendar is not None:
+            before = len(volume_candidates)
+            volume_candidates = [
+                s for s in volume_candidates
+                if not self.earnings_calendar.has_upcoming_earnings(s)
+            ]
+            removed = before - len(volume_candidates)
+            if removed:
+                logger.info(f"Scanner: earnings filter removed {removed} symbols")
+
+        # Step 4 — signal ranking
         watchlist, scores, actions = self._top_by_signal(
             volume_candidates, indicators, analyzer
         )
@@ -139,6 +172,9 @@ class StockScanner:
             actions=actions,
             scan_date=today,
             scanned_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            fund_passed=fund_passed,
+            fund_failed=fund_failed,
+            fund_enabled=fund_enabled,
         )
         self._last_result = result
         logger.info(f"Scanner: watchlist → {watchlist}")

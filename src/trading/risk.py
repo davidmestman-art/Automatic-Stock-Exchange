@@ -16,12 +16,14 @@ class RiskManager:
         stop_loss_pct: float = 0.05,
         take_profit_pct: float = 0.15,
         daily_loss_limit_pct: float = 0.03,
+        max_positions_per_sector: int = 3,
     ):
         self.max_position_pct = max_position_pct
         self.max_open_positions = max_open_positions
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
         self.daily_loss_limit_pct = daily_loss_limit_pct
+        self.max_positions_per_sector = max_positions_per_sector
 
     def check_buy(
         self,
@@ -32,6 +34,7 @@ class RiskManager:
         open_positions: int,
         daily_pnl_pct: float,
         signal_confidence: float,
+        sector_positions: int = 0,
     ) -> RiskCheck:
         if daily_pnl_pct <= -self.daily_loss_limit_pct:
             return RiskCheck(
@@ -43,6 +46,12 @@ class RiskManager:
             return RiskCheck(
                 False,
                 f"Max open positions ({self.max_open_positions}) reached",
+            )
+
+        if self.max_positions_per_sector > 0 and sector_positions >= self.max_positions_per_sector:
+            return RiskCheck(
+                False,
+                f"Sector limit ({self.max_positions_per_sector}) reached",
             )
 
         # Scale position size by signal confidence, capped at max_position_pct

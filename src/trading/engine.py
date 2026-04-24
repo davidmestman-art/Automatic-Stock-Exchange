@@ -2,10 +2,15 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Union
 
+from ..data.earnings import EarningsCalendar
 from ..data.fetcher import MarketDataFetcher
 from ..data.scanner import StockScanner
+from ..data.voo_monitor import VOOMonitor
 from ..signals.analyzer import SignalAnalyzer, SignalResult
 from ..signals.indicators import TechnicalIndicators
+from ..utils.journal import TradeJournal
+from ..utils.notifications import Notifier
+from ..utils.sectors import sector_position_count
 from .executor import PaperExecutor
 from .portfolio import Portfolio
 from .risk import RiskManager
@@ -43,14 +48,51 @@ class TradingEngine:
             stop_loss_pct=config.stop_loss_pct,
             take_profit_pct=config.take_profit_pct,
             daily_loss_limit_pct=config.daily_loss_limit_pct,
+            max_positions_per_sector=config.max_positions_per_sector,
         )
+
+        # Optional components
+        fundamental_filter = None
+        if config.use_fundamental_filter:
+            from ..data.fundamentals import FundamentalFilter
+            fundamental_filter = FundamentalFilter(
+                pe_max=config.fundamental_pe_max,
+                de_max=config.fundamental_de_max,
+            )
+
+        earnings_cal = None
+        if config.use_earnings_protection:
+            earnings_cal = EarningsCalendar(buffer_days=config.earnings_buffer_days)
+        self.earnings_cal = earnings_cal
+
         self.scanner = StockScanner(
             universe=config.sp500_universe,
             volume_top_n=config.universe_size,
             signal_top_n=config.watchlist_size,
             lookback_days=config.lookback_days,
+            fundamental_filter=fundamental_filter,
+            earnings_calendar=earnings_cal,
         )
         self.portfolio = Portfolio(initial_capital=config.initial_capital)
+
+        self.voo_monitor = VOOMonitor(alert_threshold_pct=config.voo_alert_threshold_pct)
+        self.notifier = Notifier(
+            ntfy_topic=config.ntfy_topic,
+            pushover_token=config.pushover_token,
+            pushover_user=config.pushover_user,
+        )
+        self.journal = TradeJournal()
+
+        # Multi-timeframe analyzer (created lazily if enabled)
+        self._mtf_analyzer = None
+        if config.use_multi_timeframe:
+            from ..data.multi_timeframe import MultiTimeframeAnalyzer
+            self._mtf_analyzer = MultiTimeframeAnalyzer(
+                indicators=self.indicators,
+                analyzer=self.analyzer,
+                buy_threshold=config.buy_threshold,
+                sell_threshold=config.sell_threshold,
+            )
 
         if config.use_alpaca:
             from .alpaca_executor import AlpacaExecutor
@@ -66,8 +108,8 @@ class TradingEngine:
 
         self._use_alpaca = config.use_alpaca
         self._cycle = 0
-        self._session_date: Optional[str] = None   # tracks when watchlist was last refreshed
-        self.watchlist: List[str] = list(config.symbols)  # starts as static fallback
+        self._session_date: Optional[str] = None
+        self.watchlist: List[str] = list(config.symbols)
 
         logger.info(f"TradingEngine initialised  [mode={mode}]")
 
@@ -83,8 +125,12 @@ class TradingEngine:
         if self._use_alpaca and not self._market_is_open():
             return {}
 
-        # Refresh watchlist once per calendar day (session start)
         self._maybe_refresh_watchlist()
+
+        # VOO monitor — run once per cycle, send alert if near/crossing 200W MA
+        voo = self.voo_monitor.check()
+        if voo and voo.alert:
+            self.notifier.voo_alert(voo.price, voo.ma200w, voo.gap_pct)
 
         if self._use_alpaca:
             self.executor.sync_portfolio(self.portfolio, risk_mgr=self.risk)
@@ -114,7 +160,7 @@ class TradingEngine:
             ind = self.indicators.compute(df)
             ind.close = current_price
 
-            signal = self.analyzer.analyze(ind)
+            signal = self._compute_signal(symbol, ind)
             results[symbol] = signal
 
             rsi_str = f"RSI {ind.rsi:5.1f}" if ind.rsi else "RSI  n/a"
@@ -127,7 +173,14 @@ class TradingEngine:
             portfolio_value = self.portfolio.total_value_at(prices)
             daily_pnl = self.portfolio.daily_pnl_pct(prices)
 
+            ind_snap = self._indicator_snapshot(ind, signal)
+
             if signal.action == "BUY" and not self.portfolio.has_position(symbol):
+                # Earnings protection (also applied in scanner, but double-check at execution)
+                if self.earnings_cal and self.earnings_cal.has_upcoming_earnings(symbol):
+                    logger.debug(f"  Earnings protection: skipping BUY {symbol}")
+                    continue
+
                 rc = self.risk.check_buy(
                     symbol=symbol,
                     price=current_price,
@@ -136,6 +189,7 @@ class TradingEngine:
                     open_positions=self.portfolio.open_position_count(),
                     daily_pnl_pct=daily_pnl,
                     signal_confidence=signal.confidence,
+                    sector_positions=sector_position_count(symbol, self.portfolio.positions),
                 )
                 if rc.approved:
                     self.executor.execute_buy(
@@ -147,16 +201,44 @@ class TradingEngine:
                         reason=", ".join(signal.reasons[:2]),
                         portfolio=self.portfolio,
                     )
+                    self.notifier.trade_buy(
+                        symbol, rc.max_shares, current_price, ", ".join(signal.reasons[:2])
+                    )
+                    self.journal.log(
+                        action="BUY",
+                        symbol=symbol,
+                        shares=rc.max_shares,
+                        price=current_price,
+                        reason=", ".join(signal.reasons[:2]),
+                        indicators=ind_snap,
+                    )
                 else:
                     logger.debug(f"  Risk rejected {symbol}: {rc.reason}")
 
             elif signal.action == "SELL" and self.portfolio.has_position(symbol):
+                pos = self.portfolio.positions.get(symbol)
                 self.executor.execute_sell(
                     symbol=symbol,
                     price=current_price,
                     reason=f"Signal: {', '.join(signal.reasons[:2])}",
                     portfolio=self.portfolio,
                 )
+                if pos:
+                    pnl = (current_price - pos.entry_price) * pos.shares
+                    self.notifier.trade_sell(
+                        symbol, pos.shares, current_price, pnl,
+                        f"Signal: {', '.join(signal.reasons[:2])}"
+                    )
+                    self.journal.log(
+                        action="SELL",
+                        symbol=symbol,
+                        shares=pos.shares,
+                        price=current_price,
+                        reason=f"Signal: {', '.join(signal.reasons[:2])}",
+                        indicators=ind_snap,
+                        pnl=pnl,
+                        pnl_pct=(current_price - pos.entry_price) / pos.entry_price,
+                    )
 
         self._log_summary(prices)
         return results
@@ -172,7 +254,7 @@ class TradingEngine:
                 continue
             ind = self.indicators.compute(market_data[symbol])
             ind.close = prices.get(symbol, ind.close)
-            signals[symbol] = self.analyzer.analyze(ind)
+            signals[symbol] = self._compute_signal(symbol, ind)
             ind_map[symbol] = ind
         return signals, prices, ind_map
 
@@ -183,6 +265,50 @@ class TradingEngine:
         self._session_date = datetime.now().strftime("%Y-%m-%d")
         logger.info(f"Watchlist force-refreshed: {self.watchlist}")
         return self.watchlist
+
+    # ── Signal computation ────────────────────────────────────────────────────
+
+    def _compute_signal(self, symbol: str, ind) -> SignalResult:
+        """Return a signal, optionally blending multi-timeframe scores."""
+        base_signal = self.analyzer.analyze(ind)
+        if self._mtf_analyzer is None:
+            return base_signal
+
+        mtf = self._mtf_analyzer.analyze(symbol)
+        if mtf is None:
+            return base_signal
+
+        # Blend: MTF composite replaces the score/action; keep 1d reasons for context
+        action = mtf.action
+        score = mtf.composite
+        confidence = mtf.confidence
+        reasons = [
+            f"MTF 1d={mtf.score_1d:+.3f} 1h={mtf.score_1h:+.3f} 15m={mtf.score_15m:+.3f}",
+            *base_signal.reasons[:2],
+        ]
+        return SignalResult(
+            action=action,
+            score=score,
+            confidence=confidence,
+            reasons=reasons,
+            indicator_scores={
+                "1d": mtf.score_1d,
+                "1h": mtf.score_1h,
+                "15m": mtf.score_15m,
+                **base_signal.indicator_scores,
+            },
+        )
+
+    @staticmethod
+    def _indicator_snapshot(ind, signal: SignalResult) -> dict:
+        return {
+            "rsi": round(ind.rsi, 2) if ind.rsi is not None else None,
+            "macd_hist": round(ind.macd_hist, 4) if ind.macd_hist is not None else None,
+            "ema_fast": round(ind.ema_fast, 2) if ind.ema_fast is not None else None,
+            "ema_slow": round(ind.ema_slow, 2) if ind.ema_slow is not None else None,
+            "score": round(signal.score, 4),
+            "confidence": round(signal.confidence, 4),
+        }
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -231,7 +357,20 @@ class TradingEngine:
             elif self.risk.check_take_profit(pos.entry_price, price):
                 exits.append((symbol, price, "Take profit triggered"))
         for symbol, price, reason in exits:
+            pos = self.portfolio.positions.get(symbol)
             self.executor.execute_sell(symbol, price, reason, self.portfolio)
+            if pos:
+                pnl = (price - pos.entry_price) * pos.shares
+                self.notifier.trade_sell(symbol, pos.shares, price, pnl, reason)
+                self.journal.log(
+                    action="SELL",
+                    symbol=symbol,
+                    shares=pos.shares,
+                    price=price,
+                    reason=reason,
+                    pnl=pnl,
+                    pnl_pct=(price - pos.entry_price) / pos.entry_price,
+                )
 
     def _log_summary(self, prices: Dict[str, float]) -> None:
         s = self.portfolio.get_summary(prices)

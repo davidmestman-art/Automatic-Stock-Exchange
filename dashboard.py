@@ -333,7 +333,9 @@ tr:hover td{background:#263044}
       Watchlist
       <span class="count" id="wl-count">0</span>
       <span id="scan-meta" style="font-size:11px;color:#475569;margin-left:8px">—</span>
+      <span id="fund-badge" style="display:none;margin-left:auto;font-size:11px;padding:2px 10px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600"></span>
     </div>
+    <div id="fund-bar" style="display:none;padding:8px 16px;border-bottom:1px solid #334155;font-size:12px;color:#94a3b8;display:none;gap:16px;flex-wrap:wrap"></div>
     <div style="display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px" id="wl-chips"></div>
   </div>
 
@@ -420,7 +422,23 @@ function applyState(s) {
   const scan = s.scan;
   if (scan) {
     document.getElementById('scan-meta').textContent =
-      `scanned ${scan.scanned_at}  ·  volume filter: top ${scan.volume_candidates_count}  ·  signal ranked to ${wl.length}`;
+      `scanned ${scan.scanned_at}  ·  volume top ${scan.volume_candidates_count}  ·  signal ranked to ${wl.length}`;
+
+    // fundamental filter badge + bar
+    const fundBadge = document.getElementById('fund-badge');
+    const fundBar   = document.getElementById('fund-bar');
+    if (scan.fund_enabled) {
+      fundBadge.style.display = 'inline-block';
+      fundBadge.textContent   = `Fundamentals ON  ✓${scan.fund_passed} ✗${scan.fund_failed}`;
+      fundBar.style.display   = 'flex';
+      fundBar.innerHTML =
+        `<span style="color:#4ade80">✓ ${scan.fund_passed} passed</span>` +
+        `<span style="color:#f87171">✗ ${scan.fund_failed} filtered out</span>` +
+        `<span style="color:#475569">P/E &lt; 30 · D/E &lt; 2 · Positive FCF · Positive EPS growth</span>`;
+    } else {
+      fundBadge.style.display = 'none';
+      fundBar.style.display   = 'none';
+    }
   }
   const chips = document.getElementById('wl-chips');
   if (!wl.length) {
