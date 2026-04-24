@@ -72,7 +72,7 @@ class TradingConfig:
     max_positions_per_sector: int = 3
 
     # ── Multiple timeframes ───────────────────────────────────────────────────
-    use_multi_timeframe: bool = False      # blends 1d/1h/15m signals when True
+    use_multi_timeframe: bool = True       # blends 1d/1h/15m signals when True
 
     # ── Earnings calendar protection ──────────────────────────────────────────
     use_earnings_protection: bool = True
