@@ -206,97 +206,134 @@ HTML = """<!doctype html>
 body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
 a{color:inherit;text-decoration:none}
 
-/* layout */
-header{background:#1e293b;border-bottom:1px solid #334155;padding:14px 24px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:10}
-.logo{font-size:18px;font-weight:700;color:#f1f5f9;letter-spacing:.5px}
-.badge{padding:3px 10px;border-radius:99px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+/* ── Header ──────────────────────────────────────────────────────────────── */
+header{background:#1e293b;border-bottom:1px solid #334155;padding:12px 20px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:10;flex-wrap:wrap}
+.logo{font-size:17px;font-weight:700;color:#f1f5f9;letter-spacing:.5px;white-space:nowrap}
+.badge{padding:3px 10px;border-radius:99px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
 .badge-paper{background:#1d4ed8;color:#bfdbfe}
 .badge-live{background:#7f1d1d;color:#fecaca}
 .badge-sim{background:#374151;color:#9ca3af}
-.market-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
+.market-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px;flex-shrink:0}
 .market-open{background:#22c55e;box-shadow:0 0 6px #22c55e}
 .market-closed{background:#ef4444}
 .market-unknown{background:#6b7280}
-.hdr-right{margin-left:auto;display:flex;align-items:center;gap:10px}
-.ts{font-size:11px;color:#64748b}
-button{cursor:pointer;padding:6px 16px;border-radius:6px;border:none;font-size:13px;font-weight:600;transition:opacity .15s}
+#market-status{font-size:12px;color:#94a3b8;white-space:nowrap}
+.hdr-right{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ts{font-size:11px;color:#64748b;white-space:nowrap}
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+button{cursor:pointer;padding:7px 16px;border-radius:6px;border:none;font-size:13px;font-weight:600;transition:opacity .15s;min-height:36px;touch-action:manipulation}
 .btn-refresh{background:#334155;color:#e2e8f0}
 .btn-refresh:hover{opacity:.8}
 .btn-rescan{background:#7c3aed;color:#fff}
 .btn-rescan:hover{opacity:.85}
-.btn-rescan:disabled{opacity:.5;cursor:not-allowed}
+.btn-rescan:disabled,.btn-cycle:disabled,.btn-voo:disabled{opacity:.5;cursor:not-allowed}
 .btn-cycle{background:#0ea5e9;color:#fff}
 .btn-cycle:hover{opacity:.85}
-.btn-cycle:disabled{opacity:.5;cursor:not-allowed}
 
-main{padding:20px 24px;max-width:1400px;margin:0 auto}
+/* ── Layout ──────────────────────────────────────────────────────────────── */
+main{padding:16px 20px;max-width:1400px;margin:0 auto}
 
-/* stat cards */
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;margin-bottom:20px}
-.card{background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155}
+/* ── Stat cards ──────────────────────────────────────────────────────────── */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px}
+.card{background:#1e293b;border-radius:10px;padding:14px 16px;border:1px solid #334155}
 .card-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
 .card-value{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
 .card-sub{font-size:11px;color:#64748b;margin-top:3px}
 .pos{color:#22c55e}.neg{color:#ef4444}.neu{color:#e2e8f0}
 
-/* grid */
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
-.grid1{margin-bottom:16px}
-@media(max-width:900px){.grid2{grid-template-columns:1fr}}
+/* ── Grid ────────────────────────────────────────────────────────────────── */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+.grid1{margin-bottom:14px}
 
-/* panels */
+/* ── Panels ──────────────────────────────────────────────────────────────── */
 .panel{background:#1e293b;border-radius:10px;border:1px solid #334155;overflow:hidden}
-.panel-title{padding:12px 16px;font-weight:600;font-size:13px;color:#94a3b8;border-bottom:1px solid #334155;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:6px}
+.panel-title{padding:11px 14px;font-weight:600;font-size:12px;color:#94a3b8;border-bottom:1px solid #334155;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .panel-title .count{background:#334155;color:#94a3b8;border-radius:99px;padding:1px 8px;font-size:11px}
 
-/* tables */
-table{width:100%;border-collapse:collapse}
-th{padding:8px 12px;text-align:left;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #334155}
-td{padding:9px 12px;border-bottom:1px solid #1e293b;font-variant-numeric:tabular-nums}
+/* ── Table scroll wrapper ────────────────────────────────────────────────── */
+.tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+
+/* ── Tables ──────────────────────────────────────────────────────────────── */
+table{width:100%;border-collapse:collapse;min-width:340px}
+th{padding:8px 12px;text-align:left;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #334155;white-space:nowrap}
+td{padding:9px 12px;border-bottom:1px solid #1e293b;font-variant-numeric:tabular-nums;white-space:nowrap}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:#263044}
 
-/* signal pill */
+/* ── Signal pill ─────────────────────────────────────────────────────────── */
 .pill{display:inline-block;padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px}
 .pill-BUY{background:#14532d;color:#4ade80}
 .pill-SELL{background:#7f1d1d;color:#f87171}
 .pill-HOLD{background:#374151;color:#9ca3af}
 
-/* score bar */
+/* ── Score bar ───────────────────────────────────────────────────────────── */
 .score-wrap{display:flex;align-items:center;gap:6px}
-.score-bar-bg{width:60px;height:5px;background:#334155;border-radius:3px;overflow:hidden}
+.score-bar-bg{width:52px;height:5px;background:#334155;border-radius:3px;overflow:hidden;flex-shrink:0}
 .score-bar{height:5px;border-radius:3px;transition:width .3s}
 
-/* VOO monitor */
-.voo-panel{background:#1e293b;border-radius:10px;border:1px solid #334155;overflow:hidden;margin-bottom:16px}
-.voo-header{padding:12px 16px;border-bottom:1px solid #334155;display:flex;align-items:center;gap:10px}
-.voo-title{font-weight:600;font-size:13px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px}
+/* ── VOO monitor ─────────────────────────────────────────────────────────── */
+.voo-panel{background:#1e293b;border-radius:10px;border:1px solid #334155;overflow:hidden;margin-bottom:14px}
+.voo-header{padding:11px 14px;border-bottom:1px solid #334155;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.voo-title{font-weight:600;font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px}
 .voo-checked{font-size:11px;color:#475569;margin-left:auto}
-.voo-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:0}
-.voo-stat{padding:18px 20px;border-right:1px solid #334155}
+.voo-stats{display:grid;grid-template-columns:repeat(3,1fr)}
+.voo-stat{padding:16px 18px;border-right:1px solid #334155}
 .voo-stat:last-child{border-right:none}
 .voo-stat-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
-.voo-stat-value{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
-.voo-alert-bar{padding:14px 20px;display:flex;align-items:center;gap:10px;font-size:13px;font-weight:600}
+.voo-stat-value{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
+.voo-alert-bar{padding:13px 18px;display:flex;align-items:center;gap:10px;font-size:13px;font-weight:600}
 .voo-above{background:#0f2318;color:#4ade80;border-top:1px solid #166534}
 .voo-below{background:#14532d;color:#dcfce7;border-top:1px solid #22c55e;animation:voo-pulse 2s ease-in-out infinite}
-.voo-loading{padding:24px;text-align:center;color:#475569;font-size:13px}
+.voo-loading{padding:22px;text-align:center;color:#475569;font-size:13px}
 @keyframes voo-pulse{0%,100%{opacity:1}50%{opacity:.8}}
-.btn-voo{background:#1d4ed8;color:#fff;font-size:12px;padding:4px 12px;margin-left:auto}
+.btn-voo{background:#1d4ed8;color:#fff;font-size:12px;padding:5px 12px}
 .btn-voo:hover{opacity:.85}
 
-/* empty state */
-.empty{padding:32px;text-align:center;color:#475569}
-
-/* error banner */
-.error-banner{background:#7f1d1d;color:#fecaca;border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:13px;display:none}
-
-/* spinner */
+/* ── Misc ────────────────────────────────────────────────────────────────── */
+.empty{padding:28px;text-align:center;color:#475569}
+.error-banner{background:#7f1d1d;color:#fecaca;border-radius:8px;padding:10px 16px;margin-bottom:14px;font-size:13px;display:none}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid #334155;border-top-color:#0ea5e9;border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-
 .loading-overlay{display:none;position:fixed;inset:0;background:rgba(15,23,42,.7);z-index:50;align-items:center;justify-content:center;flex-direction:column;gap:12px}
 .loading-overlay.active{display:flex}
+
+/* ── Responsive — tablet (≤ 900 px) ─────────────────────────────────────── */
+@media(max-width:900px){
+  .grid2{grid-template-columns:1fr}
+}
+
+/* ── Responsive — phone (≤ 600 px) ──────────────────────────────────────── */
+@media(max-width:600px){
+  header{padding:10px 14px;gap:8px}
+  .logo{font-size:15px}
+  .ts{display:none}
+  .hdr-right{width:100%;margin-left:0;justify-content:flex-end}
+  .btn-refresh,.btn-rescan,.btn-cycle{padding:8px 12px;font-size:12px;flex:1;text-align:center}
+
+  main{padding:10px 12px}
+
+  .cards{grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+  .card{padding:11px 12px}
+  .card-value{font-size:18px}
+  .card-label{font-size:10px}
+
+  .voo-stats{grid-template-columns:1fr}
+  .voo-stat{border-right:none;border-bottom:1px solid #334155;padding:12px 14px}
+  .voo-stat:last-child{border-bottom:none}
+  .voo-stat-value{font-size:20px}
+  .voo-header{gap:6px}
+  .voo-checked{width:100%;margin-left:0;font-size:10px}
+  .btn-voo{width:100%;margin-top:4px}
+
+  .panel-title{font-size:11px;padding:10px 12px}
+  th{padding:7px 8px;font-size:10px}
+  td{padding:8px 8px;font-size:12px}
+  table{min-width:300px}
+
+  .score-bar-bg{width:36px}
+  .pill{font-size:10px;padding:2px 6px}
+}
 </style>
 </head>
 <body>
@@ -380,33 +417,33 @@ tr:hover td{background:#263044}
   <!-- signal analysis -->
   <div class="panel grid1">
     <div class="panel-title">Signal Analysis <span class="count" id="sig-count">0</span></div>
-    <table>
+    <div class="tbl-wrap"><table>
       <thead><tr>
         <th>Ticker</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th>
       </tr></thead>
       <tbody id="sig-body"><tr><td colspan="5" class="empty">No data yet — click Refresh</td></tr></tbody>
-    </table>
+    </table></div>
   </div>
 
   <!-- positions + trades -->
   <div class="grid2">
     <div class="panel">
       <div class="panel-title">Positions <span class="count" id="pos-count">0</span></div>
-      <table>
+      <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Ticker</th><th>Entry Price</th><th>Current Price</th><th>Qty</th><th>Unrealized P&amp;L</th>
+          <th>Ticker</th><th>Entry</th><th>Current</th><th>Qty</th><th>Unrealized P&amp;L</th>
         </tr></thead>
         <tbody id="pos-body"><tr><td colspan="5" class="empty">No open positions</td></tr></tbody>
-      </table>
+      </table></div>
     </div>
     <div class="panel">
       <div class="panel-title">Trades <span class="count" id="trade-count">0</span></div>
-      <table>
+      <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>Realized P&amp;L</th>
+          <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>P&amp;L</th>
         </tr></thead>
         <tbody id="trade-body"><tr><td colspan="6" class="empty">No trades yet</td></tr></tbody>
-      </table>
+      </table></div>
     </div>
   </div>
 </main>
@@ -706,13 +743,50 @@ def index():
 
 
 if __name__ == "__main__":
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="NYSE Trading Engine Dashboard")
+    parser.add_argument(
+        "--tunnel", action="store_true",
+        help="Open a public ngrok tunnel so you can access the dashboard from anywhere",
+    )
+    parser.add_argument(
+        "--port", type=int, default=8080,
+        help="Local port to serve on (default: 8080)",
+    )
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-8s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
     t = threading.Thread(target=_background_loop, daemon=True, name="cycle-scheduler")
     t.start()
     log.info(f"Cycle scheduler started — running every {CYCLE_INTERVAL}s")
-    print(f"Dashboard running at http://localhost:8080  (auto-cycle every {CYCLE_INTERVAL}s)")
-    app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
+
+    local_url = f"http://localhost:{args.port}"
+    print(f"\n  Local:   {local_url}")
+
+    if args.tunnel:
+        try:
+            from pyngrok import ngrok
+            tunnel = ngrok.connect(args.port)
+            public_url = tunnel.public_url
+            # Prefer https if ngrok gave us both
+            if hasattr(tunnel, "public_url"):
+                public_url = tunnel.public_url.replace("http://", "https://")
+            print(f"  Public:  {public_url}  ← share this URL")
+            print(f"  (ngrok tunnel is active — keep this window open)\n")
+        except ImportError:
+            print("\n  ERROR: pyngrok not installed.")
+            print("  Run:  pip install pyngrok\n")
+            sys.exit(1)
+        except Exception as e:
+            print(f"\n  ERROR starting ngrok tunnel: {e}")
+            print("  Continuing without tunnel — local access only.\n")
+
+    print(f"  Auto-cycle every {CYCLE_INTERVAL}s\n")
+    app.run(host="0.0.0.0", port=args.port, debug=False, use_reloader=False)
