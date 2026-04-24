@@ -16,6 +16,7 @@ from flask import Flask, jsonify, render_template_string
 
 from config import config
 from src.trading.engine import TradingEngine
+from src.utils.sectors import get_sector, positions_by_sector
 
 CYCLE_INTERVAL = 60  # seconds between automatic trading cycles
 
@@ -77,7 +78,12 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
             "take_profit": round(pos.take_profit, 2),
             "pnl": round(pos.unrealized_pnl(cp), 2),
             "pnl_pct": round(pos.unrealized_pnl_pct(cp) * 100, 2),
+            "sector": get_sector(sym) or "—",
         })
+    sector_exposure = {
+        sector: len(syms)
+        for sector, syms in positions_by_sector(portfolio.positions).items()
+    }
 
     summary = portfolio.get_summary(price_lookup) if price_lookup else {
         "total_value": portfolio.cash,
@@ -94,6 +100,8 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
     if signals:
         for sym, sig in signals.items():
             ind = ind_map.get(sym) if ind_map else None
+            # Pull 1d/1h/15m sub-scores when MTF is active
+            iscores = sig.indicator_scores or {}
             sig_list.append({
                 "symbol": sym,
                 "price": round(price_lookup.get(sym, 0), 2),
@@ -102,8 +110,25 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "confidence": round(sig.confidence, 3),
                 "rsi": round(ind.rsi, 1) if ind and ind.rsi else None,
                 "reasons": sig.reasons[:3],
+                "tf_1d":  round(iscores["1d"],  3) if "1d"  in iscores else None,
+                "tf_1h":  round(iscores["1h"],  3) if "1h"  in iscores else None,
+                "tf_15m": round(iscores["15m"], 3) if "15m" in iscores else None,
+                "sector": get_sector(sym) or "—",
             })
         sig_list.sort(key=lambda x: -abs(x["score"]))
+
+    # Earnings warnings — {symbol: days_until_earnings} for watchlist symbols
+    earnings_warnings: dict = {}
+    if _engine.earnings_cal:
+        for sym in _engine.watchlist:
+            try:
+                if _engine.earnings_cal.has_upcoming_earnings(sym):
+                    cached_dt = _engine.earnings_cal._cache.get(sym)
+                    if cached_dt:
+                        days_away = max(0, (cached_dt - datetime.now()).days)
+                        earnings_warnings[sym] = days_away
+            except Exception:
+                pass
 
     trades_list = [
         {
@@ -160,6 +185,11 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
             "ntfy": bool(config.ntfy_topic),
             "pushover": bool(config.pushover_token and config.pushover_user),
         },
+        "mtf_enabled": config.use_multi_timeframe,
+        "sector_exposure": sector_exposure,
+        "max_per_sector": config.max_positions_per_sector,
+        "earnings_enabled": config.use_earnings_protection,
+        "earnings_warnings": earnings_warnings,
     }
 
 
@@ -190,6 +220,11 @@ def api_state():
     global _last_state
     with _lock:
         try:
+            if config.use_alpaca:
+                try:
+                    _engine.executor.sync_portfolio(_engine.portfolio, risk_mgr=_engine.risk)
+                except Exception as sync_err:
+                    log.warning(f"Position sync failed: {sync_err}")
             signals, prices, ind_map = _engine.get_signals()
             _last_state = _build_state(signals, prices, ind_map)
         except Exception as e:
@@ -224,6 +259,11 @@ def api_rescan():
     global _last_state
     with _lock:
         try:
+            if config.use_alpaca:
+                try:
+                    _engine.executor.sync_portfolio(_engine.portfolio, risk_mgr=_engine.risk)
+                except Exception as sync_err:
+                    log.warning(f"Position sync failed: {sync_err}")
             _engine.refresh_watchlist()
             signals, prices, ind_map = _engine.get_signals()
             _last_state = _build_state(signals, prices, ind_map)
@@ -268,6 +308,15 @@ def api_stats():
             "pushover_enabled":  bool(config.pushover_token and config.pushover_user),
         },
     })
+
+
+@app.route("/api/journal")
+def api_journal():
+    try:
+        entries = list(reversed(_engine.journal.read_recent(200)))
+        return jsonify({"ok": True, "entries": entries, "stats": _engine.journal.stats()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
@@ -366,6 +415,16 @@ tr:hover td{background:#263044}
 @keyframes voo-pulse{0%,100%{opacity:1}50%{opacity:.8}}
 .btn-voo{background:#1d4ed8;color:#fff;font-size:12px;padding:5px 12px}
 .btn-voo:hover{opacity:.85}
+
+/* ── Sector exposure strip ───────────────────────────────────────────────── */
+.sector-strip{display:flex;flex-wrap:wrap;gap:6px;padding:10px 14px;border-bottom:1px solid #334155}
+.sector-chip{padding:3px 10px;border-radius:99px;font-size:11px;font-weight:600;background:#1e3a5f;color:#93c5fd;border:1px solid #1d4ed8}
+.sector-chip.near-limit{background:#451a03;color:#fdba74;border-color:#92400e}
+.sector-chip.at-limit{background:#7f1d1d;color:#fca5a5;border-color:#b91c1c}
+
+/* ── MTF sub-scores ──────────────────────────────────────────────────────── */
+.mtf-scores{font-size:10px;color:#64748b;margin-top:2px;letter-spacing:.2px}
+.mtf-scores span{margin-right:5px;white-space:nowrap}
 
 /* ── Misc ────────────────────────────────────────────────────────────────── */
 .empty{padding:28px;text-align:center;color:#475569}
@@ -495,12 +554,14 @@ tr:hover td{background:#263044}
 
   <!-- signal analysis -->
   <div class="panel grid1">
-    <div class="panel-title">Signal Analysis <span class="count" id="sig-count">0</span></div>
+    <div class="panel-title">Signal Analysis <span class="count" id="sig-count">0</span>
+      <span id="mtf-badge" style="display:none;margin-left:6px;font-size:10px;padding:2px 8px;border-radius:99px;background:#1e3a5f;color:#93c5fd;font-weight:600">MTF ON · 1d 50% · 1h 30% · 15m 20%</span>
+    </div>
     <div class="tbl-wrap"><table>
       <thead><tr>
-        <th>Ticker</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th>
+        <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th>
       </tr></thead>
-      <tbody id="sig-body"><tr><td colspan="5" class="empty">No data yet — click Refresh</td></tr></tbody>
+      <tbody id="sig-body"><tr><td colspan="6" class="empty">No data yet — click Refresh</td></tr></tbody>
     </table></div>
   </div>
 
@@ -508,11 +569,12 @@ tr:hover td{background:#263044}
   <div class="grid2">
     <div class="panel">
       <div class="panel-title">Positions <span class="count" id="pos-count">0</span></div>
+      <div class="sector-strip" id="sector-strip" style="display:none"></div>
       <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Ticker</th><th>Entry</th><th>Current</th><th>Qty</th><th>Unrealized P&amp;L</th>
+          <th>Ticker</th><th>Sector</th><th>Entry</th><th>Current</th><th>Qty</th><th>Unrealized P&amp;L</th>
         </tr></thead>
-        <tbody id="pos-body"><tr><td colspan="5" class="empty">No open positions</td></tr></tbody>
+        <tbody id="pos-body"><tr><td colspan="6" class="empty">No open positions</td></tr></tbody>
       </table></div>
     </div>
     <div class="panel">
@@ -603,23 +665,41 @@ function applyState(s) {
       const score  = scan && scan.scores  ? scan.scores[sym]  : null;
       const col = action === 'BUY' ? '#22c55e' : action === 'SELL' ? '#ef4444' : '#94a3b8';
       const scoreStr = score != null ? ` ${score >= 0 ? '+' : ''}${score}` : '';
-      return `<span style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600">
-        <span style="color:${col}">${sym}</span><span style="color:#475569;font-size:11px">${scoreStr}</span>
+      const earnDays = s.earnings_warnings && s.earnings_warnings[sym] != null ? s.earnings_warnings[sym] : null;
+      const earnBadge = earnDays != null
+        ? `<span style="color:#f97316;font-size:10px;margin-left:4px" title="Earnings in ${earnDays}d — buys blocked">⚠ ${earnDays}d</span>`
+        : '';
+      return `<span style="background:#1e293b;border:1px solid ${earnDays != null ? '#92400e' : '#334155'};border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600">
+        <span style="color:${col}">${sym}</span><span style="color:#475569;font-size:11px">${scoreStr}</span>${earnBadge}
       </span>`;
     }).join('');
   }
+
+  // MTF badge
+  const mtfBadge = document.getElementById('mtf-badge');
+  if (s.mtf_enabled) mtfBadge.style.display = 'inline-block';
+  else               mtfBadge.style.display = 'none';
 
   // signals
   document.getElementById('sig-count').textContent = s.signals.length;
   const sb = document.getElementById('sig-body');
   if (!s.signals.length) {
-    sb.innerHTML = '<tr><td colspan="5" class="empty">No signals — click Refresh</td></tr>';
+    sb.innerHTML = '<tr><td colspan="6" class="empty">No signals — click Refresh</td></tr>';
   } else {
     sb.innerHTML = s.signals.map(r => {
       const barPct = Math.round(Math.abs(r.score) * 100);
       const barCol = r.action === 'BUY' ? '#22c55e' : r.action === 'SELL' ? '#ef4444' : '#6b7280';
+      const fmtTF  = v => v == null ? '' : `<span style="color:${v>=0?'#4ade80':'#f87171'}">${v>=0?'+':''}${fmt(v,3)}</span>`;
+      const mtfRow = s.mtf_enabled && (r.tf_1d != null || r.tf_1h != null || r.tf_15m != null)
+        ? `<div class="mtf-scores">
+             <span>1d ${fmtTF(r.tf_1d)}</span>
+             <span>1h ${fmtTF(r.tf_1h)}</span>
+             <span>15m ${fmtTF(r.tf_15m)}</span>
+           </div>`
+        : '';
       return `<tr>
         <td style="font-weight:600">${r.symbol}</td>
+        <td style="color:#64748b;font-size:12px">${r.sector||'—'}</td>
         <td>$${fmt(r.price)}</td>
         <td><span class="pill pill-${r.action}">${r.action}</span></td>
         <td>
@@ -627,20 +707,38 @@ function applyState(s) {
             <span style="color:${barCol};font-weight:600">${r.score >= 0 ? '+' : ''}${fmt(r.score, 3)}</span>
             <div class="score-bar-bg"><div class="score-bar" style="width:${barPct}%;background:${barCol}"></div></div>
           </div>
+          ${mtfRow}
         </td>
         <td>${r.rsi != null ? fmt(r.rsi, 1) : '—'}</td>
       </tr>`;
     }).join('');
   }
 
-  // positions — columns: Ticker, Entry Price, Current Price, Qty, Unrealized P&L
+  // sector exposure strip
+  const strip = document.getElementById('sector-strip');
+  const maxPerSector = s.max_per_sector || 3;
+  const expo = s.sector_exposure || {};
+  if (s.positions.length && Object.keys(expo).length) {
+    strip.style.display = 'flex';
+    strip.innerHTML = Object.entries(expo).map(([sec, cnt]) => {
+      const cls2 = cnt >= maxPerSector ? 'sector-chip at-limit'
+                 : cnt >= maxPerSector - 1 ? 'sector-chip near-limit'
+                 : 'sector-chip';
+      return `<span class="${cls2}">${sec} ${cnt}/${maxPerSector}</span>`;
+    }).join('');
+  } else {
+    strip.style.display = 'none';
+  }
+
+  // positions — Ticker, Sector, Entry, Current, Qty, Unrealized P&L
   document.getElementById('pos-count').textContent = s.positions.length;
   const pb = document.getElementById('pos-body');
   if (!s.positions.length) {
-    pb.innerHTML = '<tr><td colspan="5" class="empty">No open positions</td></tr>';
+    pb.innerHTML = '<tr><td colspan="6" class="empty">No open positions</td></tr>';
   } else {
     pb.innerHTML = s.positions.map(p => `<tr>
       <td style="font-weight:600">${p.symbol}</td>
+      <td style="color:#64748b;font-size:12px">${p.sector||'—'}</td>
       <td>$${fmt(p.entry_price)}</td>
       <td>$${fmt(p.current_price)}</td>
       <td>${p.shares}</td>
@@ -940,6 +1038,23 @@ tr:hover td{background:#263044}
       </table>
     </div>
   </div>
+
+  <!-- Trade journal — from persisted JSONL with indicator snapshots -->
+  <div class="panel">
+    <div class="panel-title">
+      Trade Journal
+      <span id="journal-ct" style="background:#334155;color:#94a3b8;border-radius:99px;padding:1px 8px;font-size:11px">0</span>
+      <span style="color:#475569;font-size:11px;margin-left:8px">persisted · includes indicator snapshots</span>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>P&amp;L</th><th>RSI</th><th>Score</th><th>Reason</th>
+        </tr></thead>
+        <tbody id="journal-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
 </main>
 
 <script>
@@ -1091,6 +1206,37 @@ function renderTrades(trades) {
   }).join('');
 }
 
+function renderJournal(entries) {
+  const ct = document.getElementById('journal-ct');
+  const tbody = document.getElementById('journal-body');
+  ct.textContent = entries.length;
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">No journal entries yet — trades are logged automatically</td></tr>';
+    return;
+  }
+  tbody.innerHTML = entries.map(e => {
+    const ind = e.indicators || {};
+    const rsi   = ind.rsi    != null ? fmt(ind.rsi, 1)    : '—';
+    const score = ind.score  != null ? ((ind.score >= 0 ? '+' : '') + fmt(ind.score, 3)) : '—';
+    const scoreCol = ind.score > 0 ? '#4ade80' : ind.score < 0 ? '#f87171' : '#94a3b8';
+    const pnlStr = e.pnl != null
+      ? `<span class="${e.pnl>0?'pos':'neg'}">${e.pnl>=0?'+':'-'}$${fmt(Math.abs(e.pnl))}${e.pnl_pct!=null?' ('+((e.pnl_pct>=0?'+':'')+fmt(e.pnl_pct*100))+'%)':''}</span>`
+      : '—';
+    const ts = e.timestamp ? e.timestamp.replace('T',' ').slice(0,16) : '—';
+    return `<tr>
+      <td style="color:#64748b;font-size:11px">${ts}</td>
+      <td style="font-weight:600">${e.symbol}</td>
+      <td><span class="pill pill-${e.action}">${e.action}</span></td>
+      <td>${e.shares}</td>
+      <td>$${fmt(e.price)}</td>
+      <td>${pnlStr}</td>
+      <td style="color:#94a3b8">${rsi}</td>
+      <td style="color:${scoreCol};font-weight:600">${score}</td>
+      <td style="color:#64748b;font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">${e.reason||'—'}</td>
+    </tr>`;
+  }).join('');
+}
+
 fetch('/api/stats')
   .then(r => r.json())
   .then(data => {
@@ -1101,6 +1247,14 @@ fetch('/api/stats')
   })
   .catch(e => {
     document.querySelector('main').innerHTML = '<p style="color:#f87171;padding:24px">Failed to load stats: ' + e + '</p>';
+  });
+
+fetch('/api/journal')
+  .then(r => r.json())
+  .then(data => { if (data.ok) renderJournal(data.entries); })
+  .catch(() => {
+    document.getElementById('journal-body').innerHTML =
+      '<tr><td colspan="9" class="empty" style="color:#f87171">Failed to load journal</td></tr>';
   });
 </script>
 </body>
