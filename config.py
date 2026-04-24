@@ -63,5 +63,28 @@ class TradingConfig:
     alpaca_api_key: str = field(default_factory=lambda: os.getenv("ALPACA_API_KEY", ""))
     alpaca_secret_key: str = field(default_factory=lambda: os.getenv("ALPACA_SECRET_KEY", ""))
 
+    # ── Fundamental filter ────────────────────────────────────────────────────
+    use_fundamental_filter: bool = True    # P/E < 30, D/E < 2, positive FCF + EPS growth
+    fundamental_pe_max: float = 30.0
+    fundamental_de_max: float = 2.0
+
+    # ── Sector diversification ────────────────────────────────────────────────
+    max_positions_per_sector: int = 3
+
+    # ── Multiple timeframes ───────────────────────────────────────────────────
+    use_multi_timeframe: bool = False      # blends 1d/1h/15m signals when True
+
+    # ── Earnings calendar protection ──────────────────────────────────────────
+    use_earnings_protection: bool = True
+    earnings_buffer_days: int = 3
+
+    # ── VOO 200-week MA monitor ───────────────────────────────────────────────
+    voo_alert_threshold_pct: float = 2.0
+
+    # ── Notifications ─────────────────────────────────────────────────────────
+    ntfy_topic: str = field(default_factory=lambda: os.getenv("NTFY_TOPIC", ""))
+    pushover_token: str = field(default_factory=lambda: os.getenv("PUSHOVER_TOKEN", ""))
+    pushover_user: str = field(default_factory=lambda: os.getenv("PUSHOVER_USER", ""))
+
 
 config = TradingConfig()

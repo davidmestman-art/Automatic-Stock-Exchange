@@ -36,6 +36,7 @@ class Trade:
     reason: str
     pnl: Optional[float] = None
     pnl_pct: Optional[float] = None
+    indicator_snapshot: Optional[dict] = None
 
 
 class Portfolio:
@@ -67,6 +68,7 @@ class Portfolio:
         stop_loss: float,
         take_profit: float,
         reason: str,
+        indicator_snapshot: Optional[dict] = None,
     ) -> bool:
         cost = shares * price
         if cost > self.cash:
@@ -88,11 +90,18 @@ class Portfolio:
                 price=price,
                 timestamp=datetime.now(),
                 reason=reason,
+                indicator_snapshot=indicator_snapshot,
             )
         )
         return True
 
-    def sell(self, symbol: str, price: float, reason: str) -> Optional[Trade]:
+    def sell(
+        self,
+        symbol: str,
+        price: float,
+        reason: str,
+        indicator_snapshot: Optional[dict] = None,
+    ) -> Optional[Trade]:
         if symbol not in self.positions:
             return None
         pos = self.positions.pop(symbol)
@@ -109,6 +118,7 @@ class Portfolio:
             reason=reason,
             pnl=pnl,
             pnl_pct=pnl_pct,
+            indicator_snapshot=indicator_snapshot,
         )
         self.trades.append(trade)
         return trade

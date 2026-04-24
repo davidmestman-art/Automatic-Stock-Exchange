@@ -25,8 +25,22 @@ _engine = TradingEngine(config)
 _last_state: dict = {}
 _last_cycle_at: Optional[datetime] = None
 _next_cycle_at: Optional[datetime] = None
+_equity_snapshots: list = []          # [{ts, value}] — portfolio value over time
+_last_snapshot_ts: Optional[datetime] = None
 
 log = logging.getLogger(__name__)
+
+
+def _record_snapshot(total_value: float) -> None:
+    """Append an equity snapshot at most once per minute."""
+    global _last_snapshot_ts
+    now = datetime.now()
+    if _last_snapshot_ts and (now - _last_snapshot_ts).total_seconds() < 60:
+        return
+    _equity_snapshots.append({"ts": now.isoformat(), "value": round(total_value, 2)})
+    _last_snapshot_ts = now
+    if len(_equity_snapshots) > 2000:        # ~33 hours at 1/min
+        del _equity_snapshots[:-2000]
 
 
 def _background_loop() -> None:
@@ -74,6 +88,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "open_positions": len(portfolio.positions),
         "total_trades": len(portfolio.trades),
     }
+    _record_snapshot(summary["total_value"])
 
     sig_list = []
     if signals:
@@ -140,6 +155,31 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "cycle_interval": CYCLE_INTERVAL,
         "watchlist": _engine.watchlist,
         "scan": _engine.scanner.last_result.to_dict() if _engine.scanner.last_result else None,
+        "voo": _engine.voo_monitor.last_status.to_dict() if _engine.voo_monitor.last_status else None,
+        "notifications": {
+            "ntfy": bool(config.ntfy_topic),
+            "pushover": bool(config.pushover_token and config.pushover_user),
+        },
+    }
+
+
+def _trade_stats() -> dict:
+    """Compute win/loss stats from the in-memory trade history."""
+    sells = [t for t in _engine.portfolio.trades if t.action == "SELL" and t.pnl is not None]
+    if not sells:
+        return {"sell_trades": 0, "win_rate": None, "avg_gain": None, "avg_loss": None,
+                "best_trade": None, "worst_trade": None, "total_realized_pnl": 0.0}
+    pnls = [t.pnl for t in sells]
+    winners = [p for p in pnls if p > 0]
+    losers  = [p for p in pnls if p <= 0]
+    return {
+        "sell_trades":        len(sells),
+        "win_rate":           round(len(winners) / len(sells) * 100, 1),
+        "avg_gain":           round(sum(winners) / len(winners), 2) if winners else 0,
+        "avg_loss":           round(sum(losers)  / len(losers),  2) if losers  else 0,
+        "best_trade":         round(max(pnls), 2),
+        "worst_trade":        round(min(pnls), 2),
+        "total_realized_pnl": round(sum(pnls), 2),
     }
 
 
@@ -170,6 +210,15 @@ def api_cycle():
             return jsonify({"ok": False, "error": str(e), "detail": err}), 500
 
 
+@app.route("/api/voo", methods=["POST"])
+def api_voo():
+    try:
+        status = _engine.voo_monitor.check(force=True)
+        return jsonify({"ok": True, "voo": status.to_dict() if status else None})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/rescan", methods=["POST"])
 def api_rescan():
     global _last_state
@@ -181,6 +230,44 @@ def api_rescan():
             return jsonify({"ok": True, "state": _last_state})
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/stats")
+def api_stats():
+    prices = {}
+    try:
+        _, prices, _ = _engine.get_signals()
+    except Exception:
+        pass
+    portfolio = _engine.portfolio
+    summary   = portfolio.get_summary(prices) if prices else {"total_value": portfolio.cash}
+
+    all_trades = [
+        {
+            "timestamp": t.timestamp.strftime("%Y-%m-%d %H:%M"),
+            "action":    t.action,
+            "symbol":    t.symbol,
+            "shares":    round(t.shares, 4),
+            "price":     round(t.price, 2),
+            "pnl":       round(t.pnl,     2) if t.pnl     is not None else None,
+            "pnl_pct":   round(t.pnl_pct * 100, 2) if t.pnl_pct is not None else None,
+            "reason":    t.reason,
+        }
+        for t in reversed(portfolio.trades)
+    ]
+
+    return jsonify({
+        "trade_stats":      _trade_stats(),
+        "equity_snapshots": _equity_snapshots,
+        "initial_capital":  config.initial_capital,
+        "current_value":    round(summary["total_value"], 2),
+        "trades":           all_trades,
+        "notifications": {
+            "ntfy_enabled":      bool(config.ntfy_topic),
+            "ntfy_topic":        config.ntfy_topic,
+            "pushover_enabled":  bool(config.pushover_token and config.pushover_user),
+        },
+    })
 
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
@@ -196,79 +283,134 @@ HTML = """<!doctype html>
 body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
 a{color:inherit;text-decoration:none}
 
-/* layout */
-header{background:#1e293b;border-bottom:1px solid #334155;padding:14px 24px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:10}
-.logo{font-size:18px;font-weight:700;color:#f1f5f9;letter-spacing:.5px}
-.badge{padding:3px 10px;border-radius:99px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+/* ── Header ──────────────────────────────────────────────────────────────── */
+header{background:#1e293b;border-bottom:1px solid #334155;padding:12px 20px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:10;flex-wrap:wrap}
+.logo{font-size:17px;font-weight:700;color:#f1f5f9;letter-spacing:.5px;white-space:nowrap}
+.badge{padding:3px 10px;border-radius:99px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
 .badge-paper{background:#1d4ed8;color:#bfdbfe}
 .badge-live{background:#7f1d1d;color:#fecaca}
 .badge-sim{background:#374151;color:#9ca3af}
-.market-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
+.market-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px;flex-shrink:0}
 .market-open{background:#22c55e;box-shadow:0 0 6px #22c55e}
 .market-closed{background:#ef4444}
 .market-unknown{background:#6b7280}
-.hdr-right{margin-left:auto;display:flex;align-items:center;gap:10px}
-.ts{font-size:11px;color:#64748b}
-button{cursor:pointer;padding:6px 16px;border-radius:6px;border:none;font-size:13px;font-weight:600;transition:opacity .15s}
+#market-status{font-size:12px;color:#94a3b8;white-space:nowrap}
+.hdr-right{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ts{font-size:11px;color:#64748b;white-space:nowrap}
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+button{cursor:pointer;padding:7px 16px;border-radius:6px;border:none;font-size:13px;font-weight:600;transition:opacity .15s;min-height:36px;touch-action:manipulation}
 .btn-refresh{background:#334155;color:#e2e8f0}
 .btn-refresh:hover{opacity:.8}
 .btn-rescan{background:#7c3aed;color:#fff}
 .btn-rescan:hover{opacity:.85}
-.btn-rescan:disabled{opacity:.5;cursor:not-allowed}
+.btn-rescan:disabled,.btn-cycle:disabled,.btn-voo:disabled{opacity:.5;cursor:not-allowed}
 .btn-cycle{background:#0ea5e9;color:#fff}
 .btn-cycle:hover{opacity:.85}
-.btn-cycle:disabled{opacity:.5;cursor:not-allowed}
 
-main{padding:20px 24px;max-width:1400px;margin:0 auto}
+/* ── Layout ──────────────────────────────────────────────────────────────── */
+main{padding:16px 20px;max-width:1400px;margin:0 auto}
 
-/* stat cards */
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;margin-bottom:20px}
-.card{background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155}
+/* ── Stat cards ──────────────────────────────────────────────────────────── */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px}
+.card{background:#1e293b;border-radius:10px;padding:14px 16px;border:1px solid #334155}
 .card-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
 .card-value{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
 .card-sub{font-size:11px;color:#64748b;margin-top:3px}
 .pos{color:#22c55e}.neg{color:#ef4444}.neu{color:#e2e8f0}
 
-/* grid */
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
-.grid1{margin-bottom:16px}
-@media(max-width:900px){.grid2{grid-template-columns:1fr}}
+/* ── Grid ────────────────────────────────────────────────────────────────── */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+.grid1{margin-bottom:14px}
 
-/* panels */
+/* ── Panels ──────────────────────────────────────────────────────────────── */
 .panel{background:#1e293b;border-radius:10px;border:1px solid #334155;overflow:hidden}
-.panel-title{padding:12px 16px;font-weight:600;font-size:13px;color:#94a3b8;border-bottom:1px solid #334155;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:6px}
+.panel-title{padding:11px 14px;font-weight:600;font-size:12px;color:#94a3b8;border-bottom:1px solid #334155;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .panel-title .count{background:#334155;color:#94a3b8;border-radius:99px;padding:1px 8px;font-size:11px}
 
-/* tables */
-table{width:100%;border-collapse:collapse}
-th{padding:8px 12px;text-align:left;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #334155}
-td{padding:9px 12px;border-bottom:1px solid #1e293b;font-variant-numeric:tabular-nums}
+/* ── Table scroll wrapper ────────────────────────────────────────────────── */
+.tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+
+/* ── Tables ──────────────────────────────────────────────────────────────── */
+table{width:100%;border-collapse:collapse;min-width:340px}
+th{padding:8px 12px;text-align:left;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #334155;white-space:nowrap}
+td{padding:9px 12px;border-bottom:1px solid #1e293b;font-variant-numeric:tabular-nums;white-space:nowrap}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:#263044}
 
-/* signal pill */
+/* ── Signal pill ─────────────────────────────────────────────────────────── */
 .pill{display:inline-block;padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px}
 .pill-BUY{background:#14532d;color:#4ade80}
 .pill-SELL{background:#7f1d1d;color:#f87171}
 .pill-HOLD{background:#374151;color:#9ca3af}
 
-/* score bar */
+/* ── Score bar ───────────────────────────────────────────────────────────── */
 .score-wrap{display:flex;align-items:center;gap:6px}
-.score-bar-bg{width:60px;height:5px;background:#334155;border-radius:3px;overflow:hidden}
+.score-bar-bg{width:52px;height:5px;background:#334155;border-radius:3px;overflow:hidden;flex-shrink:0}
 .score-bar{height:5px;border-radius:3px;transition:width .3s}
 
-/* empty state */
-.empty{padding:32px;text-align:center;color:#475569}
+/* ── VOO monitor ─────────────────────────────────────────────────────────── */
+.voo-panel{background:#1e293b;border-radius:10px;border:1px solid #334155;overflow:hidden;margin-bottom:14px}
+.voo-header{padding:11px 14px;border-bottom:1px solid #334155;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.voo-title{font-weight:600;font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px}
+.voo-checked{font-size:11px;color:#475569;margin-left:auto}
+.voo-stats{display:grid;grid-template-columns:repeat(3,1fr)}
+.voo-stat{padding:16px 18px;border-right:1px solid #334155}
+.voo-stat:last-child{border-right:none}
+.voo-stat-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.voo-stat-value{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
+.voo-alert-bar{padding:13px 18px;display:flex;align-items:center;gap:10px;font-size:13px;font-weight:600}
+.voo-above{background:#0f2318;color:#4ade80;border-top:1px solid #166534}
+.voo-below{background:#14532d;color:#dcfce7;border-top:1px solid #22c55e;animation:voo-pulse 2s ease-in-out infinite}
+.voo-loading{padding:22px;text-align:center;color:#475569;font-size:13px}
+@keyframes voo-pulse{0%,100%{opacity:1}50%{opacity:.8}}
+.btn-voo{background:#1d4ed8;color:#fff;font-size:12px;padding:5px 12px}
+.btn-voo:hover{opacity:.85}
 
-/* error banner */
-.error-banner{background:#7f1d1d;color:#fecaca;border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:13px;display:none}
-
-/* spinner */
+/* ── Misc ────────────────────────────────────────────────────────────────── */
+.empty{padding:28px;text-align:center;color:#475569}
+.error-banner{background:#7f1d1d;color:#fecaca;border-radius:8px;padding:10px 16px;margin-bottom:14px;font-size:13px;display:none}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid #334155;border-top-color:#0ea5e9;border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-
 .loading-overlay{display:none;position:fixed;inset:0;background:rgba(15,23,42,.7);z-index:50;align-items:center;justify-content:center;flex-direction:column;gap:12px}
 .loading-overlay.active{display:flex}
+
+/* ── Responsive — tablet (≤ 900 px) ─────────────────────────────────────── */
+@media(max-width:900px){
+  .grid2{grid-template-columns:1fr}
+}
+
+/* ── Responsive — phone (≤ 600 px) ──────────────────────────────────────── */
+@media(max-width:600px){
+  header{padding:10px 14px;gap:8px}
+  .logo{font-size:15px}
+  .ts{display:none}
+  .hdr-right{width:100%;margin-left:0;justify-content:flex-end}
+  .btn-refresh,.btn-rescan,.btn-cycle{padding:8px 12px;font-size:12px;flex:1;text-align:center}
+
+  main{padding:10px 12px}
+
+  .cards{grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+  .card{padding:11px 12px}
+  .card-value{font-size:18px}
+  .card-label{font-size:10px}
+
+  .voo-stats{grid-template-columns:1fr}
+  .voo-stat{border-right:none;border-bottom:1px solid #334155;padding:12px 14px}
+  .voo-stat:last-child{border-bottom:none}
+  .voo-stat-value{font-size:20px}
+  .voo-header{gap:6px}
+  .voo-checked{width:100%;margin-left:0;font-size:10px}
+  .btn-voo{width:100%;margin-top:4px}
+
+  .panel-title{font-size:11px;padding:10px 12px}
+  th{padding:7px 8px;font-size:10px}
+  td{padding:8px 8px;font-size:12px}
+  table{min-width:300px}
+
+  .score-bar-bg{width:36px}
+  .pill{font-size:10px;padding:2px 6px}
+}
 </style>
 </head>
 <body>
@@ -288,9 +430,11 @@ tr:hover td{background:#263044}
   <div class="hdr-right">
     <span class="ts" id="cycle-info" style="color:#475569">—</span>
     <span class="ts" id="last-ts">—</span>
+    <span id="notif-indicator" title="Notifications" style="font-size:17px;cursor:default;opacity:.4" onclick="window.location='/stats'">🔔</span>
     <button class="btn-refresh" onclick="refresh()">Refresh</button>
     <button class="btn-rescan" id="btn-rescan" onclick="rescan()">Re-scan</button>
     <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
+    <button class="btn-refresh" onclick="window.location='/stats'" style="background:#1e3a5f;color:#93c5fd">Stats</button>
   </div>
 </header>
 
@@ -327,46 +471,58 @@ tr:hover td{background:#263044}
     </div>
   </div>
 
+  <!-- VOO 200-week MA monitor -->
+  <div class="voo-panel" id="voo-panel">
+    <div class="voo-header">
+      <span class="voo-title">VOO — 200-Week Moving Average Monitor</span>
+      <span class="voo-checked" id="voo-checked">—</span>
+      <button class="btn-voo" onclick="refreshVOO()">Refresh VOO</button>
+    </div>
+    <div id="voo-body"><div class="voo-loading">Waiting for first cycle… click Refresh VOO to load now.</div></div>
+  </div>
+
   <!-- watchlist scan -->
   <div class="panel grid1" id="scan-panel">
     <div class="panel-title">
       Watchlist
       <span class="count" id="wl-count">0</span>
       <span id="scan-meta" style="font-size:11px;color:#475569;margin-left:8px">—</span>
+      <span id="fund-badge" style="display:none;margin-left:auto;font-size:11px;padding:2px 10px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600"></span>
     </div>
+    <div id="fund-bar" style="display:none;padding:8px 16px;border-bottom:1px solid #334155;font-size:12px;color:#94a3b8;display:none;gap:16px;flex-wrap:wrap"></div>
     <div style="display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px" id="wl-chips"></div>
   </div>
 
   <!-- signal analysis -->
   <div class="panel grid1">
     <div class="panel-title">Signal Analysis <span class="count" id="sig-count">0</span></div>
-    <table>
+    <div class="tbl-wrap"><table>
       <thead><tr>
         <th>Ticker</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th>
       </tr></thead>
       <tbody id="sig-body"><tr><td colspan="5" class="empty">No data yet — click Refresh</td></tr></tbody>
-    </table>
+    </table></div>
   </div>
 
   <!-- positions + trades -->
   <div class="grid2">
     <div class="panel">
       <div class="panel-title">Positions <span class="count" id="pos-count">0</span></div>
-      <table>
+      <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Ticker</th><th>Entry Price</th><th>Current Price</th><th>Qty</th><th>Unrealized P&amp;L</th>
+          <th>Ticker</th><th>Entry</th><th>Current</th><th>Qty</th><th>Unrealized P&amp;L</th>
         </tr></thead>
         <tbody id="pos-body"><tr><td colspan="5" class="empty">No open positions</td></tr></tbody>
-      </table>
+      </table></div>
     </div>
     <div class="panel">
       <div class="panel-title">Trades <span class="count" id="trade-count">0</span></div>
-      <table>
+      <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>Realized P&amp;L</th>
+          <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>P&amp;L</th>
         </tr></thead>
         <tbody id="trade-body"><tr><td colspan="6" class="empty">No trades yet</td></tr></tbody>
-      </table>
+      </table></div>
     </div>
   </div>
 </main>
@@ -420,7 +576,23 @@ function applyState(s) {
   const scan = s.scan;
   if (scan) {
     document.getElementById('scan-meta').textContent =
-      `scanned ${scan.scanned_at}  ·  volume filter: top ${scan.volume_candidates_count}  ·  signal ranked to ${wl.length}`;
+      `scanned ${scan.scanned_at}  ·  volume top ${scan.volume_candidates_count}  ·  signal ranked to ${wl.length}`;
+
+    // fundamental filter badge + bar
+    const fundBadge = document.getElementById('fund-badge');
+    const fundBar   = document.getElementById('fund-bar');
+    if (scan.fund_enabled) {
+      fundBadge.style.display = 'inline-block';
+      fundBadge.textContent   = `Fundamentals ON  ✓${scan.fund_passed} ✗${scan.fund_failed}`;
+      fundBar.style.display   = 'flex';
+      fundBar.innerHTML =
+        `<span style="color:#4ade80">✓ ${scan.fund_passed} passed</span>` +
+        `<span style="color:#f87171">✗ ${scan.fund_failed} filtered out</span>` +
+        `<span style="color:#475569">P/E &lt; 30 · D/E &lt; 2 · Positive FCF · Positive EPS growth</span>`;
+    } else {
+      fundBadge.style.display = 'none';
+      fundBar.style.display   = 'none';
+    }
   }
   const chips = document.getElementById('wl-chips');
   if (!wl.length) {
@@ -492,10 +664,84 @@ function applyState(s) {
     </tr>`).join('');
   }
 
+  // notification bell — full opacity when at least one channel is configured
+  const bell = document.getElementById('notif-indicator');
+  if (s.notifications && (s.notifications.ntfy || s.notifications.pushover)) {
+    bell.style.opacity = '1';
+    bell.title = 'Notifications ON — click for Stats';
+  } else {
+    bell.style.opacity = '.35';
+    bell.title = 'Notifications OFF — click for setup';
+  }
+
+  // VOO panel
+  renderVOO(s.voo);
+
   // error
   const eb = document.getElementById('err-banner');
   if (s.error) { eb.textContent = '⚠ ' + s.error; eb.style.display = 'block'; }
   else { eb.style.display = 'none'; }
+}
+
+function renderVOO(voo) {
+  const body = document.getElementById('voo-body');
+  const checked = document.getElementById('voo-checked');
+  if (!voo) {
+    body.innerHTML = '<div class="voo-loading">Waiting for first cycle… click Refresh VOO to load now.</div>';
+    checked.textContent = '—';
+    return;
+  }
+  checked.textContent = 'Updated ' + voo.checked_at;
+
+  const gapSign = voo.gap_pct >= 0 ? '+' : '';
+  const gapCol  = voo.above_ma ? '#4ade80' : '#f87171';
+  const alertBar = voo.above_ma
+    ? `<div class="voo-alert-bar voo-above">
+         <span style="font-size:16px">✓</span>
+         VOO is <strong>ABOVE</strong> the 200-Week MA — broad market in long-term uptrend
+       </div>`
+    : `<div class="voo-alert-bar voo-below">
+         <span style="font-size:18px">🟢</span>
+         BUY ALERT — VOO is <strong>BELOW</strong> the 200-Week MA — rare long-term buying opportunity
+       </div>`;
+
+  body.innerHTML = `
+    <div class="voo-stats">
+      <div class="voo-stat">
+        <div class="voo-stat-label">VOO Price</div>
+        <div class="voo-stat-value neu">$${fmt(voo.price)}</div>
+      </div>
+      <div class="voo-stat">
+        <div class="voo-stat-label">200-Week MA</div>
+        <div class="voo-stat-value neu">$${fmt(voo.ma200w)}</div>
+      </div>
+      <div class="voo-stat">
+        <div class="voo-stat-label">Gap vs MA</div>
+        <div class="voo-stat-value" style="color:${gapCol}">${gapSign}${fmt(voo.gap_pct, 1)}%</div>
+      </div>
+    </div>
+    ${alertBar}`;
+}
+
+async function refreshVOO() {
+  const btn = document.querySelector('.btn-voo');
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  try {
+    const res  = await fetch('/api/voo', {method: 'POST'});
+    const data = await res.json();
+    if (data.ok) renderVOO(data.voo);
+    else {
+      document.getElementById('err-banner').textContent = 'VOO fetch error: ' + data.error;
+      document.getElementById('err-banner').style.display = 'block';
+    }
+  } catch(e) {
+    document.getElementById('err-banner').textContent = 'VOO fetch failed: ' + e;
+    document.getElementById('err-banner').style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Refresh VOO';
+  }
 }
 
 async function refresh() {
@@ -580,19 +826,342 @@ setInterval(refresh, 5000);
 </html>"""
 
 
+STATS_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Performance — NYSE Trading Engine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
+header{background:#1e293b;border-bottom:1px solid #334155;padding:12px 20px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:10}
+.logo{font-size:17px;font-weight:700;color:#f1f5f9}
+.back{font-size:12px;color:#64748b;cursor:pointer;padding:5px 10px;border-radius:6px;background:#334155;border:none;font-weight:600}
+.back:hover{opacity:.8}
+main{padding:16px 20px;max-width:1200px;margin:0 auto}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px}
+.card{background:#1e293b;border-radius:10px;padding:14px 16px;border:1px solid #334155}
+.card-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.card-value{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.card-sub{font-size:11px;color:#64748b;margin-top:3px}
+.pos{color:#22c55e}.neg{color:#ef4444}.neu{color:#e2e8f0}
+.panel{background:#1e293b;border-radius:10px;border:1px solid #334155;overflow:hidden;margin-bottom:14px}
+.panel-title{padding:11px 16px;font-weight:600;font-size:12px;color:#94a3b8;border-bottom:1px solid #334155;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:8px}
+.tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;min-width:400px}
+th{padding:8px 12px;text-align:left;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #334155;white-space:nowrap}
+td{padding:8px 12px;border-bottom:1px solid #1e293b;font-variant-numeric:tabular-nums;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#263044}
+.pill{display:inline-block;padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px}
+.pill-BUY{background:#14532d;color:#4ade80}
+.pill-SELL{background:#7f1d1d;color:#f87171}
+.empty{padding:28px;text-align:center;color:#475569}
+/* chart */
+.chart-wrap{padding:16px;background:#0f172a;min-height:180px;display:flex;align-items:center;justify-content:center}
+.chart-empty{color:#475569;font-size:13px}
+/* notification panel */
+.notif-row{display:flex;align-items:flex-start;gap:14px;padding:14px 16px;border-bottom:1px solid #334155}
+.notif-row:last-child{border-bottom:none}
+.notif-icon{font-size:22px;flex-shrink:0;margin-top:2px}
+.notif-head{font-weight:600;font-size:13px;margin-bottom:4px}
+.notif-body{font-size:12px;color:#94a3b8;line-height:1.6}
+.notif-body code{background:#334155;padding:1px 5px;border-radius:3px;font-size:11px;color:#e2e8f0}
+.badge-on{display:inline-block;padding:2px 8px;border-radius:99px;background:#14532d;color:#4ade80;font-size:11px;font-weight:600;margin-left:8px}
+.badge-off{display:inline-block;padding:2px 8px;border-radius:99px;background:#374151;color:#9ca3af;font-size:11px;font-weight:600;margin-left:8px}
+@media(max-width:600px){
+  .cards{grid-template-columns:1fr 1fr}
+  .card-value{font-size:18px}
+  main{padding:10px 12px}
+}
+</style>
+</head>
+<body>
+<header>
+  <button class="back" onclick="window.location='/'">← Dashboard</button>
+  <div class="logo">Performance &amp; Notifications</div>
+</header>
+<main>
+  <!-- Summary cards -->
+  <div class="cards">
+    <div class="card">
+      <div class="card-label">Win Rate</div>
+      <div class="card-value neu" id="s-winrate">—</div>
+      <div class="card-sub" id="s-winrate-sub">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Avg Gain</div>
+      <div class="card-value pos" id="s-avg-gain">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Avg Loss</div>
+      <div class="card-value neg" id="s-avg-loss">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Best Trade</div>
+      <div class="card-value pos" id="s-best">—</div>
+      <div class="card-sub" id="s-best-sym">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Worst Trade</div>
+      <div class="card-value neg" id="s-worst">—</div>
+      <div class="card-sub" id="s-worst-sym">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Total Realized P&amp;L</div>
+      <div class="card-value" id="s-total-pnl">—</div>
+    </div>
+  </div>
+
+  <!-- Equity chart -->
+  <div class="panel">
+    <div class="panel-title">Portfolio Value Over Time</div>
+    <div class="chart-wrap" id="chart-wrap">
+      <div class="chart-empty">Loading chart…</div>
+    </div>
+  </div>
+
+  <!-- Notifications setup -->
+  <div class="panel" id="notif-panel">
+    <div class="panel-title">🔔 Trade Notifications</div>
+    <div id="notif-body"></div>
+  </div>
+
+  <!-- All trades -->
+  <div class="panel">
+    <div class="panel-title">All Trades <span id="trade-ct" style="background:#334155;color:#94a3b8;border-radius:99px;padding:1px 8px;font-size:11px">0</span></div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>Realized P&amp;L</th><th>Reason</th>
+        </tr></thead>
+        <tbody id="trade-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+const fmt = (n, dec=2) => n == null ? '—' : n.toLocaleString('en-US',{minimumFractionDigits:dec,maximumFractionDigits:dec});
+const fmtD = (n, prefix='$') => n == null ? '—' : (n>=0?'+':'-') + prefix + fmt(Math.abs(n));
+const cls  = n => n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu';
+
+function renderCards(data) {
+  const ts = data.trade_stats;
+  if (!ts || ts.sell_trades === 0) {
+    ['s-winrate','s-avg-gain','s-avg-loss','s-best','s-worst','s-total-pnl']
+      .forEach(id => { const el = document.getElementById(id); if(el) el.textContent = '—'; });
+    document.getElementById('s-winrate-sub').textContent = 'No closed trades yet';
+    return;
+  }
+  const winEl = document.getElementById('s-winrate');
+  winEl.textContent = ts.win_rate + '%';
+  winEl.className = 'card-value ' + (ts.win_rate >= 50 ? 'pos' : 'neg');
+  document.getElementById('s-winrate-sub').textContent = ts.sell_trades + ' closed trades';
+
+  document.getElementById('s-avg-gain').textContent  = ts.avg_gain  ? '+$' + fmt(ts.avg_gain)  : '—';
+  document.getElementById('s-avg-loss').textContent  = ts.avg_loss  ? '-$' + fmt(Math.abs(ts.avg_loss))  : '—';
+  document.getElementById('s-best').textContent      = ts.best_trade  != null ? fmtD(ts.best_trade)  : '—';
+  document.getElementById('s-worst').textContent     = ts.worst_trade != null ? fmtD(ts.worst_trade) : '—';
+
+  const tpEl = document.getElementById('s-total-pnl');
+  tpEl.textContent  = fmtD(ts.total_realized_pnl);
+  tpEl.className    = 'card-value ' + cls(ts.total_realized_pnl);
+}
+
+function renderChart(snapshots, initialCapital) {
+  const wrap = document.getElementById('chart-wrap');
+  if (!snapshots || snapshots.length < 2) {
+    wrap.innerHTML = '<div class="chart-empty">Not enough data yet — chart updates as cycles run</div>';
+    return;
+  }
+
+  const W = 900, H = 220, PL = 56, PR = 16, PT = 16, PB = 36;
+  const iW = W - PL - PR, iH = H - PT - PB;
+
+  const values = snapshots.map(s => s.value);
+  const allVals = [...values, initialCapital];
+  const minV = Math.min(...allVals);
+  const maxV = Math.max(...allVals);
+  const range = maxV - minV || 1;
+
+  const px = i => PL + (i / (snapshots.length - 1)) * iW;
+  const py = v => PT + (1 - (v - minV) / range) * iH;
+
+  // Polyline points
+  const pts = snapshots.map((s,i) => `${px(i).toFixed(1)},${py(s.value).toFixed(1)}`).join(' ');
+
+  // Fill polygon (line + baseline)
+  const lastX = px(snapshots.length - 1);
+  const baselineY = py(Math.max(minV, Math.min(maxV, initialCapital)));
+  const fillPts = `${PL},${baselineY} ${pts} ${lastX},${baselineY}`;
+
+  const lastVal  = values[values.length - 1];
+  const lineCol  = lastVal >= initialCapital ? '#22c55e' : '#ef4444';
+  const fillCol  = lastVal >= initialCapital ? 'rgba(34,197,94,.1)' : 'rgba(239,68,68,.1)';
+  const baselineY2 = py(initialCapital);
+
+  // Y-axis labels (3 ticks)
+  const ticks = [minV, (minV+maxV)/2, maxV];
+  const yLabels = ticks.map(v =>
+    `<text x="${PL-6}" y="${(py(v)+4).toFixed(1)}" text-anchor="end" fill="#475569" font-size="10">\$${(v/1000).toFixed(1)}k</text>`
+  ).join('');
+
+  // X-axis labels (first + last)
+  const fmtTs = iso => { const d=new Date(iso); return (d.getMonth()+1)+'/'+d.getDate()+' '+d.getHours()+':'+(d.getMinutes()+'').padStart(2,'0'); };
+  const xFirst = `<text x="${PL}" y="${H-8}" text-anchor="start" fill="#475569" font-size="10">${fmtTs(snapshots[0].ts)}</text>`;
+  const xLast  = `<text x="${lastX}" y="${H-8}" text-anchor="end" fill="#475569" font-size="10">${fmtTs(snapshots[snapshots.length-1].ts)}</text>`;
+
+  wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block">
+    <polygon points="${fillPts}" fill="${fillCol}"/>
+    <line x1="${PL}" y1="${baselineY2.toFixed(1)}" x2="${W-PR}" y2="${baselineY2.toFixed(1)}"
+          stroke="#334155" stroke-width="1" stroke-dasharray="5,4"/>
+    <polyline points="${pts}" fill="none" stroke="${lineCol}" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="${px(snapshots.length-1).toFixed(1)}" cy="${py(lastVal).toFixed(1)}" r="3.5" fill="${lineCol}"/>
+    ${yLabels}${xFirst}${xLast}
+    <text x="${W/2}" y="${H-8}" text-anchor="middle" fill="#334155" font-size="10">— initial capital</text>
+  </svg>`;
+}
+
+function renderNotifications(n) {
+  const body = document.getElementById('notif-body');
+  const ntfyOn = n && n.ntfy_enabled;
+  const poOn   = n && n.pushover_enabled;
+
+  body.innerHTML = `
+    <div class="notif-row">
+      <div class="notif-icon">📲</div>
+      <div>
+        <div class="notif-head">ntfy.sh (free, no account needed) <span class="${ntfyOn?'badge-on':'badge-off'}">${ntfyOn?'ON':'OFF'}</span></div>
+        <div class="notif-body">
+          ${ntfyOn
+            ? `Sending alerts to topic <code>${n.ntfy_topic}</code>. Subscribe at <code>https://ntfy.sh/${n.ntfy_topic}</code> or in the ntfy app.`
+            : `Add <code>NTFY_TOPIC=your-topic-name</code> to your <code>.env</code> file, then restart the dashboard.<br>
+               Install the <strong>ntfy</strong> app on your phone and subscribe to the same topic — no account needed.`}
+        </div>
+      </div>
+    </div>
+    <div class="notif-row">
+      <div class="notif-icon">🔔</div>
+      <div>
+        <div class="notif-head">Pushover <span class="${poOn?'badge-on':'badge-off'}">${poOn?'ON':'OFF'}</span></div>
+        <div class="notif-body">
+          ${poOn
+            ? 'Pushover notifications are active.'
+            : `Add <code>PUSHOVER_TOKEN=your-app-token</code> and <code>PUSHOVER_USER=your-user-key</code> to your <code>.env</code> file.<br>
+               Get credentials at <strong>pushover.net</strong> (one-time $5 purchase, iOS &amp; Android).`}
+        </div>
+      </div>
+    </div>
+    <div class="notif-row">
+      <div class="notif-icon">⚡</div>
+      <div>
+        <div class="notif-head">What triggers an alert</div>
+        <div class="notif-body">
+          <strong>BUY executed</strong> — symbol, shares, price, reason<br>
+          <strong>SELL executed</strong> — symbol, realized P&amp;L (high priority if loss)<br>
+          <strong>Stop-loss triggered</strong> — same as sell, marked as stop<br>
+          <strong>VOO 200W MA alert</strong> — fires once per day when VOO crosses or is near the MA
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderTrades(trades) {
+  document.getElementById('trade-ct').textContent = trades.length;
+  const tbody = document.getElementById('trade-body');
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No trades yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.map(t => {
+    const pnlStr = t.pnl != null
+      ? `<span class="${t.pnl>0?'pos':'neg'}">${t.pnl>=0?'+':'-'}$${fmt(Math.abs(t.pnl))} (${t.pnl_pct>=0?'+':''}${fmt(t.pnl_pct)}%)</span>`
+      : '—';
+    return `<tr>
+      <td style="color:#64748b;font-size:11px">${t.timestamp}</td>
+      <td style="font-weight:600">${t.symbol}</td>
+      <td><span class="pill pill-${t.action}">${t.action}</span></td>
+      <td>${t.shares}</td>
+      <td>$${fmt(t.price)}</td>
+      <td>${pnlStr}</td>
+      <td style="color:#64748b;font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">${t.reason||'—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+fetch('/api/stats')
+  .then(r => r.json())
+  .then(data => {
+    renderCards(data);
+    renderChart(data.equity_snapshots, data.initial_capital);
+    renderNotifications(data.notifications);
+    renderTrades(data.trades);
+  })
+  .catch(e => {
+    document.querySelector('main').innerHTML = '<p style="color:#f87171;padding:24px">Failed to load stats: ' + e + '</p>';
+  });
+</script>
+</body>
+</html>"""
+
+
+@app.route("/stats")
+def stats_page():
+    return render_template_string(STATS_HTML)
+
+
 @app.route("/")
 def index():
     return render_template_string(HTML)
 
 
 if __name__ == "__main__":
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="NYSE Trading Engine Dashboard")
+    parser.add_argument(
+        "--tunnel", action="store_true",
+        help="Open a public ngrok tunnel so you can access the dashboard from anywhere",
+    )
+    parser.add_argument(
+        "--port", type=int, default=8080,
+        help="Local port to serve on (default: 8080)",
+    )
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-8s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
     t = threading.Thread(target=_background_loop, daemon=True, name="cycle-scheduler")
     t.start()
     log.info(f"Cycle scheduler started — running every {CYCLE_INTERVAL}s")
-    print(f"Dashboard running at http://localhost:8080  (auto-cycle every {CYCLE_INTERVAL}s)")
-    app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
+
+    local_url = f"http://localhost:{args.port}"
+    print(f"\n  Local:   {local_url}")
+
+    if args.tunnel:
+        try:
+            from pyngrok import ngrok
+            tunnel = ngrok.connect(args.port)
+            public_url = tunnel.public_url
+            # Prefer https if ngrok gave us both
+            if hasattr(tunnel, "public_url"):
+                public_url = tunnel.public_url.replace("http://", "https://")
+            print(f"  Public:  {public_url}  ← share this URL")
+            print(f"  (ngrok tunnel is active — keep this window open)\n")
+        except ImportError:
+            print("\n  ERROR: pyngrok not installed.")
+            print("  Run:  pip install pyngrok\n")
+            sys.exit(1)
+        except Exception as e:
+            print(f"\n  ERROR starting ngrok tunnel: {e}")
+            print("  Continuing without tunnel — local access only.\n")
+
+    print(f"  Auto-cycle every {CYCLE_INTERVAL}s\n")
+    app.run(host="0.0.0.0", port=args.port, debug=False, use_reloader=False)
