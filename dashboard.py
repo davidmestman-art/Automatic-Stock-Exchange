@@ -140,6 +140,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "cycle_interval": CYCLE_INTERVAL,
         "watchlist": _engine.watchlist,
         "scan": _engine.scanner.last_result.to_dict() if _engine.scanner.last_result else None,
+        "voo": _engine.voo_monitor.last_status.to_dict() if _engine.voo_monitor.last_status else None,
     }
 
 
@@ -168,6 +169,15 @@ def api_cycle():
         except Exception as e:
             err = traceback.format_exc()
             return jsonify({"ok": False, "error": str(e), "detail": err}), 500
+
+
+@app.route("/api/voo", methods=["POST"])
+def api_voo():
+    try:
+        status = _engine.voo_monitor.check(force=True)
+        return jsonify({"ok": True, "voo": status.to_dict() if status else None})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/rescan", methods=["POST"])
@@ -257,6 +267,24 @@ tr:hover td{background:#263044}
 .score-bar-bg{width:60px;height:5px;background:#334155;border-radius:3px;overflow:hidden}
 .score-bar{height:5px;border-radius:3px;transition:width .3s}
 
+/* VOO monitor */
+.voo-panel{background:#1e293b;border-radius:10px;border:1px solid #334155;overflow:hidden;margin-bottom:16px}
+.voo-header{padding:12px 16px;border-bottom:1px solid #334155;display:flex;align-items:center;gap:10px}
+.voo-title{font-weight:600;font-size:13px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px}
+.voo-checked{font-size:11px;color:#475569;margin-left:auto}
+.voo-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:0}
+.voo-stat{padding:18px 20px;border-right:1px solid #334155}
+.voo-stat:last-child{border-right:none}
+.voo-stat-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.voo-stat-value{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
+.voo-alert-bar{padding:14px 20px;display:flex;align-items:center;gap:10px;font-size:13px;font-weight:600}
+.voo-above{background:#0f2318;color:#4ade80;border-top:1px solid #166534}
+.voo-below{background:#14532d;color:#dcfce7;border-top:1px solid #22c55e;animation:voo-pulse 2s ease-in-out infinite}
+.voo-loading{padding:24px;text-align:center;color:#475569;font-size:13px}
+@keyframes voo-pulse{0%,100%{opacity:1}50%{opacity:.8}}
+.btn-voo{background:#1d4ed8;color:#fff;font-size:12px;padding:4px 12px;margin-left:auto}
+.btn-voo:hover{opacity:.85}
+
 /* empty state */
 .empty{padding:32px;text-align:center;color:#475569}
 
@@ -325,6 +353,16 @@ tr:hover td{background:#263044}
       <div class="card-label">Total Trades</div>
       <div class="card-value neu" id="c-trades">—</div>
     </div>
+  </div>
+
+  <!-- VOO 200-week MA monitor -->
+  <div class="voo-panel" id="voo-panel">
+    <div class="voo-header">
+      <span class="voo-title">VOO — 200-Week Moving Average Monitor</span>
+      <span class="voo-checked" id="voo-checked">—</span>
+      <button class="btn-voo" onclick="refreshVOO()">Refresh VOO</button>
+    </div>
+    <div id="voo-body"><div class="voo-loading">Waiting for first cycle… click Refresh VOO to load now.</div></div>
   </div>
 
   <!-- watchlist scan -->
@@ -510,10 +548,74 @@ function applyState(s) {
     </tr>`).join('');
   }
 
+  // VOO panel
+  renderVOO(s.voo);
+
   // error
   const eb = document.getElementById('err-banner');
   if (s.error) { eb.textContent = '⚠ ' + s.error; eb.style.display = 'block'; }
   else { eb.style.display = 'none'; }
+}
+
+function renderVOO(voo) {
+  const body = document.getElementById('voo-body');
+  const checked = document.getElementById('voo-checked');
+  if (!voo) {
+    body.innerHTML = '<div class="voo-loading">Waiting for first cycle… click Refresh VOO to load now.</div>';
+    checked.textContent = '—';
+    return;
+  }
+  checked.textContent = 'Updated ' + voo.checked_at;
+
+  const gapSign = voo.gap_pct >= 0 ? '+' : '';
+  const gapCol  = voo.above_ma ? '#4ade80' : '#f87171';
+  const alertBar = voo.above_ma
+    ? `<div class="voo-alert-bar voo-above">
+         <span style="font-size:16px">✓</span>
+         VOO is <strong>ABOVE</strong> the 200-Week MA — broad market in long-term uptrend
+       </div>`
+    : `<div class="voo-alert-bar voo-below">
+         <span style="font-size:18px">🟢</span>
+         BUY ALERT — VOO is <strong>BELOW</strong> the 200-Week MA — rare long-term buying opportunity
+       </div>`;
+
+  body.innerHTML = `
+    <div class="voo-stats">
+      <div class="voo-stat">
+        <div class="voo-stat-label">VOO Price</div>
+        <div class="voo-stat-value neu">$${fmt(voo.price)}</div>
+      </div>
+      <div class="voo-stat">
+        <div class="voo-stat-label">200-Week MA</div>
+        <div class="voo-stat-value neu">$${fmt(voo.ma200w)}</div>
+      </div>
+      <div class="voo-stat">
+        <div class="voo-stat-label">Gap vs MA</div>
+        <div class="voo-stat-value" style="color:${gapCol}">${gapSign}${fmt(voo.gap_pct, 1)}%</div>
+      </div>
+    </div>
+    ${alertBar}`;
+}
+
+async function refreshVOO() {
+  const btn = document.querySelector('.btn-voo');
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  try {
+    const res  = await fetch('/api/voo', {method: 'POST'});
+    const data = await res.json();
+    if (data.ok) renderVOO(data.voo);
+    else {
+      document.getElementById('err-banner').textContent = 'VOO fetch error: ' + data.error;
+      document.getElementById('err-banner').style.display = 'block';
+    }
+  } catch(e) {
+    document.getElementById('err-banner').textContent = 'VOO fetch failed: ' + e;
+    document.getElementById('err-banner').style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Refresh VOO';
+  }
 }
 
 async function refresh() {
