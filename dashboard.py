@@ -117,6 +117,19 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
             })
         sig_list.sort(key=lambda x: -abs(x["score"]))
 
+    # Earnings warnings — {symbol: days_until_earnings} for watchlist symbols
+    earnings_warnings: dict = {}
+    if _engine.earnings_cal:
+        for sym in _engine.watchlist:
+            try:
+                if _engine.earnings_cal.has_upcoming_earnings(sym):
+                    cached_dt = _engine.earnings_cal._cache.get(sym)
+                    if cached_dt:
+                        days_away = max(0, (cached_dt - datetime.now()).days)
+                        earnings_warnings[sym] = days_away
+            except Exception:
+                pass
+
     trades_list = [
         {
             "timestamp": t.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
@@ -175,6 +188,8 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "mtf_enabled": config.use_multi_timeframe,
         "sector_exposure": sector_exposure,
         "max_per_sector": config.max_positions_per_sector,
+        "earnings_enabled": config.use_earnings_protection,
+        "earnings_warnings": earnings_warnings,
     }
 
 
@@ -205,6 +220,11 @@ def api_state():
     global _last_state
     with _lock:
         try:
+            if config.use_alpaca:
+                try:
+                    _engine.executor.sync_portfolio(_engine.portfolio, risk_mgr=_engine.risk)
+                except Exception as sync_err:
+                    log.warning(f"Position sync failed: {sync_err}")
             signals, prices, ind_map = _engine.get_signals()
             _last_state = _build_state(signals, prices, ind_map)
         except Exception as e:
@@ -239,6 +259,11 @@ def api_rescan():
     global _last_state
     with _lock:
         try:
+            if config.use_alpaca:
+                try:
+                    _engine.executor.sync_portfolio(_engine.portfolio, risk_mgr=_engine.risk)
+                except Exception as sync_err:
+                    log.warning(f"Position sync failed: {sync_err}")
             _engine.refresh_watchlist()
             signals, prices, ind_map = _engine.get_signals()
             _last_state = _build_state(signals, prices, ind_map)
@@ -283,6 +308,15 @@ def api_stats():
             "pushover_enabled":  bool(config.pushover_token and config.pushover_user),
         },
     })
+
+
+@app.route("/api/journal")
+def api_journal():
+    try:
+        entries = list(reversed(_engine.journal.read_recent(200)))
+        return jsonify({"ok": True, "entries": entries, "stats": _engine.journal.stats()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
@@ -631,8 +665,12 @@ function applyState(s) {
       const score  = scan && scan.scores  ? scan.scores[sym]  : null;
       const col = action === 'BUY' ? '#22c55e' : action === 'SELL' ? '#ef4444' : '#94a3b8';
       const scoreStr = score != null ? ` ${score >= 0 ? '+' : ''}${score}` : '';
-      return `<span style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600">
-        <span style="color:${col}">${sym}</span><span style="color:#475569;font-size:11px">${scoreStr}</span>
+      const earnDays = s.earnings_warnings && s.earnings_warnings[sym] != null ? s.earnings_warnings[sym] : null;
+      const earnBadge = earnDays != null
+        ? `<span style="color:#f97316;font-size:10px;margin-left:4px" title="Earnings in ${earnDays}d — buys blocked">⚠ ${earnDays}d</span>`
+        : '';
+      return `<span style="background:#1e293b;border:1px solid ${earnDays != null ? '#92400e' : '#334155'};border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600">
+        <span style="color:${col}">${sym}</span><span style="color:#475569;font-size:11px">${scoreStr}</span>${earnBadge}
       </span>`;
     }).join('');
   }
@@ -1000,6 +1038,23 @@ tr:hover td{background:#263044}
       </table>
     </div>
   </div>
+
+  <!-- Trade journal — from persisted JSONL with indicator snapshots -->
+  <div class="panel">
+    <div class="panel-title">
+      Trade Journal
+      <span id="journal-ct" style="background:#334155;color:#94a3b8;border-radius:99px;padding:1px 8px;font-size:11px">0</span>
+      <span style="color:#475569;font-size:11px;margin-left:8px">persisted · includes indicator snapshots</span>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>P&amp;L</th><th>RSI</th><th>Score</th><th>Reason</th>
+        </tr></thead>
+        <tbody id="journal-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
 </main>
 
 <script>
@@ -1151,6 +1206,37 @@ function renderTrades(trades) {
   }).join('');
 }
 
+function renderJournal(entries) {
+  const ct = document.getElementById('journal-ct');
+  const tbody = document.getElementById('journal-body');
+  ct.textContent = entries.length;
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">No journal entries yet — trades are logged automatically</td></tr>';
+    return;
+  }
+  tbody.innerHTML = entries.map(e => {
+    const ind = e.indicators || {};
+    const rsi   = ind.rsi    != null ? fmt(ind.rsi, 1)    : '—';
+    const score = ind.score  != null ? ((ind.score >= 0 ? '+' : '') + fmt(ind.score, 3)) : '—';
+    const scoreCol = ind.score > 0 ? '#4ade80' : ind.score < 0 ? '#f87171' : '#94a3b8';
+    const pnlStr = e.pnl != null
+      ? `<span class="${e.pnl>0?'pos':'neg'}">${e.pnl>=0?'+':'-'}$${fmt(Math.abs(e.pnl))}${e.pnl_pct!=null?' ('+((e.pnl_pct>=0?'+':'')+fmt(e.pnl_pct*100))+'%)':''}</span>`
+      : '—';
+    const ts = e.timestamp ? e.timestamp.replace('T',' ').slice(0,16) : '—';
+    return `<tr>
+      <td style="color:#64748b;font-size:11px">${ts}</td>
+      <td style="font-weight:600">${e.symbol}</td>
+      <td><span class="pill pill-${e.action}">${e.action}</span></td>
+      <td>${e.shares}</td>
+      <td>$${fmt(e.price)}</td>
+      <td>${pnlStr}</td>
+      <td style="color:#94a3b8">${rsi}</td>
+      <td style="color:${scoreCol};font-weight:600">${score}</td>
+      <td style="color:#64748b;font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">${e.reason||'—'}</td>
+    </tr>`;
+  }).join('');
+}
+
 fetch('/api/stats')
   .then(r => r.json())
   .then(data => {
@@ -1161,6 +1247,14 @@ fetch('/api/stats')
   })
   .catch(e => {
     document.querySelector('main').innerHTML = '<p style="color:#f87171;padding:24px">Failed to load stats: ' + e + '</p>';
+  });
+
+fetch('/api/journal')
+  .then(r => r.json())
+  .then(data => { if (data.ok) renderJournal(data.entries); })
+  .catch(() => {
+    document.getElementById('journal-body').innerHTML =
+      '<tr><td colspan="9" class="empty" style="color:#f87171">Failed to load journal</td></tr>';
   });
 </script>
 </body>
