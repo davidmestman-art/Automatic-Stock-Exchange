@@ -25,8 +25,22 @@ _engine = TradingEngine(config)
 _last_state: dict = {}
 _last_cycle_at: Optional[datetime] = None
 _next_cycle_at: Optional[datetime] = None
+_equity_snapshots: list = []          # [{ts, value}] — portfolio value over time
+_last_snapshot_ts: Optional[datetime] = None
 
 log = logging.getLogger(__name__)
+
+
+def _record_snapshot(total_value: float) -> None:
+    """Append an equity snapshot at most once per minute."""
+    global _last_snapshot_ts
+    now = datetime.now()
+    if _last_snapshot_ts and (now - _last_snapshot_ts).total_seconds() < 60:
+        return
+    _equity_snapshots.append({"ts": now.isoformat(), "value": round(total_value, 2)})
+    _last_snapshot_ts = now
+    if len(_equity_snapshots) > 2000:        # ~33 hours at 1/min
+        del _equity_snapshots[:-2000]
 
 
 def _background_loop() -> None:
@@ -74,6 +88,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "open_positions": len(portfolio.positions),
         "total_trades": len(portfolio.trades),
     }
+    _record_snapshot(summary["total_value"])
 
     sig_list = []
     if signals:
@@ -141,6 +156,30 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "watchlist": _engine.watchlist,
         "scan": _engine.scanner.last_result.to_dict() if _engine.scanner.last_result else None,
         "voo": _engine.voo_monitor.last_status.to_dict() if _engine.voo_monitor.last_status else None,
+        "notifications": {
+            "ntfy": bool(config.ntfy_topic),
+            "pushover": bool(config.pushover_token and config.pushover_user),
+        },
+    }
+
+
+def _trade_stats() -> dict:
+    """Compute win/loss stats from the in-memory trade history."""
+    sells = [t for t in _engine.portfolio.trades if t.action == "SELL" and t.pnl is not None]
+    if not sells:
+        return {"sell_trades": 0, "win_rate": None, "avg_gain": None, "avg_loss": None,
+                "best_trade": None, "worst_trade": None, "total_realized_pnl": 0.0}
+    pnls = [t.pnl for t in sells]
+    winners = [p for p in pnls if p > 0]
+    losers  = [p for p in pnls if p <= 0]
+    return {
+        "sell_trades":        len(sells),
+        "win_rate":           round(len(winners) / len(sells) * 100, 1),
+        "avg_gain":           round(sum(winners) / len(winners), 2) if winners else 0,
+        "avg_loss":           round(sum(losers)  / len(losers),  2) if losers  else 0,
+        "best_trade":         round(max(pnls), 2),
+        "worst_trade":        round(min(pnls), 2),
+        "total_realized_pnl": round(sum(pnls), 2),
     }
 
 
@@ -191,6 +230,44 @@ def api_rescan():
             return jsonify({"ok": True, "state": _last_state})
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/stats")
+def api_stats():
+    prices = {}
+    try:
+        _, prices, _ = _engine.get_signals()
+    except Exception:
+        pass
+    portfolio = _engine.portfolio
+    summary   = portfolio.get_summary(prices) if prices else {"total_value": portfolio.cash}
+
+    all_trades = [
+        {
+            "timestamp": t.timestamp.strftime("%Y-%m-%d %H:%M"),
+            "action":    t.action,
+            "symbol":    t.symbol,
+            "shares":    round(t.shares, 4),
+            "price":     round(t.price, 2),
+            "pnl":       round(t.pnl,     2) if t.pnl     is not None else None,
+            "pnl_pct":   round(t.pnl_pct * 100, 2) if t.pnl_pct is not None else None,
+            "reason":    t.reason,
+        }
+        for t in reversed(portfolio.trades)
+    ]
+
+    return jsonify({
+        "trade_stats":      _trade_stats(),
+        "equity_snapshots": _equity_snapshots,
+        "initial_capital":  config.initial_capital,
+        "current_value":    round(summary["total_value"], 2),
+        "trades":           all_trades,
+        "notifications": {
+            "ntfy_enabled":      bool(config.ntfy_topic),
+            "ntfy_topic":        config.ntfy_topic,
+            "pushover_enabled":  bool(config.pushover_token and config.pushover_user),
+        },
+    })
 
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
@@ -353,9 +430,11 @@ tr:hover td{background:#263044}
   <div class="hdr-right">
     <span class="ts" id="cycle-info" style="color:#475569">—</span>
     <span class="ts" id="last-ts">—</span>
+    <span id="notif-indicator" title="Notifications" style="font-size:17px;cursor:default;opacity:.4" onclick="window.location='/stats'">🔔</span>
     <button class="btn-refresh" onclick="refresh()">Refresh</button>
     <button class="btn-rescan" id="btn-rescan" onclick="rescan()">Re-scan</button>
     <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
+    <button class="btn-refresh" onclick="window.location='/stats'" style="background:#1e3a5f;color:#93c5fd">Stats</button>
   </div>
 </header>
 
@@ -585,6 +664,16 @@ function applyState(s) {
     </tr>`).join('');
   }
 
+  // notification bell — full opacity when at least one channel is configured
+  const bell = document.getElementById('notif-indicator');
+  if (s.notifications && (s.notifications.ntfy || s.notifications.pushover)) {
+    bell.style.opacity = '1';
+    bell.title = 'Notifications ON — click for Stats';
+  } else {
+    bell.style.opacity = '.35';
+    bell.title = 'Notifications OFF — click for setup';
+  }
+
   // VOO panel
   renderVOO(s.voo);
 
@@ -735,6 +824,292 @@ setInterval(refresh, 5000);
 </script>
 </body>
 </html>"""
+
+
+STATS_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Performance — NYSE Trading Engine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
+header{background:#1e293b;border-bottom:1px solid #334155;padding:12px 20px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:10}
+.logo{font-size:17px;font-weight:700;color:#f1f5f9}
+.back{font-size:12px;color:#64748b;cursor:pointer;padding:5px 10px;border-radius:6px;background:#334155;border:none;font-weight:600}
+.back:hover{opacity:.8}
+main{padding:16px 20px;max-width:1200px;margin:0 auto}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px}
+.card{background:#1e293b;border-radius:10px;padding:14px 16px;border:1px solid #334155}
+.card-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.card-value{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.card-sub{font-size:11px;color:#64748b;margin-top:3px}
+.pos{color:#22c55e}.neg{color:#ef4444}.neu{color:#e2e8f0}
+.panel{background:#1e293b;border-radius:10px;border:1px solid #334155;overflow:hidden;margin-bottom:14px}
+.panel-title{padding:11px 16px;font-weight:600;font-size:12px;color:#94a3b8;border-bottom:1px solid #334155;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:8px}
+.tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;min-width:400px}
+th{padding:8px 12px;text-align:left;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #334155;white-space:nowrap}
+td{padding:8px 12px;border-bottom:1px solid #1e293b;font-variant-numeric:tabular-nums;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#263044}
+.pill{display:inline-block;padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px}
+.pill-BUY{background:#14532d;color:#4ade80}
+.pill-SELL{background:#7f1d1d;color:#f87171}
+.empty{padding:28px;text-align:center;color:#475569}
+/* chart */
+.chart-wrap{padding:16px;background:#0f172a;min-height:180px;display:flex;align-items:center;justify-content:center}
+.chart-empty{color:#475569;font-size:13px}
+/* notification panel */
+.notif-row{display:flex;align-items:flex-start;gap:14px;padding:14px 16px;border-bottom:1px solid #334155}
+.notif-row:last-child{border-bottom:none}
+.notif-icon{font-size:22px;flex-shrink:0;margin-top:2px}
+.notif-head{font-weight:600;font-size:13px;margin-bottom:4px}
+.notif-body{font-size:12px;color:#94a3b8;line-height:1.6}
+.notif-body code{background:#334155;padding:1px 5px;border-radius:3px;font-size:11px;color:#e2e8f0}
+.badge-on{display:inline-block;padding:2px 8px;border-radius:99px;background:#14532d;color:#4ade80;font-size:11px;font-weight:600;margin-left:8px}
+.badge-off{display:inline-block;padding:2px 8px;border-radius:99px;background:#374151;color:#9ca3af;font-size:11px;font-weight:600;margin-left:8px}
+@media(max-width:600px){
+  .cards{grid-template-columns:1fr 1fr}
+  .card-value{font-size:18px}
+  main{padding:10px 12px}
+}
+</style>
+</head>
+<body>
+<header>
+  <button class="back" onclick="window.location='/'">← Dashboard</button>
+  <div class="logo">Performance &amp; Notifications</div>
+</header>
+<main>
+  <!-- Summary cards -->
+  <div class="cards">
+    <div class="card">
+      <div class="card-label">Win Rate</div>
+      <div class="card-value neu" id="s-winrate">—</div>
+      <div class="card-sub" id="s-winrate-sub">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Avg Gain</div>
+      <div class="card-value pos" id="s-avg-gain">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Avg Loss</div>
+      <div class="card-value neg" id="s-avg-loss">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Best Trade</div>
+      <div class="card-value pos" id="s-best">—</div>
+      <div class="card-sub" id="s-best-sym">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Worst Trade</div>
+      <div class="card-value neg" id="s-worst">—</div>
+      <div class="card-sub" id="s-worst-sym">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Total Realized P&amp;L</div>
+      <div class="card-value" id="s-total-pnl">—</div>
+    </div>
+  </div>
+
+  <!-- Equity chart -->
+  <div class="panel">
+    <div class="panel-title">Portfolio Value Over Time</div>
+    <div class="chart-wrap" id="chart-wrap">
+      <div class="chart-empty">Loading chart…</div>
+    </div>
+  </div>
+
+  <!-- Notifications setup -->
+  <div class="panel" id="notif-panel">
+    <div class="panel-title">🔔 Trade Notifications</div>
+    <div id="notif-body"></div>
+  </div>
+
+  <!-- All trades -->
+  <div class="panel">
+    <div class="panel-title">All Trades <span id="trade-ct" style="background:#334155;color:#94a3b8;border-radius:99px;padding:1px 8px;font-size:11px">0</span></div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>Realized P&amp;L</th><th>Reason</th>
+        </tr></thead>
+        <tbody id="trade-body"><tr><td colspan="7" class="empty">No trades yet</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+const fmt = (n, dec=2) => n == null ? '—' : n.toLocaleString('en-US',{minimumFractionDigits:dec,maximumFractionDigits:dec});
+const fmtD = (n, prefix='$') => n == null ? '—' : (n>=0?'+':'-') + prefix + fmt(Math.abs(n));
+const cls  = n => n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu';
+
+function renderCards(data) {
+  const ts = data.trade_stats;
+  if (!ts || ts.sell_trades === 0) {
+    ['s-winrate','s-avg-gain','s-avg-loss','s-best','s-worst','s-total-pnl']
+      .forEach(id => { const el = document.getElementById(id); if(el) el.textContent = '—'; });
+    document.getElementById('s-winrate-sub').textContent = 'No closed trades yet';
+    return;
+  }
+  const winEl = document.getElementById('s-winrate');
+  winEl.textContent = ts.win_rate + '%';
+  winEl.className = 'card-value ' + (ts.win_rate >= 50 ? 'pos' : 'neg');
+  document.getElementById('s-winrate-sub').textContent = ts.sell_trades + ' closed trades';
+
+  document.getElementById('s-avg-gain').textContent  = ts.avg_gain  ? '+$' + fmt(ts.avg_gain)  : '—';
+  document.getElementById('s-avg-loss').textContent  = ts.avg_loss  ? '-$' + fmt(Math.abs(ts.avg_loss))  : '—';
+  document.getElementById('s-best').textContent      = ts.best_trade  != null ? fmtD(ts.best_trade)  : '—';
+  document.getElementById('s-worst').textContent     = ts.worst_trade != null ? fmtD(ts.worst_trade) : '—';
+
+  const tpEl = document.getElementById('s-total-pnl');
+  tpEl.textContent  = fmtD(ts.total_realized_pnl);
+  tpEl.className    = 'card-value ' + cls(ts.total_realized_pnl);
+}
+
+function renderChart(snapshots, initialCapital) {
+  const wrap = document.getElementById('chart-wrap');
+  if (!snapshots || snapshots.length < 2) {
+    wrap.innerHTML = '<div class="chart-empty">Not enough data yet — chart updates as cycles run</div>';
+    return;
+  }
+
+  const W = 900, H = 220, PL = 56, PR = 16, PT = 16, PB = 36;
+  const iW = W - PL - PR, iH = H - PT - PB;
+
+  const values = snapshots.map(s => s.value);
+  const allVals = [...values, initialCapital];
+  const minV = Math.min(...allVals);
+  const maxV = Math.max(...allVals);
+  const range = maxV - minV || 1;
+
+  const px = i => PL + (i / (snapshots.length - 1)) * iW;
+  const py = v => PT + (1 - (v - minV) / range) * iH;
+
+  // Polyline points
+  const pts = snapshots.map((s,i) => `${px(i).toFixed(1)},${py(s.value).toFixed(1)}`).join(' ');
+
+  // Fill polygon (line + baseline)
+  const lastX = px(snapshots.length - 1);
+  const baselineY = py(Math.max(minV, Math.min(maxV, initialCapital)));
+  const fillPts = `${PL},${baselineY} ${pts} ${lastX},${baselineY}`;
+
+  const lastVal  = values[values.length - 1];
+  const lineCol  = lastVal >= initialCapital ? '#22c55e' : '#ef4444';
+  const fillCol  = lastVal >= initialCapital ? 'rgba(34,197,94,.1)' : 'rgba(239,68,68,.1)';
+  const baselineY2 = py(initialCapital);
+
+  // Y-axis labels (3 ticks)
+  const ticks = [minV, (minV+maxV)/2, maxV];
+  const yLabels = ticks.map(v =>
+    `<text x="${PL-6}" y="${(py(v)+4).toFixed(1)}" text-anchor="end" fill="#475569" font-size="10">\$${(v/1000).toFixed(1)}k</text>`
+  ).join('');
+
+  // X-axis labels (first + last)
+  const fmtTs = iso => { const d=new Date(iso); return (d.getMonth()+1)+'/'+d.getDate()+' '+d.getHours()+':'+(d.getMinutes()+'').padStart(2,'0'); };
+  const xFirst = `<text x="${PL}" y="${H-8}" text-anchor="start" fill="#475569" font-size="10">${fmtTs(snapshots[0].ts)}</text>`;
+  const xLast  = `<text x="${lastX}" y="${H-8}" text-anchor="end" fill="#475569" font-size="10">${fmtTs(snapshots[snapshots.length-1].ts)}</text>`;
+
+  wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block">
+    <polygon points="${fillPts}" fill="${fillCol}"/>
+    <line x1="${PL}" y1="${baselineY2.toFixed(1)}" x2="${W-PR}" y2="${baselineY2.toFixed(1)}"
+          stroke="#334155" stroke-width="1" stroke-dasharray="5,4"/>
+    <polyline points="${pts}" fill="none" stroke="${lineCol}" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="${px(snapshots.length-1).toFixed(1)}" cy="${py(lastVal).toFixed(1)}" r="3.5" fill="${lineCol}"/>
+    ${yLabels}${xFirst}${xLast}
+    <text x="${W/2}" y="${H-8}" text-anchor="middle" fill="#334155" font-size="10">— initial capital</text>
+  </svg>`;
+}
+
+function renderNotifications(n) {
+  const body = document.getElementById('notif-body');
+  const ntfyOn = n && n.ntfy_enabled;
+  const poOn   = n && n.pushover_enabled;
+
+  body.innerHTML = `
+    <div class="notif-row">
+      <div class="notif-icon">📲</div>
+      <div>
+        <div class="notif-head">ntfy.sh (free, no account needed) <span class="${ntfyOn?'badge-on':'badge-off'}">${ntfyOn?'ON':'OFF'}</span></div>
+        <div class="notif-body">
+          ${ntfyOn
+            ? `Sending alerts to topic <code>${n.ntfy_topic}</code>. Subscribe at <code>https://ntfy.sh/${n.ntfy_topic}</code> or in the ntfy app.`
+            : `Add <code>NTFY_TOPIC=your-topic-name</code> to your <code>.env</code> file, then restart the dashboard.<br>
+               Install the <strong>ntfy</strong> app on your phone and subscribe to the same topic — no account needed.`}
+        </div>
+      </div>
+    </div>
+    <div class="notif-row">
+      <div class="notif-icon">🔔</div>
+      <div>
+        <div class="notif-head">Pushover <span class="${poOn?'badge-on':'badge-off'}">${poOn?'ON':'OFF'}</span></div>
+        <div class="notif-body">
+          ${poOn
+            ? 'Pushover notifications are active.'
+            : `Add <code>PUSHOVER_TOKEN=your-app-token</code> and <code>PUSHOVER_USER=your-user-key</code> to your <code>.env</code> file.<br>
+               Get credentials at <strong>pushover.net</strong> (one-time $5 purchase, iOS &amp; Android).`}
+        </div>
+      </div>
+    </div>
+    <div class="notif-row">
+      <div class="notif-icon">⚡</div>
+      <div>
+        <div class="notif-head">What triggers an alert</div>
+        <div class="notif-body">
+          <strong>BUY executed</strong> — symbol, shares, price, reason<br>
+          <strong>SELL executed</strong> — symbol, realized P&amp;L (high priority if loss)<br>
+          <strong>Stop-loss triggered</strong> — same as sell, marked as stop<br>
+          <strong>VOO 200W MA alert</strong> — fires once per day when VOO crosses or is near the MA
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderTrades(trades) {
+  document.getElementById('trade-ct').textContent = trades.length;
+  const tbody = document.getElementById('trade-body');
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No trades yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.map(t => {
+    const pnlStr = t.pnl != null
+      ? `<span class="${t.pnl>0?'pos':'neg'}">${t.pnl>=0?'+':'-'}$${fmt(Math.abs(t.pnl))} (${t.pnl_pct>=0?'+':''}${fmt(t.pnl_pct)}%)</span>`
+      : '—';
+    return `<tr>
+      <td style="color:#64748b;font-size:11px">${t.timestamp}</td>
+      <td style="font-weight:600">${t.symbol}</td>
+      <td><span class="pill pill-${t.action}">${t.action}</span></td>
+      <td>${t.shares}</td>
+      <td>$${fmt(t.price)}</td>
+      <td>${pnlStr}</td>
+      <td style="color:#64748b;font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">${t.reason||'—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+fetch('/api/stats')
+  .then(r => r.json())
+  .then(data => {
+    renderCards(data);
+    renderChart(data.equity_snapshots, data.initial_capital);
+    renderNotifications(data.notifications);
+    renderTrades(data.trades);
+  })
+  .catch(e => {
+    document.querySelector('main').innerHTML = '<p style="color:#f87171;padding:24px">Failed to load stats: ' + e + '</p>';
+  });
+</script>
+</body>
+</html>"""
+
+
+@app.route("/stats")
+def stats_page():
+    return render_template_string(STATS_HTML)
 
 
 @app.route("/")

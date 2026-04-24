@@ -109,6 +109,7 @@ class TradingEngine:
         self._use_alpaca = config.use_alpaca
         self._cycle = 0
         self._session_date: Optional[str] = None
+        self._voo_alert_sent_date: Optional[str] = None  # send at most one VOO alert per day
         self.watchlist: List[str] = list(config.symbols)
 
         logger.info(f"TradingEngine initialised  [mode={mode}]")
@@ -127,10 +128,13 @@ class TradingEngine:
 
         self._maybe_refresh_watchlist()
 
-        # VOO monitor — run once per cycle, send alert if near/crossing 200W MA
+        # VOO monitor — cached daily; send alert notification at most once per day
         voo = self.voo_monitor.check()
         if voo and voo.alert:
-            self.notifier.voo_alert(voo.price, voo.ma200w, voo.gap_pct)
+            today = datetime.now().strftime("%Y-%m-%d")
+            if self._voo_alert_sent_date != today:
+                self.notifier.voo_alert(voo.price, voo.ma200w, voo.gap_pct)
+                self._voo_alert_sent_date = today
 
         if self._use_alpaca:
             self.executor.sync_portfolio(self.portfolio, risk_mgr=self.risk)
