@@ -315,6 +315,87 @@ def _trade_stats() -> dict:
     }
 
 
+def _compute_risk_metrics() -> dict:
+    """Sharpe ratio, max/current drawdown, Calmar ratio from equity snapshots."""
+    import math
+
+    empty = {"sharpe": None, "max_drawdown_pct": None, "max_drawdown_dollar": None,
+             "current_drawdown_pct": None, "calmar": None, "data_days": 0,
+             "drawdown_curve": []}
+    if len(_equity_snapshots) < 2:
+        return empty
+
+    values = [s["value"] for s in _equity_snapshots]
+
+    # ── Max drawdown — walk equity curve tracking running peak ────────────────
+    peak = values[0]
+    max_dd_pct = 0.0
+    max_dd_dollar = 0.0
+    dd_curve = []                   # (timestamp, drawdown_pct) for chart
+    for snap in _equity_snapshots:
+        v = snap["value"]
+        if v > peak:
+            peak = v
+        dd = (peak - v) / peak if peak > 0 else 0.0
+        if dd > max_dd_pct:
+            max_dd_pct = dd
+            max_dd_dollar = peak - v
+        dd_curve.append({"ts": snap["ts"], "dd": round(-dd * 100, 3)})
+
+    all_time_high = max(values)
+    current_dd = (all_time_high - values[-1]) / all_time_high if all_time_high > 0 else 0.0
+
+    # ── Group by calendar day (last snapshot per day wins) ────────────────────
+    daily: dict = {}
+    for snap in _equity_snapshots:
+        daily[snap["ts"][:10]] = snap["value"]
+    data_days = len(daily)
+    day_vals = [daily[d] for d in sorted(daily)]
+
+    # ── Sharpe ratio — prefer daily returns; fall back to sub-minute ──────────
+    sharpe = None
+    if len(day_vals) >= 3:
+        rets = [day_vals[i] / day_vals[i - 1] - 1
+                for i in range(1, len(day_vals)) if day_vals[i - 1] > 0]
+        if len(rets) >= 2:
+            mu = sum(rets) / len(rets)
+            sigma = math.sqrt(sum((r - mu) ** 2 for r in rets) / (len(rets) - 1))
+            if sigma > 0:
+                sharpe = round((mu - 0.05 / 252) / sigma * math.sqrt(252), 3)
+    elif len(values) >= 4:
+        rets = [values[i] / values[i - 1] - 1
+                for i in range(1, len(values)) if values[i - 1] > 0]
+        if len(rets) >= 3:
+            mu = sum(rets) / len(rets)
+            sigma = math.sqrt(sum((r - mu) ** 2 for r in rets) / (len(rets) - 1))
+            if sigma > 0:
+                # snapshots ≈ 1 min apart → 390 min/day × 252 days/year
+                sharpe = round((mu - 0.05 / (390 * 252)) / sigma * math.sqrt(390 * 252), 3)
+
+    # ── Calmar ratio (annualised return ÷ max drawdown) ───────────────────────
+    calmar = None
+    if max_dd_pct > 0 and data_days >= 1 and values[0] > 0:
+        total_ret = values[-1] / values[0] - 1
+        ann_ret = (1 + total_ret) ** (252 / max(data_days, 1)) - 1
+        calmar = round(ann_ret / max_dd_pct, 3)
+
+    # Thin the drawdown curve to at most 400 points for the JSON payload
+    step = max(1, len(dd_curve) // 400)
+    thin_curve = dd_curve[::step]
+    if dd_curve and thin_curve[-1] != dd_curve[-1]:
+        thin_curve.append(dd_curve[-1])
+
+    return {
+        "sharpe":               sharpe,
+        "max_drawdown_pct":     round(max_dd_pct * 100, 2),
+        "max_drawdown_dollar":  round(max_dd_dollar, 2),
+        "current_drawdown_pct": round(current_dd * 100, 2),
+        "calmar":               calmar,
+        "data_days":            data_days,
+        "drawdown_curve":       thin_curve,
+    }
+
+
 # ── API endpoints ─────────────────────────────────────────────────────────────
 
 @app.route("/api/state")
@@ -475,6 +556,7 @@ def api_stats():
         "current_value":    round(summary["total_value"], 2),
         "trades":           all_trades,
         "period_pnl":       {"daily": daily_pnl, "weekly": weekly_pnl, "monthly": monthly_pnl},
+        "risk_metrics":     _compute_risk_metrics(),
         "notifications": {
             "ntfy_enabled":      bool(config.ntfy_topic),
             "ntfy_topic":        config.ntfy_topic,
@@ -1811,6 +1893,15 @@ tr:hover td{background:#263044}
 /* period tabs */
 .tab-btn{padding:3px 12px;border-radius:99px;border:1px solid #334155;background:none;color:#64748b;font-size:11px;font-weight:600;cursor:pointer;min-height:24px}
 .tab-btn.active{background:#334155;color:#e2e8f0;border-color:#334155}
+/* section divider */
+.section-label{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:.6px;margin:16px 0 8px;font-weight:600}
+/* risk metric cards */
+.card-rating{font-size:10px;font-weight:600;padding:2px 7px;border-radius:99px;margin-top:4px;display:inline-block}
+.rating-great{background:#14532d;color:#4ade80}
+.rating-good{background:#1e3a5f;color:#93c5fd}
+.rating-ok{background:#451a03;color:#fdba74}
+.rating-bad{background:#7f1d1d;color:#f87171}
+.rating-na{background:#1e293b;color:#475569}
 /* notification panel */
 .notif-row{display:flex;align-items:flex-start;gap:14px;padding:14px 16px;border-bottom:1px solid #334155}
 .notif-row:last-child{border-bottom:none}
@@ -1861,6 +1952,44 @@ tr:hover td{background:#263044}
     <div class="card">
       <div class="card-label">Total Realized P&amp;L</div>
       <div class="card-value" id="s-total-pnl">—</div>
+    </div>
+  </div>
+
+  <!-- Risk metric cards -->
+  <div class="section-label">Risk Metrics</div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-label">Sharpe Ratio</div>
+      <div class="card-value neu" id="s-sharpe">—</div>
+      <div id="s-sharpe-rating" class="card-rating rating-na" style="margin-top:4px">Insufficient data</div>
+      <div class="card-sub" style="margin-top:4px">Annualised · RF 5%</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Max Drawdown</div>
+      <div class="card-value" id="s-maxdd">—</div>
+      <div id="s-maxdd-rating" class="card-rating rating-na" style="margin-top:4px">Insufficient data</div>
+      <div class="card-sub" id="s-maxdd-dollar" style="margin-top:4px">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Current Drawdown</div>
+      <div class="card-value" id="s-curdd">—</div>
+      <div class="card-sub" style="margin-top:4px">From all-time high</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Calmar Ratio</div>
+      <div class="card-value neu" id="s-calmar">—</div>
+      <div id="s-calmar-rating" class="card-rating rating-na" style="margin-top:4px">Insufficient data</div>
+      <div class="card-sub" style="margin-top:4px">Ann. return ÷ max DD</div>
+    </div>
+  </div>
+
+  <!-- Drawdown history chart -->
+  <div class="panel">
+    <div class="panel-title">Drawdown History
+      <span style="font-size:11px;color:#475569;margin-left:8px;font-weight:400">% below running peak · shaded area = underwater period</span>
+    </div>
+    <div style="padding:8px 4px 4px">
+      <div id="dd-chart" style="height:200px"></div>
     </div>
   </div>
 
@@ -2103,6 +2232,98 @@ function renderJournal(entries) {
   }).join('');
 }
 
+// ── Risk metrics ─────────────────────────────────────────────────────────────
+function sharpeRating(v) {
+  if (v == null) return ['na',  'Insufficient data'];
+  if (v >= 2.0)  return ['great','Excellent (>2)'];
+  if (v >= 1.0)  return ['good', 'Good (1–2)'];
+  if (v >= 0.5)  return ['ok',   'Mediocre (0.5–1)'];
+  if (v >= 0.0)  return ['bad',  'Poor (0–0.5)'];
+  return          ['bad',  'Negative — underperforming risk-free'];
+}
+function ddRating(pct) {
+  if (pct == null) return ['na', 'Insufficient data'];
+  if (pct < 5)     return ['great', 'Excellent (<5%)'];
+  if (pct < 10)    return ['good',  'Good (5–10%)'];
+  if (pct < 20)    return ['ok',    'Moderate (10–20%)'];
+  return            ['bad',  'High risk (>20%)'];
+}
+function calmarRating(v) {
+  if (v == null) return ['na',  'Insufficient data'];
+  if (v >= 3.0)  return ['great','Excellent (>3)'];
+  if (v >= 1.0)  return ['good', 'Good (1–3)'];
+  if (v >= 0.5)  return ['ok',   'Mediocre (0.5–1)'];
+  return          ['bad',  'Poor (<0.5)'];
+}
+
+function renderRiskMetrics(rm) {
+  if (!rm) return;
+  const fmt2 = n => n == null ? '—' : n.toFixed(2);
+
+  // Sharpe
+  const sharpeEl = document.getElementById('s-sharpe');
+  const sharpeR  = document.getElementById('s-sharpe-rating');
+  sharpeEl.textContent = fmt2(rm.sharpe);
+  const [sc, sl] = sharpeRating(rm.sharpe);
+  sharpeEl.className = 'card-value ' + (rm.sharpe == null ? 'neu' : rm.sharpe >= 1 ? 'pos' : rm.sharpe < 0 ? 'neg' : 'neu');
+  sharpeR.className  = `card-rating rating-${sc}`;
+  sharpeR.textContent = sl;
+
+  // Max drawdown
+  const maxddEl = document.getElementById('s-maxdd');
+  const maxddR  = document.getElementById('s-maxdd-rating');
+  const maxddSub = document.getElementById('s-maxdd-dollar');
+  maxddEl.textContent = rm.max_drawdown_pct != null ? '-' + fmt2(rm.max_drawdown_pct) + '%' : '—';
+  maxddEl.className = 'card-value ' + (rm.max_drawdown_pct > 0 ? 'neg' : 'neu');
+  const [dc, dl] = ddRating(rm.max_drawdown_pct);
+  maxddR.className  = `card-rating rating-${dc}`;
+  maxddR.textContent = dl;
+  maxddSub.textContent = rm.max_drawdown_dollar > 0 ? '-$' + rm.max_drawdown_dollar.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
+
+  // Current drawdown
+  const curddEl = document.getElementById('s-curdd');
+  const pct = rm.current_drawdown_pct;
+  curddEl.textContent = pct != null ? (pct > 0 ? '-' + fmt2(pct) + '%' : '0.00% — At peak') : '—';
+  curddEl.className = 'card-value ' + (pct > 0 ? 'neg' : 'pos');
+
+  // Calmar
+  const calmarEl = document.getElementById('s-calmar');
+  const calmarR  = document.getElementById('s-calmar-rating');
+  calmarEl.textContent = fmt2(rm.calmar);
+  calmarEl.className = 'card-value ' + (rm.calmar == null ? 'neu' : rm.calmar >= 1 ? 'pos' : rm.calmar < 0 ? 'neg' : 'neu');
+  const [cc, cl] = calmarRating(rm.calmar);
+  calmarR.className  = `card-rating rating-${cc}`;
+  calmarR.textContent = cl;
+}
+
+function renderDrawdownChart(curve) {
+  const el = document.getElementById('dd-chart');
+  if (!el) return;
+  if (!curve || curve.length < 2) {
+    el.innerHTML = '<div style="color:#475569;text-align:center;padding:60px 0;font-size:13px">Not enough data — chart updates as cycles run</div>';
+    return;
+  }
+  const xs = curve.map(p => p.ts);
+  const ys = curve.map(p => p.dd);   // already negative (%  below peak)
+  const minY = Math.min(...ys, -0.1);
+
+  Plotly.react(el, [
+    // Shaded fill under the curve (underwater area)
+    {type: 'scatter', x: xs, y: ys, fill: 'tozeroy',
+     fillcolor: 'rgba(239,68,68,0.15)', line: {color: '#ef4444', width: 1.5},
+     name: 'Drawdown', hovertemplate: '%{x}<br>%{y:.2f}%<extra></extra>'},
+  ], {
+    paper_bgcolor: '#0f172a', plot_bgcolor: '#0f172a',
+    font: {color: '#94a3b8', family: 'Segoe UI,system-ui,sans-serif', size: 11},
+    margin: {l: 52, r: 16, t: 8, b: 42},
+    xaxis: {type: 'date', tickfont: {size: 9, color: '#475569'}, gridcolor: '#1e293b',
+            rangeslider: {visible: false}},
+    yaxis: {ticksuffix: '%', tickfont: {size: 10, color: '#475569'}, gridcolor: '#1e293b',
+            zeroline: true, zerolinecolor: '#334155', range: [minY * 1.1, 0.5]},
+    showlegend: false,
+  }, {responsive: true, displayModeBar: false});
+}
+
 // ── Period P&L bar chart ──────────────────────────────────────────────────────
 let _periodData = null;
 let _activePeriod = 'daily';
@@ -2159,6 +2380,8 @@ fetch('/api/stats')
     renderTrades(data.trades);
     _periodData = data.period_pnl || null;
     renderPeriodChart(_activePeriod);
+    renderRiskMetrics(data.risk_metrics || null);
+    renderDrawdownChart((data.risk_metrics || {}).drawdown_curve || []);
   })
   .catch(e => {
     document.querySelector('main').innerHTML = '<p style="color:#f87171;padding:24px">Failed to load stats: ' + e + '</p>';
