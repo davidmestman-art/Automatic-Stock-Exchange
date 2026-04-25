@@ -373,6 +373,38 @@ def api_pnl():
     })
 
 
+@app.route("/api/heatmap")
+def api_heatmap():
+    """Return daily price-change data for all watchlist symbols (uses fetcher cache)."""
+    watchlist = _engine.watchlist
+    if not watchlist:
+        return jsonify({"ok": True, "items": []})
+    try:
+        market_data = _engine.fetcher.fetch_many(watchlist, force_refresh=False)
+        items = []
+        for sym in watchlist:
+            df = market_data.get(sym)
+            if df is None or len(df) < 2:
+                continue
+            close = df["Close"]
+            prev_close = float(close.iloc[-2])
+            curr_close = float(close.iloc[-1])
+            change_pct = round((curr_close / prev_close - 1) * 100, 2) if prev_close > 0 else 0.0
+            vol = float(df["Volume"].iloc[-1]) if "Volume" in df.columns else None
+            avg_vol = float(df["Volume"].tail(20).mean()) if "Volume" in df.columns else None
+            vol_ratio = round(vol / avg_vol, 2) if vol and avg_vol and avg_vol > 0 else None
+            items.append({
+                "symbol": sym,
+                "price": round(curr_close, 2),
+                "change_pct": change_pct,
+                "volume_ratio": vol_ratio,
+            })
+        items.sort(key=lambda x: -abs(x["change_pct"]))
+        return jsonify({"ok": True, "items": items})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/rescan", methods=["POST"])
 def api_rescan():
     global _last_state
@@ -410,12 +442,39 @@ def api_stats():
         for t in reversed(portfolio.trades)
     ]
 
+    # ── Period P&L breakdown ──────────────────────────────────────────────────
+    import collections
+    from datetime import date, timedelta
+
+    sells = [t for t in portfolio.trades if t.action == "SELL" and t.pnl is not None]
+    daily_map: dict = collections.defaultdict(float)
+    weekly_map: dict = collections.defaultdict(float)
+    monthly_map: dict = collections.defaultdict(float)
+    for t in sells:
+        d = t.timestamp.date()
+        daily_map[d.isoformat()] += t.pnl
+        yr, wk, _ = d.isocalendar()
+        weekly_map[f"{yr}-W{wk:02d}"] += t.pnl
+        monthly_map[f"{d.year}-{d.month:02d}"] += t.pnl
+
+    today = datetime.now().date()
+    daily_pnl  = [{"period": (today - timedelta(days=i)).isoformat(),
+                   "pnl": round(daily_map.get((today - timedelta(days=i)).isoformat(), 0.0), 2)}
+                  for i in range(29, -1, -1)]
+    weekly_pnl = sorted(
+        [{"period": k, "pnl": round(v, 2)} for k, v in weekly_map.items()],
+        key=lambda x: x["period"])[-12:]
+    monthly_pnl = sorted(
+        [{"period": k, "pnl": round(v, 2)} for k, v in monthly_map.items()],
+        key=lambda x: x["period"])[-12:]
+
     return jsonify({
         "trade_stats":      _trade_stats(),
         "equity_snapshots": _equity_snapshots,
         "initial_capital":  config.initial_capital,
         "current_value":    round(summary["total_value"], 2),
         "trades":           all_trades,
+        "period_pnl":       {"daily": daily_pnl, "weekly": weekly_pnl, "monthly": monthly_pnl},
         "notifications": {
             "ntfy_enabled":      bool(config.ntfy_topic),
             "ntfy_topic":        config.ntfy_topic,
@@ -718,6 +777,27 @@ tr:hover td{background:#263044}
   .pill{font-size:10px;padding:2px 6px}
 }
 
+/* ── Sector pie chart panel ──────────────────────────────────────────────── */
+.sector-chart-wrap{padding:4px 8px 8px}
+
+/* ── Watchlist heat map ──────────────────────────────────────────────────── */
+.hm-grid{display:flex;flex-wrap:wrap;gap:6px;padding:12px 14px}
+.hm-cell{border-radius:8px;padding:8px 10px;min-width:80px;flex:1 1 80px;max-width:130px;cursor:default;transition:transform .1s,opacity .1s;border:1px solid rgba(255,255,255,0.06)}
+.hm-cell:hover{transform:scale(1.04);opacity:.9}
+.hm-sym{font-weight:700;font-size:13px;letter-spacing:.3px;color:#f1f5f9}
+.hm-pct{font-size:12px;font-weight:600;margin-top:1px;font-variant-numeric:tabular-nums}
+.hm-price{font-size:10px;color:rgba(255,255,255,0.45);margin-top:2px;font-variant-numeric:tabular-nums}
+body.light .hm-sym{color:#0f172a}
+body.light .hm-cell{border-color:rgba(0,0,0,0.08)}
+body.light .hm-price{color:rgba(0,0,0,0.4)}
+
+/* ── Period P&L tab buttons ──────────────────────────────────────────────── */
+.tab-btns{display:flex;gap:6px}
+.tab-btn{padding:3px 12px;border-radius:99px;border:1px solid #334155;background:none;color:#64748b;font-size:11px;font-weight:600;cursor:pointer;min-height:24px}
+.tab-btn.active{background:#334155;color:#e2e8f0;border-color:#334155}
+body.light .tab-btn{border-color:#e2e8f0;color:#64748b}
+body.light .tab-btn.active{background:#e2e8f0;color:#1e293b;border-color:#e2e8f0}
+
 /* ── Light theme ─────────────────────────────────────────────────────────────
    Additive overrides — every dark colour is re-declared here so the rest of
    the CSS never needs to be touched when the theme changes.
@@ -874,6 +954,16 @@ body.light .pnl-ticker{border-left-color:#e2e8f0}
     <div id="voo-body"><div class="voo-loading">Waiting for first cycle… click Refresh VOO to load now.</div></div>
   </div>
 
+  <!-- sector breakdown pie chart — only shown when positions are open -->
+  <div class="panel grid1" id="sector-pie-panel" style="display:none">
+    <div class="panel-title">Sector Allocation
+      <span class="count" id="sector-pie-count">0</span>
+    </div>
+    <div class="sector-chart-wrap">
+      <div id="sector-pie-plot" style="height:280px"></div>
+    </div>
+  </div>
+
   <!-- watchlist scan -->
   <div class="panel grid1" id="scan-panel">
     <div class="panel-title">
@@ -914,6 +1004,14 @@ body.light .pnl-ticker{border-left-color:#e2e8f0}
       </tr></thead>
       <tbody id="sig-body"><tr><td colspan="8" class="empty">No data yet — click Refresh</td></tr></tbody>
     </table></div>
+  </div>
+
+  <!-- watchlist heat map -->
+  <div class="panel grid1" id="heatmap-panel" style="display:none">
+    <div class="panel-title">Watchlist Heat Map
+      <span style="font-size:11px;color:#475569;margin-left:6px">daily % change</span>
+    </div>
+    <div class="hm-grid" id="hm-grid"></div>
   </div>
 
   <!-- positions + trades -->
@@ -1226,6 +1324,9 @@ function applyState(s) {
     </tr>`).join('');
   }
 
+  // sector allocation pie
+  renderSectorPie(s.positions);
+
   // after-hours panel
   renderExtHours(s.extended_hours || [], s.market_open);
 
@@ -1246,6 +1347,82 @@ function applyState(s) {
   const eb = document.getElementById('err-banner');
   if (s.error) { eb.textContent = '⚠ ' + s.error; eb.style.display = 'block'; }
   else { eb.style.display = 'none'; }
+}
+
+// ── Sector allocation pie chart ───────────────────────────────────────────────
+function renderSectorPie(positions) {
+  const panel = document.getElementById('sector-pie-panel');
+  const el    = document.getElementById('sector-pie-plot');
+  const ct    = document.getElementById('sector-pie-count');
+  if (!positions || !positions.length) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  ct.textContent = positions.length;
+
+  const byValue = {};
+  positions.forEach(p => {
+    const sec = (p.sector && p.sector !== '—') ? p.sector : 'Other';
+    byValue[sec] = (byValue[sec] || 0) + (p.current_price * p.shares);
+  });
+  const labels = Object.keys(byValue);
+  const values = labels.map(l => Math.round(byValue[l] * 100) / 100);
+
+  const PALETTE = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6',
+                   '#ec4899','#14b8a6','#f97316','#84cc16','#06b6d4','#a855f7'];
+  const isLight = document.body.classList.contains('light');
+  const bg      = isLight ? 'rgba(255,255,255,0)' : 'rgba(0,0,0,0)';
+  const lineCol = isLight ? '#ffffff' : '#1e293b';
+  const fontCol = isLight ? '#475569' : '#94a3b8';
+
+  Plotly.react(el, [{
+    type: 'pie', labels, values, hole: 0.38,
+    textinfo: 'label+percent',
+    textfont: {size: 11, color: fontCol},
+    marker: {colors: PALETTE, line: {color: lineCol, width: 2}},
+    hovertemplate: '<b>%{label}</b><br>$%{value:,.0f}<br>%{percent}<extra></extra>',
+  }], {
+    paper_bgcolor: bg, plot_bgcolor: bg,
+    font: {color: fontCol, family: 'Segoe UI,system-ui,sans-serif', size: 11},
+    margin: {l: 10, r: 10, t: 10, b: 10},
+    legend: {font: {color: fontCol, size: 11}, bgcolor: 'rgba(0,0,0,0)', orientation: 'v'},
+    showlegend: true,
+  }, {responsive: true, displayModeBar: false});
+}
+
+// ── Watchlist heat map ────────────────────────────────────────────────────────
+function renderHeatmap(items) {
+  const panel = document.getElementById('heatmap-panel');
+  const grid  = document.getElementById('hm-grid');
+  if (!items || !items.length) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  const isLight = document.body.classList.contains('light');
+
+  grid.innerHTML = items.map(item => {
+    const pct  = item.change_pct;
+    const abs  = Math.abs(pct);
+    const intensity = Math.min(1, abs / 2.5);   // saturates at ±2.5%
+    const alpha = 0.12 + intensity * 0.55;
+    const isUp  = pct >= 0;
+    const bgCol = isUp
+      ? (isLight ? `rgba(21,128,61,${alpha})` : `rgba(34,197,94,${alpha})`)
+      : (isLight ? `rgba(185,28,28,${alpha})` : `rgba(239,68,68,${alpha})`);
+    const pctCol = isUp
+      ? (intensity > 0.35 ? '#4ade80' : '#22c55e')
+      : (intensity > 0.35 ? '#f87171' : '#ef4444');
+    const sign  = pct >= 0 ? '+' : '';
+    return `<div class="hm-cell" style="background:${bgCol}">
+      <div class="hm-sym">${item.symbol}</div>
+      <div class="hm-pct" style="color:${pctCol}">${sign}${pct.toFixed(2)}%</div>
+      <div class="hm-price">$${item.price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+    </div>`;
+  }).join('');
+}
+
+async function loadHeatmap() {
+  try {
+    const res  = await fetch('/api/heatmap');
+    const data = await res.json();
+    if (data.ok) renderHeatmap(data.items);
+  } catch(_) {}
 }
 
 function renderExtHours(rows, marketOpen) {
@@ -1348,6 +1525,7 @@ async function refresh() {
     const res = await fetch('/api/state');
     const data = await res.json();
     applyState(data);
+    loadHeatmap();
   } catch(e) {
     document.getElementById('err-banner').textContent = 'Failed to fetch state: ' + e;
     document.getElementById('err-banner').style.display = 'block';
@@ -1467,6 +1645,8 @@ setInterval(updateCycleInfo, 1000);
 // Initial load + auto-refresh every 5s (picks up background cycle results quickly)
 refresh();
 setInterval(refresh, 5000);
+// Heat map refreshes on each full state refresh (called inside refresh()) — also once on init
+loadHeatmap();
 
 // ── Chart modal ───────────────────────────────────────────────────────────────
 async function openChart(symbol) {
@@ -1598,6 +1778,7 @@ STATS_HTML = """<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Performance — NYSE Trading Engine</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
@@ -1627,6 +1808,9 @@ tr:hover td{background:#263044}
 /* chart */
 .chart-wrap{padding:16px;background:#0f172a;min-height:180px;display:flex;align-items:center;justify-content:center}
 .chart-empty{color:#475569;font-size:13px}
+/* period tabs */
+.tab-btn{padding:3px 12px;border-radius:99px;border:1px solid #334155;background:none;color:#64748b;font-size:11px;font-weight:600;cursor:pointer;min-height:24px}
+.tab-btn.active{background:#334155;color:#e2e8f0;border-color:#334155}
 /* notification panel */
 .notif-row{display:flex;align-items:flex-start;gap:14px;padding:14px 16px;border-bottom:1px solid #334155}
 .notif-row:last-child{border-bottom:none}
@@ -1685,6 +1869,20 @@ tr:hover td{background:#263044}
     <div class="panel-title">Portfolio Value Over Time</div>
     <div class="chart-wrap" id="chart-wrap">
       <div class="chart-empty">Loading chart…</div>
+    </div>
+  </div>
+
+  <!-- Period P&L bar chart -->
+  <div class="panel">
+    <div class="panel-title">P&amp;L by Period
+      <span style="margin-left:auto;display:flex;gap:6px" id="period-tabs">
+        <button class="tab-btn active" onclick="switchPeriod('daily',this)">Daily</button>
+        <button class="tab-btn" onclick="switchPeriod('weekly',this)">Weekly</button>
+        <button class="tab-btn" onclick="switchPeriod('monthly',this)">Monthly</button>
+      </span>
+    </div>
+    <div style="padding:8px 4px 4px">
+      <div id="period-chart" style="height:240px"></div>
     </div>
   </div>
 
@@ -1905,6 +2103,53 @@ function renderJournal(entries) {
   }).join('');
 }
 
+// ── Period P&L bar chart ──────────────────────────────────────────────────────
+let _periodData = null;
+let _activePeriod = 'daily';
+
+function renderPeriodChart(periodKey) {
+  const el = document.getElementById('period-chart');
+  if (!el || !_periodData) return;
+  const rows = (_periodData[periodKey] || []);
+  if (!rows.length) {
+    el.innerHTML = '<div style="color:#475569;text-align:center;padding:60px 0;font-size:13px">No closed trades yet</div>';
+    return;
+  }
+  // Filter trailing zero-only rows from daily view to keep chart tight
+  let display = rows;
+  if (periodKey === 'daily') {
+    const lastNonZero = rows.reduce((idx, r, i) => r.pnl !== 0 ? i : idx, -1);
+    display = lastNonZero >= 0 ? rows.slice(Math.max(0, lastNonZero - 13), lastNonZero + 1) : rows.slice(-14);
+  }
+  const labels = display.map(r => r.period);
+  const values = display.map(r => r.pnl);
+  const colors = values.map(v => v >= 0 ? '#22c55e' : '#ef4444');
+  const maxAbs  = Math.max(...values.map(Math.abs), 1);
+
+  Plotly.react(el, [{
+    type: 'bar', x: labels, y: values,
+    marker: {color: colors, opacity: 0.85},
+    hovertemplate: '<b>%{x}</b><br>$%{y:+,.2f}<extra></extra>',
+  }], {
+    paper_bgcolor: '#0f172a', plot_bgcolor: '#0f172a',
+    font: {color: '#94a3b8', family: 'Segoe UI,system-ui,sans-serif', size: 11},
+    margin: {l: 62, r: 16, t: 10, b: 56},
+    xaxis: {tickfont: {size: 9, color: '#475569'}, gridcolor: '#1e293b',
+            tickangle: labels.length > 10 ? -45 : 0},
+    yaxis: {tickprefix: '$', tickfont: {size: 10, color: '#475569'}, gridcolor: '#1e293b',
+            zeroline: true, zerolinecolor: '#334155', zerolinewidth: 1,
+            range: [-maxAbs * 1.15, maxAbs * 1.15]},
+    bargap: 0.3, showlegend: false,
+  }, {responsive: true, displayModeBar: false});
+}
+
+function switchPeriod(key, btn) {
+  _activePeriod = key;
+  document.querySelectorAll('#period-tabs .tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderPeriodChart(key);
+}
+
 fetch('/api/stats')
   .then(r => r.json())
   .then(data => {
@@ -1912,6 +2157,8 @@ fetch('/api/stats')
     renderChart(data.equity_snapshots, data.initial_capital);
     renderNotifications(data.notifications);
     renderTrades(data.trades);
+    _periodData = data.period_pnl || null;
+    renderPeriodChart(_activePeriod);
   })
   .catch(e => {
     document.querySelector('main').innerHTML = '<p style="color:#f87171;padding:24px">Failed to load stats: ' + e + '</p>';
