@@ -211,6 +211,8 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "tf_1d":  round(iscores["1d"],  3) if "1d"  in iscores else None,
                 "tf_1h":  round(iscores["1h"],  3) if "1h"  in iscores else None,
                 "tf_15m": round(iscores["15m"], 3) if "15m" in iscores else None,
+                "mtf_agreement": int(iscores["mtf_agreement"]) if "mtf_agreement" in iscores else None,
+                "ml_mult": round(iscores["ml_mult"], 3) if "ml_mult" in iscores else None,
                 "sector": get_sector(sym) or "—",
             })
         sig_list.sort(key=lambda x: -abs(x["score"]))
@@ -288,6 +290,8 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "mean_reversion_enabled": config.use_mean_reversion,
         "correlation_filter_enabled": config.use_correlation_filter,
         "adaptive_sizing_enabled": config.use_adaptive_sizing,
+        "regime": _engine.current_regime.to_dict() if _engine.current_regime else None,
+        "ml_status": _engine.ml_status,
     }
 
 
@@ -619,6 +623,11 @@ tr:hover td{background:#263044}
 .sector-chip.near-limit{background:#451a03;color:#fdba74;border-color:#92400e}
 .sector-chip.at-limit{background:#7f1d1d;color:#fca5a5;border-color:#b91c1c}
 
+/* ── Regime card colours ─────────────────────────────────────────────────── */
+.regime-bull{color:#22c55e}
+.regime-bear{color:#ef4444}
+.regime-choppy{color:#f59e0b}
+
 /* ── MTF sub-scores ──────────────────────────────────────────────────────── */
 .mtf-scores{font-size:10px;color:#64748b;margin-top:2px;letter-spacing:.2px}
 .mtf-scores span{margin-right:5px;white-space:nowrap}
@@ -758,6 +767,11 @@ tr:hover td{background:#263044}
       <div class="card-label">Total Trades</div>
       <div class="card-value neu" id="c-trades">—</div>
     </div>
+    <div class="card" id="regime-card" style="display:none">
+      <div class="card-label">Market Regime</div>
+      <div class="card-value" id="c-regime">—</div>
+      <div class="card-sub" id="c-regime-sub">—</div>
+    </div>
   </div>
 
   <!-- VOO 200-week MA monitor -->
@@ -802,6 +816,7 @@ tr:hover td{background:#263044}
       <span id="mr-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600">MR ON</span>
       <span id="corr-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#1e3a5f;color:#93c5fd;font-weight:600">CORR FILTER ON</span>
       <span id="sizing-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#451a03;color:#fdba74;font-weight:600">ADAPTIVE SIZE</span>
+      <span id="ml-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#312e81;color:#a5b4fc;font-weight:600">ML RANKING</span>
     </div>
     <div class="tbl-wrap"><table>
       <thead><tr>
@@ -880,6 +895,21 @@ function applyState(s) {
   document.getElementById('c-open').textContent = p.open_positions;
   document.getElementById('c-trades').textContent = p.total_trades;
 
+  // regime card
+  const regimeCard = document.getElementById('regime-card');
+  const regimeEl   = document.getElementById('c-regime');
+  const regimeSubEl= document.getElementById('c-regime-sub');
+  if (s.regime) {
+    regimeCard.style.display = '';
+    const r = s.regime;
+    regimeEl.textContent  = r.regime;
+    regimeEl.className    = 'card-value regime-' + r.regime.toLowerCase();
+    const vixStr = r.vix != null ? `  VIX ${r.vix.toFixed(1)}` : '';
+    regimeSubEl.textContent = `SPY $${fmt(r.spy_price)} · SMA200 $${fmt(r.sma200)}${vixStr}`;
+  } else {
+    regimeCard.style.display = 'none';
+  }
+
   // watchlist chips
   const wl = s.watchlist || [];
   document.getElementById('wl-count').textContent = wl.length;
@@ -932,9 +962,25 @@ function applyState(s) {
   const mrBadge   = document.getElementById('mr-badge');
   const corrBadge = document.getElementById('corr-badge');
   const sizeBadge = document.getElementById('sizing-badge');
+  const mlBadge   = document.getElementById('ml-badge');
   if (mrBadge)   mrBadge.style.display   = s.mean_reversion_enabled      ? 'inline-block' : 'none';
   if (corrBadge) corrBadge.style.display = s.correlation_filter_enabled   ? 'inline-block' : 'none';
   if (sizeBadge) sizeBadge.style.display = s.adaptive_sizing_enabled      ? 'inline-block' : 'none';
+  if (mlBadge && s.ml_status) {
+    if (s.ml_status.trained) {
+      mlBadge.style.display = 'inline-block';
+      const acc = s.ml_status.accuracy != null ? ` · ${(s.ml_status.accuracy * 100).toFixed(0)}% acc` : '';
+      mlBadge.textContent = `ML ON · ${s.ml_status.samples} trades${acc}`;
+      mlBadge.title = `Last trained: ${s.ml_status.last_trained || '—'}`;
+    } else if (s.ml_status.sklearn_available) {
+      mlBadge.style.display = 'inline-block';
+      mlBadge.style.opacity = '.5';
+      mlBadge.textContent = `ML · ${s.ml_status.samples || 0}/${20} samples`;
+      mlBadge.title = 'Needs 20 completed trades to train';
+    } else {
+      mlBadge.style.display = 'none';
+    }
+  }
 
   // signals
   document.getElementById('sig-count').textContent = s.signals.length;
@@ -946,11 +992,13 @@ function applyState(s) {
       const barPct = Math.round(Math.abs(r.score) * 100);
       const barCol = r.action === 'BUY' ? '#22c55e' : r.action === 'SELL' ? '#ef4444' : '#6b7280';
       const fmtTF  = v => v == null ? '' : `<span style="color:${v>=0?'#4ade80':'#f87171'}">${v>=0?'+':''}${fmt(v,3)}</span>`;
+      const agreeStr = r.mtf_agreement != null ? `<span style="color:#64748b"> agree ${r.mtf_agreement}/3</span>` : '';
       const mtfRow = s.mtf_enabled && (r.tf_1d != null || r.tf_1h != null || r.tf_15m != null)
         ? `<div class="mtf-scores">
              <span>1d ${fmtTF(r.tf_1d)}</span>
              <span>1h ${fmtTF(r.tf_1h)}</span>
              <span>15m ${fmtTF(r.tf_15m)}</span>
+             ${agreeStr}
            </div>`
         : '';
       const vr = r.volume_ratio;
@@ -985,6 +1033,11 @@ function applyState(s) {
           (r.atr_pct != null ? `<span>ATR ${r.atr_pct.toFixed(1)}%</span>` : '') + `</div>`
         : '';
 
+      // ML multiplier sub-line under Score
+      const mlRow = s.ml_status && s.ml_status.trained && r.ml_mult != null
+        ? `<div class="sig-sub"><span style="color:#a5b4fc">ML×${r.ml_mult.toFixed(2)}</span></div>`
+        : '';
+
       return `<tr style="${rowHighlight}">
         <td class="sym-link" style="font-weight:600" onclick="openChart('${r.symbol}')" title="Click for chart">${r.symbol}${pendingBadge}${corrBadgeCell}</td>
         <td style="color:#64748b;font-size:12px">${r.sector||'—'}</td>
@@ -998,7 +1051,7 @@ function applyState(s) {
             <span style="color:${barCol};font-weight:600">${r.score >= 0 ? '+' : ''}${fmt(r.score, 3)}</span>
             <div class="score-bar-bg"><div class="score-bar" style="width:${barPct}%;background:${barCol}"></div></div>
           </div>
-          ${mtfRow}
+          ${mtfRow}${mlRow}
         </td>
         <td>${r.rsi != null ? fmt(r.rsi, 1) : '—'}</td>
         <td class="z-col" style="color:${zCol};${zBold}">${zStr}</td>
