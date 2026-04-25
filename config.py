@@ -37,6 +37,27 @@ class TradingConfig:
     take_profit_pct: float = 0.15
     daily_loss_limit_pct: float = 0.03
 
+    # ── Trailing stop-loss ────────────────────────────────────────────────────
+    use_trailing_stop: bool = True
+    trailing_stop_pct: float = 0.05        # stop ratchets to -5% below new highs
+
+    # ── Entry confirmation ────────────────────────────────────────────────────
+    use_confirmation: bool = True
+    confirmation_tolerance_pct: float = 0.005   # allow 0.5% pullback before rejecting
+
+    # ── Mean reversion signal ─────────────────────────────────────────────────
+    use_mean_reversion: bool = True        # adds z-score component to composite signal
+
+    # ── Correlation filter ────────────────────────────────────────────────────
+    use_correlation_filter: bool = True
+    correlation_threshold: float = 0.70   # block if |ρ| ≥ this vs any open position
+    correlation_lookback: int = 30        # days of returns used to estimate ρ
+
+    # ── Adaptive position sizing ──────────────────────────────────────────────
+    use_adaptive_sizing: bool = True
+    adaptive_target_vol_pct: float = 0.01  # target 1 % daily vol per position
+    min_position_pct: float = 0.03         # floor: 3 % of portfolio per position
+
     # ── Signal thresholds ─────────────────────────────────────────────────────
     buy_threshold: float = 0.20
     sell_threshold: float = -0.20

@@ -41,6 +41,7 @@ class TradingEngine:
         self.analyzer = SignalAnalyzer(
             buy_threshold=config.buy_threshold,
             sell_threshold=config.sell_threshold,
+            use_mean_reversion=config.use_mean_reversion,
         )
         self.risk = RiskManager(
             max_position_pct=config.max_position_pct,
@@ -49,7 +50,12 @@ class TradingEngine:
             take_profit_pct=config.take_profit_pct,
             daily_loss_limit_pct=config.daily_loss_limit_pct,
             max_positions_per_sector=config.max_positions_per_sector,
+            use_trailing_stop=config.use_trailing_stop,
+            trailing_stop_pct=config.trailing_stop_pct,
         )
+        self.risk.use_adaptive_sizing = config.use_adaptive_sizing
+        self.risk.adaptive_target_vol_pct = config.adaptive_target_vol_pct
+        self.risk.min_position_pct = config.min_position_pct
 
         # Optional components
         fundamental_filter = None
@@ -111,6 +117,10 @@ class TradingEngine:
         self._session_date: Optional[str] = None
         self._voo_alert_sent_date: Optional[str] = None  # send at most one VOO alert per day
         self.watchlist: List[str] = list(config.symbols)
+        # BUY signals waiting for next-candle confirmation (symbol → {signal_price, queued_at})
+        self._pending_signals: Dict[str, dict] = {}
+        # Symbols blocked by correlation filter in the most recent signal pass
+        self._last_corr_blocked: Dict[str, str] = {}
 
         logger.info(f"TradingEngine initialised  [mode={mode}]")
 
@@ -144,13 +154,37 @@ class TradingEngine:
             logger.error("No market data returned — skipping cycle")
             return {}
 
+        # Ensure position data is available for correlation filter
+        if self.config.use_correlation_filter and self.portfolio.positions:
+            pos_syms = [s for s in self.portfolio.positions if s not in market_data]
+            if pos_syms:
+                extra = self.fetcher.fetch_many(pos_syms, force_refresh=False)
+                market_data.update(extra)
+
+        self._last_corr_blocked = self._compute_corr_blocks(market_data)
+
         prices = self._get_prices(list(market_data.keys()))
 
         if self._cycle == 1:
             self.portfolio.update_day_start(prices)
 
-        if not self._use_alpaca:
-            self._check_exit_conditions(prices)
+        # Trailing stop updates + exit checks run in all modes
+        self._check_exit_conditions(prices)
+
+        # Process confirmations queued in the previous cycle
+        _confirmed_buys: set = set()
+        if self.config.use_confirmation and self._pending_signals:
+            tol = self.config.confirmation_tolerance_pct
+            for sym, info in list(self._pending_signals.items()):
+                if sym in prices:
+                    cp = prices[sym]
+                    floor = info["signal_price"] * (1 - tol)
+                    if cp >= floor:
+                        _confirmed_buys.add(sym)
+                        logger.info(f"  Confirmation PASSED {sym}: ${cp:.2f} ≥ ${floor:.2f}")
+                    else:
+                        logger.info(f"  Confirmation FAILED {sym}: ${cp:.2f} dropped below ${floor:.2f}")
+            self._pending_signals.clear()
 
         results: Dict[str, SignalResult] = {}
 
@@ -185,6 +219,13 @@ class TradingEngine:
                     logger.debug(f"  Earnings protection: skipping BUY {symbol}")
                     continue
 
+                # Correlation filter
+                if symbol in self._last_corr_blocked:
+                    logger.info(
+                        f"  Correlation blocked {symbol}: {self._last_corr_blocked[symbol]}"
+                    )
+                    continue
+
                 rc = self.risk.check_buy(
                     symbol=symbol,
                     price=current_price,
@@ -194,28 +235,37 @@ class TradingEngine:
                     daily_pnl_pct=daily_pnl,
                     signal_confidence=signal.confidence,
                     sector_positions=sector_position_count(symbol, self.portfolio.positions),
+                    atr_pct=ind.atr_pct,
                 )
                 if rc.approved:
-                    self.executor.execute_buy(
-                        symbol=symbol,
-                        shares=rc.max_shares,
-                        price=current_price,
-                        stop_loss=self.risk.stop_loss_price(current_price),
-                        take_profit=self.risk.take_profit_price(current_price),
-                        reason=", ".join(signal.reasons[:2]),
-                        portfolio=self.portfolio,
-                    )
-                    self.notifier.trade_buy(
-                        symbol, rc.max_shares, current_price, ", ".join(signal.reasons[:2])
-                    )
-                    self.journal.log(
-                        action="BUY",
-                        symbol=symbol,
-                        shares=rc.max_shares,
-                        price=current_price,
-                        reason=", ".join(signal.reasons[:2]),
-                        indicators=ind_snap,
-                    )
+                    if self.config.use_confirmation and symbol not in _confirmed_buys:
+                        # Queue for next-candle confirmation
+                        self._pending_signals[symbol] = {
+                            "signal_price": current_price,
+                            "queued_at": datetime.now().isoformat(),
+                        }
+                        logger.info(f"  {symbol}: BUY queued for confirmation @ ${current_price:.2f}")
+                    else:
+                        self.executor.execute_buy(
+                            symbol=symbol,
+                            shares=rc.max_shares,
+                            price=current_price,
+                            stop_loss=self.risk.stop_loss_price(current_price),
+                            take_profit=self.risk.take_profit_price(current_price),
+                            reason=", ".join(signal.reasons[:2]),
+                            portfolio=self.portfolio,
+                        )
+                        self.notifier.trade_buy(
+                            symbol, rc.max_shares, current_price, ", ".join(signal.reasons[:2])
+                        )
+                        self.journal.log(
+                            action="BUY",
+                            symbol=symbol,
+                            shares=rc.max_shares,
+                            price=current_price,
+                            reason=", ".join(signal.reasons[:2]),
+                            indicators=ind_snap,
+                        )
                 else:
                     logger.debug(f"  Risk rejected {symbol}: {rc.reason}")
 
@@ -247,11 +297,28 @@ class TradingEngine:
         self._log_summary(prices)
         return results
 
+    @property
+    def pending_confirmations(self) -> Dict[str, dict]:
+        """BUY signals queued for next-candle confirmation."""
+        return dict(self._pending_signals)
+
     def get_signals(self):
         """Fetch data and compute signals without placing any orders."""
         symbols = self.watchlist or self.config.symbols
         market_data = self.fetcher.fetch_many(symbols, force_refresh=True)
+
+        # Fetch position data needed for correlation filter (may not be on watchlist)
+        if self.config.use_correlation_filter and self.portfolio.positions:
+            pos_syms = [s for s in self.portfolio.positions if s not in market_data]
+            if pos_syms:
+                extra = self.fetcher.fetch_many(pos_syms, force_refresh=False)
+                market_data.update(extra)
+
         prices = self._get_prices(list(market_data.keys()))
+
+        # Update correlation state so dashboard always reflects current positions
+        self._last_corr_blocked = self._compute_corr_blocks(market_data)
+
         signals, ind_map = {}, {}
         for symbol in symbols:
             if symbol not in market_data or symbol not in prices:
@@ -320,6 +387,9 @@ class TradingEngine:
         today = datetime.now().strftime("%Y-%m-%d")
         if self._session_date == today:
             return
+        if self._pending_signals:
+            logger.info(f"  New session — clearing {len(self._pending_signals)} stale pending signals")
+            self._pending_signals.clear()
         logger.info(f"  New session ({today}) — running watchlist scan…")
         try:
             result = self.scanner.scan(self.indicators, self.analyzer)
@@ -352,12 +422,54 @@ class TradingEngine:
                 prices[symbol] = p
         return prices
 
+    @property
+    def last_corr_blocked(self) -> Dict[str, str]:
+        """Symbols blocked by correlation filter in the last signal pass {sym: reason}."""
+        return dict(self._last_corr_blocked)
+
+    def _compute_corr_blocks(self, market_data: dict) -> Dict[str, str]:
+        """Return {symbol: reason} for watchlist symbols too correlated with open positions."""
+        import pandas as pd  # already imported at module level via fetcher; local import is fine
+        if not self.config.use_correlation_filter or not self.portfolio.positions:
+            return {}
+
+        lookback = self.config.correlation_lookback
+        thresh = self.config.correlation_threshold
+        blocked: Dict[str, str] = {}
+
+        for sym in self.watchlist:
+            if sym in self.portfolio.positions or sym not in market_data:
+                continue
+            target_ret = market_data[sym]["Close"].pct_change().dropna().tail(lookback)
+            if len(target_ret) < lookback // 2:
+                continue
+            for pos_sym in self.portfolio.positions:
+                if pos_sym not in market_data:
+                    continue
+                pos_ret = market_data[pos_sym]["Close"].pct_change().dropna().tail(lookback)
+                aligned = pd.concat([target_ret, pos_ret], axis=1).dropna()
+                if len(aligned) < lookback // 2:
+                    continue
+                corr = float(aligned.iloc[:, 0].corr(aligned.iloc[:, 1]))
+                if corr >= thresh:
+                    blocked[sym] = f"{pos_sym} ρ={corr:.2f}"
+                    break
+
+        if blocked:
+            logger.info(f"  Correlation filter blocked: {', '.join(f'{s}({r})' for s,r in blocked.items())}")
+        return blocked
+
     def _check_exit_conditions(self, prices: Dict[str, float]) -> None:
         exits = []
         for symbol, pos in self.portfolio.positions.items():
             price = prices.get(symbol, pos.entry_price)
-            if self.risk.check_stop_loss(pos.entry_price, price):
-                exits.append((symbol, price, "Stop loss triggered"))
+            self.risk.update_trailing_stop(pos, price)
+            stop_reason = (
+                "Trailing stop triggered" if self.risk.use_trailing_stop
+                else "Stop loss triggered"
+            )
+            if self.risk.check_stop_loss(pos.entry_price, price, pos):
+                exits.append((symbol, price, stop_reason))
             elif self.risk.check_take_profit(pos.entry_price, price):
                 exits.append((symbol, price, "Take profit triggered"))
         for symbol, price, reason in exits:
