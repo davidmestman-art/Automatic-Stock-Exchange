@@ -20,6 +20,7 @@ class MTFSignal:
     composite: float
     action: str
     confidence: float
+    agreement: int = 0          # how many TFs agree with the composite direction
 
 
 class MultiTimeframeAnalyzer:
@@ -27,6 +28,10 @@ class MultiTimeframeAnalyzer:
 
     Falls back gracefully when intraday data is unavailable — missing
     timeframes are excluded and remaining weights are renormalized.
+
+    When min_agreeing > 0, trades are only taken when at least that many
+    timeframes point in the same direction as the composite; otherwise the
+    action is downgraded to HOLD.
     """
 
     def __init__(
@@ -35,11 +40,13 @@ class MultiTimeframeAnalyzer:
         analyzer,
         buy_threshold: float = 0.20,
         sell_threshold: float = -0.20,
+        min_agreeing: int = 2,
     ):
         self.indicators = indicators
         self.analyzer = analyzer
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
+        self.min_agreeing = min_agreeing
 
     def analyze(self, symbol: str) -> Optional[MTFSignal]:
         scores: Dict[str, float] = {}
@@ -62,6 +69,20 @@ class MultiTimeframeAnalyzer:
         )
         confidence = min(1.0, abs(composite) / max(self.buy_threshold, 0.01))
 
+        # Count how many TFs agree with the composite direction
+        agreement = 0
+        if action != "HOLD":
+            for tf_score in scores.values():
+                if action == "BUY" and tf_score > 0:
+                    agreement += 1
+                elif action == "SELL" and tf_score < 0:
+                    agreement += 1
+
+        # Enforce minimum agreement — downgrade to HOLD when insufficient
+        required = min(self.min_agreeing, len(scores))
+        if action != "HOLD" and len(scores) >= 2 and agreement < required:
+            action = "HOLD"
+
         return MTFSignal(
             symbol=symbol,
             score_1d=round(scores.get("1d", 0.0), 4),
@@ -70,6 +91,7 @@ class MultiTimeframeAnalyzer:
             composite=round(composite, 4),
             action=action,
             confidence=round(confidence, 3),
+            agreement=agreement,
         )
 
     def _score_interval(self, symbol: str, interval: str) -> Optional[float]:

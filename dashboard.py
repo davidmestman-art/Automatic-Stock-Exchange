@@ -211,6 +211,8 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "tf_1d":  round(iscores["1d"],  3) if "1d"  in iscores else None,
                 "tf_1h":  round(iscores["1h"],  3) if "1h"  in iscores else None,
                 "tf_15m": round(iscores["15m"], 3) if "15m" in iscores else None,
+                "mtf_agreement": int(iscores["mtf_agreement"]) if "mtf_agreement" in iscores else None,
+                "ml_mult": round(iscores["ml_mult"], 3) if "ml_mult" in iscores else None,
                 "sector": get_sector(sym) or "—",
             })
         sig_list.sort(key=lambda x: -abs(x["score"]))
@@ -288,6 +290,8 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "mean_reversion_enabled": config.use_mean_reversion,
         "correlation_filter_enabled": config.use_correlation_filter,
         "adaptive_sizing_enabled": config.use_adaptive_sizing,
+        "regime": _engine.current_regime.to_dict() if _engine.current_regime else None,
+        "ml_status": _engine.ml_status,
     }
 
 
@@ -308,6 +312,87 @@ def _trade_stats() -> dict:
         "best_trade":         round(max(pnls), 2),
         "worst_trade":        round(min(pnls), 2),
         "total_realized_pnl": round(sum(pnls), 2),
+    }
+
+
+def _compute_risk_metrics() -> dict:
+    """Sharpe ratio, max/current drawdown, Calmar ratio from equity snapshots."""
+    import math
+
+    empty = {"sharpe": None, "max_drawdown_pct": None, "max_drawdown_dollar": None,
+             "current_drawdown_pct": None, "calmar": None, "data_days": 0,
+             "drawdown_curve": []}
+    if len(_equity_snapshots) < 2:
+        return empty
+
+    values = [s["value"] for s in _equity_snapshots]
+
+    # ── Max drawdown — walk equity curve tracking running peak ────────────────
+    peak = values[0]
+    max_dd_pct = 0.0
+    max_dd_dollar = 0.0
+    dd_curve = []                   # (timestamp, drawdown_pct) for chart
+    for snap in _equity_snapshots:
+        v = snap["value"]
+        if v > peak:
+            peak = v
+        dd = (peak - v) / peak if peak > 0 else 0.0
+        if dd > max_dd_pct:
+            max_dd_pct = dd
+            max_dd_dollar = peak - v
+        dd_curve.append({"ts": snap["ts"], "dd": round(-dd * 100, 3)})
+
+    all_time_high = max(values)
+    current_dd = (all_time_high - values[-1]) / all_time_high if all_time_high > 0 else 0.0
+
+    # ── Group by calendar day (last snapshot per day wins) ────────────────────
+    daily: dict = {}
+    for snap in _equity_snapshots:
+        daily[snap["ts"][:10]] = snap["value"]
+    data_days = len(daily)
+    day_vals = [daily[d] for d in sorted(daily)]
+
+    # ── Sharpe ratio — prefer daily returns; fall back to sub-minute ──────────
+    sharpe = None
+    if len(day_vals) >= 3:
+        rets = [day_vals[i] / day_vals[i - 1] - 1
+                for i in range(1, len(day_vals)) if day_vals[i - 1] > 0]
+        if len(rets) >= 2:
+            mu = sum(rets) / len(rets)
+            sigma = math.sqrt(sum((r - mu) ** 2 for r in rets) / (len(rets) - 1))
+            if sigma > 0:
+                sharpe = round((mu - 0.05 / 252) / sigma * math.sqrt(252), 3)
+    elif len(values) >= 4:
+        rets = [values[i] / values[i - 1] - 1
+                for i in range(1, len(values)) if values[i - 1] > 0]
+        if len(rets) >= 3:
+            mu = sum(rets) / len(rets)
+            sigma = math.sqrt(sum((r - mu) ** 2 for r in rets) / (len(rets) - 1))
+            if sigma > 0:
+                # snapshots ≈ 1 min apart → 390 min/day × 252 days/year
+                sharpe = round((mu - 0.05 / (390 * 252)) / sigma * math.sqrt(390 * 252), 3)
+
+    # ── Calmar ratio (annualised return ÷ max drawdown) ───────────────────────
+    calmar = None
+    if max_dd_pct > 0 and data_days >= 1 and values[0] > 0:
+        total_ret = values[-1] / values[0] - 1
+        ann_ret = (1 + total_ret) ** (252 / max(data_days, 1)) - 1
+        calmar = round(ann_ret / max_dd_pct, 3)
+
+    # Thin the drawdown curve to at most 400 points for the JSON payload
+    step = max(1, len(dd_curve) // 400)
+    thin_curve = dd_curve[::step]
+    if dd_curve and thin_curve[-1] != dd_curve[-1]:
+        thin_curve.append(dd_curve[-1])
+
+    return {
+        "sharpe":               sharpe,
+        "max_drawdown_pct":     round(max_dd_pct * 100, 2),
+        "max_drawdown_dollar":  round(max_dd_dollar, 2),
+        "current_drawdown_pct": round(current_dd * 100, 2),
+        "calmar":               calmar,
+        "data_days":            data_days,
+        "drawdown_curve":       thin_curve,
     }
 
 
@@ -343,6 +428,60 @@ def api_voo():
     try:
         status = _engine.voo_monitor.check(force=True)
         return jsonify({"ok": True, "voo": status.to_dict() if status else None})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/pnl")
+def api_pnl():
+    """Lightweight endpoint — reads from cached state, no market data fetch."""
+    with _lock:
+        p = _last_state.get("portfolio", {})
+        positions = _last_state.get("positions", [])
+    if not p:
+        return jsonify({"ok": False, "reason": "no data yet"})
+    unrealized = sum(pos.get("pnl") or 0 for pos in positions)
+    basis = (p.get("total_value") or 0) - unrealized
+    unrealized_pct = round(unrealized / basis * 100, 2) if basis > 0 else 0.0
+    return jsonify({
+        "ok": True,
+        "unrealized_pnl": round(unrealized, 2),
+        "unrealized_pnl_pct": unrealized_pct,
+        "total_pnl": p.get("total_pnl"),
+        "total_pnl_pct": p.get("total_pnl_pct"),
+        "open_positions": len(positions),
+        "ts": _last_state.get("timestamp"),
+    })
+
+
+@app.route("/api/heatmap")
+def api_heatmap():
+    """Return daily price-change data for all watchlist symbols (uses fetcher cache)."""
+    watchlist = _engine.watchlist
+    if not watchlist:
+        return jsonify({"ok": True, "items": []})
+    try:
+        market_data = _engine.fetcher.fetch_many(watchlist, force_refresh=False)
+        items = []
+        for sym in watchlist:
+            df = market_data.get(sym)
+            if df is None or len(df) < 2:
+                continue
+            close = df["Close"]
+            prev_close = float(close.iloc[-2])
+            curr_close = float(close.iloc[-1])
+            change_pct = round((curr_close / prev_close - 1) * 100, 2) if prev_close > 0 else 0.0
+            vol = float(df["Volume"].iloc[-1]) if "Volume" in df.columns else None
+            avg_vol = float(df["Volume"].tail(20).mean()) if "Volume" in df.columns else None
+            vol_ratio = round(vol / avg_vol, 2) if vol and avg_vol and avg_vol > 0 else None
+            items.append({
+                "symbol": sym,
+                "price": round(curr_close, 2),
+                "change_pct": change_pct,
+                "volume_ratio": vol_ratio,
+            })
+        items.sort(key=lambda x: -abs(x["change_pct"]))
+        return jsonify({"ok": True, "items": items})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -384,12 +523,40 @@ def api_stats():
         for t in reversed(portfolio.trades)
     ]
 
+    # ── Period P&L breakdown ──────────────────────────────────────────────────
+    import collections
+    from datetime import date, timedelta
+
+    sells = [t for t in portfolio.trades if t.action == "SELL" and t.pnl is not None]
+    daily_map: dict = collections.defaultdict(float)
+    weekly_map: dict = collections.defaultdict(float)
+    monthly_map: dict = collections.defaultdict(float)
+    for t in sells:
+        d = t.timestamp.date()
+        daily_map[d.isoformat()] += t.pnl
+        yr, wk, _ = d.isocalendar()
+        weekly_map[f"{yr}-W{wk:02d}"] += t.pnl
+        monthly_map[f"{d.year}-{d.month:02d}"] += t.pnl
+
+    today = datetime.now().date()
+    daily_pnl  = [{"period": (today - timedelta(days=i)).isoformat(),
+                   "pnl": round(daily_map.get((today - timedelta(days=i)).isoformat(), 0.0), 2)}
+                  for i in range(29, -1, -1)]
+    weekly_pnl = sorted(
+        [{"period": k, "pnl": round(v, 2)} for k, v in weekly_map.items()],
+        key=lambda x: x["period"])[-12:]
+    monthly_pnl = sorted(
+        [{"period": k, "pnl": round(v, 2)} for k, v in monthly_map.items()],
+        key=lambda x: x["period"])[-12:]
+
     return jsonify({
         "trade_stats":      _trade_stats(),
         "equity_snapshots": _equity_snapshots,
         "initial_capital":  config.initial_capital,
         "current_value":    round(summary["total_value"], 2),
         "trades":           all_trades,
+        "period_pnl":       {"daily": daily_pnl, "weekly": weekly_pnl, "monthly": monthly_pnl},
+        "risk_metrics":     _compute_risk_metrics(),
         "notifications": {
             "ntfy_enabled":      bool(config.ntfy_topic),
             "ntfy_topic":        config.ntfy_topic,
@@ -619,6 +786,11 @@ tr:hover td{background:#263044}
 .sector-chip.near-limit{background:#451a03;color:#fdba74;border-color:#92400e}
 .sector-chip.at-limit{background:#7f1d1d;color:#fca5a5;border-color:#b91c1c}
 
+/* ── Regime card colours ─────────────────────────────────────────────────── */
+.regime-bull{color:#22c55e}
+.regime-bear{color:#ef4444}
+.regime-choppy{color:#f59e0b}
+
 /* ── MTF sub-scores ──────────────────────────────────────────────────────── */
 .mtf-scores{font-size:10px;color:#64748b;margin-top:2px;letter-spacing:.2px}
 .mtf-scores span{margin-right:5px;white-space:nowrap}
@@ -686,6 +858,88 @@ tr:hover td{background:#263044}
   .score-bar-bg{width:36px}
   .pill{font-size:10px;padding:2px 6px}
 }
+
+/* ── Sector pie chart panel ──────────────────────────────────────────────── */
+.sector-chart-wrap{padding:4px 8px 8px}
+
+/* ── Watchlist heat map ──────────────────────────────────────────────────── */
+.hm-grid{display:flex;flex-wrap:wrap;gap:6px;padding:12px 14px}
+.hm-cell{border-radius:8px;padding:8px 10px;min-width:80px;flex:1 1 80px;max-width:130px;cursor:default;transition:transform .1s,opacity .1s;border:1px solid rgba(255,255,255,0.06)}
+.hm-cell:hover{transform:scale(1.04);opacity:.9}
+.hm-sym{font-weight:700;font-size:13px;letter-spacing:.3px;color:#f1f5f9}
+.hm-pct{font-size:12px;font-weight:600;margin-top:1px;font-variant-numeric:tabular-nums}
+.hm-price{font-size:10px;color:rgba(255,255,255,0.45);margin-top:2px;font-variant-numeric:tabular-nums}
+body.light .hm-sym{color:#0f172a}
+body.light .hm-cell{border-color:rgba(0,0,0,0.08)}
+body.light .hm-price{color:rgba(0,0,0,0.4)}
+
+/* ── Period P&L tab buttons ──────────────────────────────────────────────── */
+.tab-btns{display:flex;gap:6px}
+.tab-btn{padding:3px 12px;border-radius:99px;border:1px solid #334155;background:none;color:#64748b;font-size:11px;font-weight:600;cursor:pointer;min-height:24px}
+.tab-btn.active{background:#334155;color:#e2e8f0;border-color:#334155}
+body.light .tab-btn{border-color:#e2e8f0;color:#64748b}
+body.light .tab-btn.active{background:#e2e8f0;color:#1e293b;border-color:#e2e8f0}
+
+/* ── Light theme ─────────────────────────────────────────────────────────────
+   Additive overrides — every dark colour is re-declared here so the rest of
+   the CSS never needs to be touched when the theme changes.
+   ─────────────────────────────────────────────────────────────────────────── */
+body.light{background:#f1f5f9;color:#1e293b}
+body.light header{background:#fff;border-bottom-color:#e2e8f0}
+body.light .logo{color:#0f172a}
+body.light .badge-sim{background:#e2e8f0;color:#475569}
+body.light #market-status{color:#475569}
+body.light #cycle-info,.ts{color:#94a3b8}
+body.light .card{background:#fff;border-color:#e2e8f0}
+body.light .card-label{color:#64748b}
+body.light .card-sub{color:#94a3b8}
+body.light .panel{background:#fff;border-color:#e2e8f0}
+body.light .panel-title{color:#475569;border-bottom-color:#e2e8f0}
+body.light .panel-title .count{background:#e2e8f0;color:#475569}
+body.light th{color:#475569;border-bottom-color:#e2e8f0}
+body.light td{border-bottom-color:#f1f5f9}
+body.light tr:hover td{background:#f8fafc}
+body.light .btn-refresh{background:#e2e8f0;color:#1e293b}
+body.light .score-bar-bg{background:#e2e8f0}
+body.light .pill-HOLD{background:#e2e8f0;color:#475569}
+body.light .spinner{border-color:#e2e8f0}
+body.light .loading-overlay{background:rgba(241,245,249,.85)}
+body.light .error-banner{background:#fee2e2;color:#991b1b}
+body.light .empty{color:#94a3b8}
+body.light .mtf-scores{color:#94a3b8}
+body.light .sig-sub{color:#94a3b8}
+body.light .sym-link{color:#1d4ed8}
+body.light .voo-panel{background:#fff;border-color:#e2e8f0}
+body.light .voo-header{background:#fff;border-bottom-color:#e2e8f0}
+body.light .voo-title{color:#475569}
+body.light .voo-stat{border-right-color:#e2e8f0}
+body.light .voo-stat-label{color:#64748b}
+body.light .voo-loading{color:#94a3b8}
+body.light .voo-checked{color:#94a3b8}
+body.light .voo-above{background:#f0fdf4;color:#166534;border-top-color:#bbf7d0}
+body.light .voo-below{background:#dcfce7;color:#14532d;border-top-color:#86efac}
+body.light .chart-box{background:#fff;border-color:#e2e8f0}
+body.light .chart-hdr{border-bottom-color:#e2e8f0}
+body.light .chart-sym{color:#0f172a}
+body.light .chart-close{background:#e2e8f0;color:#1e293b}
+body.light .chart-body{background:#f8fafc}
+body.light .sector-chip{background:#dbeafe;color:#1d4ed8;border-color:#93c5fd}
+body.light .sector-chip.near-limit{background:#fff7ed;color:#c2410c;border-color:#fdba74}
+body.light .sector-chip.at-limit{background:#fee2e2;color:#b91c1c;border-color:#fca5a5}
+
+/* ── Theme toggle button ──────────────────────────────────────────────────── */
+.theme-toggle{background:none;border:1px solid #334155;color:#e2e8f0;padding:0;border-radius:99px;font-size:16px;min-height:32px;width:36px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+body.light .theme-toggle{border-color:#cbd5e1;color:#1e293b}
+
+/* ── Live P&L ticker (header) ─────────────────────────────────────────────── */
+.pnl-ticker{display:flex;flex-direction:column;align-items:flex-end;font-variant-numeric:tabular-nums;white-space:nowrap;line-height:1.25;padding:0 4px;border-left:1px solid #334155;margin-left:4px}
+body.light .pnl-ticker{border-left-color:#e2e8f0}
+.pnl-ticker-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.4px}
+.pnl-ticker-value{font-size:15px;font-weight:700}
+.pnl-ticker-pct{font-size:11px;font-weight:600}
+@keyframes pnl-flash{0%{opacity:1}35%{opacity:.25}100%{opacity:1}}
+.pnl-flash{animation:pnl-flash .55s ease}
+@media(max-width:600px){.pnl-ticker{display:none}}
 </style>
 </head>
 <body>
@@ -716,10 +970,17 @@ tr:hover td{background:#263044}
     <span class="market-dot market-unknown" id="market-dot"></span>
     <span id="market-label">Market —</span>
   </span>
+  <!-- Live unrealized P&L ticker -->
+  <div class="pnl-ticker" id="pnl-ticker" style="display:none">
+    <div class="pnl-ticker-label">Unrealized P&amp;L</div>
+    <div class="pnl-ticker-value" id="pnl-ticker-val">—</div>
+    <div class="pnl-ticker-pct" id="pnl-ticker-pct" style="color:#64748b">—</div>
+  </div>
   <div class="hdr-right">
     <span class="ts" id="cycle-info" style="color:#475569">—</span>
     <span class="ts" id="last-ts">—</span>
     <span id="notif-indicator" title="Notifications" style="font-size:17px;cursor:default;opacity:.4" onclick="window.location='/stats'">🔔</span>
+    <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
     <button class="btn-refresh" onclick="refresh()">Refresh</button>
     <button class="btn-rescan" id="btn-rescan" onclick="rescan()">Re-scan</button>
     <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
@@ -758,6 +1019,11 @@ tr:hover td{background:#263044}
       <div class="card-label">Total Trades</div>
       <div class="card-value neu" id="c-trades">—</div>
     </div>
+    <div class="card" id="regime-card" style="display:none">
+      <div class="card-label">Market Regime</div>
+      <div class="card-value" id="c-regime">—</div>
+      <div class="card-sub" id="c-regime-sub">—</div>
+    </div>
   </div>
 
   <!-- VOO 200-week MA monitor -->
@@ -768,6 +1034,16 @@ tr:hover td{background:#263044}
       <button class="btn-voo" onclick="refreshVOO()">Refresh VOO</button>
     </div>
     <div id="voo-body"><div class="voo-loading">Waiting for first cycle… click Refresh VOO to load now.</div></div>
+  </div>
+
+  <!-- sector breakdown pie chart — only shown when positions are open -->
+  <div class="panel grid1" id="sector-pie-panel" style="display:none">
+    <div class="panel-title">Sector Allocation
+      <span class="count" id="sector-pie-count">0</span>
+    </div>
+    <div class="sector-chart-wrap">
+      <div id="sector-pie-plot" style="height:280px"></div>
+    </div>
   </div>
 
   <!-- watchlist scan -->
@@ -802,6 +1078,7 @@ tr:hover td{background:#263044}
       <span id="mr-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600">MR ON</span>
       <span id="corr-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#1e3a5f;color:#93c5fd;font-weight:600">CORR FILTER ON</span>
       <span id="sizing-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#451a03;color:#fdba74;font-weight:600">ADAPTIVE SIZE</span>
+      <span id="ml-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#312e81;color:#a5b4fc;font-weight:600">ML RANKING</span>
     </div>
     <div class="tbl-wrap"><table>
       <thead><tr>
@@ -809,6 +1086,14 @@ tr:hover td{background:#263044}
       </tr></thead>
       <tbody id="sig-body"><tr><td colspan="8" class="empty">No data yet — click Refresh</td></tr></tbody>
     </table></div>
+  </div>
+
+  <!-- watchlist heat map -->
+  <div class="panel grid1" id="heatmap-panel" style="display:none">
+    <div class="panel-title">Watchlist Heat Map
+      <span style="font-size:11px;color:#475569;margin-left:6px">daily % change</span>
+    </div>
+    <div class="hm-grid" id="hm-grid"></div>
   </div>
 
   <!-- positions + trades -->
@@ -880,6 +1165,29 @@ function applyState(s) {
   document.getElementById('c-open').textContent = p.open_positions;
   document.getElementById('c-trades').textContent = p.total_trades;
 
+  // live P&L ticker — sum unrealized from all open positions
+  {
+    const unrealized = (s.positions || []).reduce((sum, pos) => sum + (pos.pnl || 0), 0);
+    const basis = (p.total_value || 0) - unrealized;
+    const unrealizedPct = basis > 0 ? unrealized / basis * 100 : 0;
+    updatePnlTicker(unrealized, unrealizedPct, (s.positions || []).length);
+  }
+
+  // regime card
+  const regimeCard = document.getElementById('regime-card');
+  const regimeEl   = document.getElementById('c-regime');
+  const regimeSubEl= document.getElementById('c-regime-sub');
+  if (s.regime) {
+    regimeCard.style.display = '';
+    const r = s.regime;
+    regimeEl.textContent  = r.regime;
+    regimeEl.className    = 'card-value regime-' + r.regime.toLowerCase();
+    const vixStr = r.vix != null ? `  VIX ${r.vix.toFixed(1)}` : '';
+    regimeSubEl.textContent = `SPY $${fmt(r.spy_price)} · SMA200 $${fmt(r.sma200)}${vixStr}`;
+  } else {
+    regimeCard.style.display = 'none';
+  }
+
   // watchlist chips
   const wl = s.watchlist || [];
   document.getElementById('wl-count').textContent = wl.length;
@@ -932,9 +1240,25 @@ function applyState(s) {
   const mrBadge   = document.getElementById('mr-badge');
   const corrBadge = document.getElementById('corr-badge');
   const sizeBadge = document.getElementById('sizing-badge');
+  const mlBadge   = document.getElementById('ml-badge');
   if (mrBadge)   mrBadge.style.display   = s.mean_reversion_enabled      ? 'inline-block' : 'none';
   if (corrBadge) corrBadge.style.display = s.correlation_filter_enabled   ? 'inline-block' : 'none';
   if (sizeBadge) sizeBadge.style.display = s.adaptive_sizing_enabled      ? 'inline-block' : 'none';
+  if (mlBadge && s.ml_status) {
+    if (s.ml_status.trained) {
+      mlBadge.style.display = 'inline-block';
+      const acc = s.ml_status.accuracy != null ? ` · ${(s.ml_status.accuracy * 100).toFixed(0)}% acc` : '';
+      mlBadge.textContent = `ML ON · ${s.ml_status.samples} trades${acc}`;
+      mlBadge.title = `Last trained: ${s.ml_status.last_trained || '—'}`;
+    } else if (s.ml_status.sklearn_available) {
+      mlBadge.style.display = 'inline-block';
+      mlBadge.style.opacity = '.5';
+      mlBadge.textContent = `ML · ${s.ml_status.samples || 0}/${20} samples`;
+      mlBadge.title = 'Needs 20 completed trades to train';
+    } else {
+      mlBadge.style.display = 'none';
+    }
+  }
 
   // signals
   document.getElementById('sig-count').textContent = s.signals.length;
@@ -946,11 +1270,13 @@ function applyState(s) {
       const barPct = Math.round(Math.abs(r.score) * 100);
       const barCol = r.action === 'BUY' ? '#22c55e' : r.action === 'SELL' ? '#ef4444' : '#6b7280';
       const fmtTF  = v => v == null ? '' : `<span style="color:${v>=0?'#4ade80':'#f87171'}">${v>=0?'+':''}${fmt(v,3)}</span>`;
+      const agreeStr = r.mtf_agreement != null ? `<span style="color:#64748b"> agree ${r.mtf_agreement}/3</span>` : '';
       const mtfRow = s.mtf_enabled && (r.tf_1d != null || r.tf_1h != null || r.tf_15m != null)
         ? `<div class="mtf-scores">
              <span>1d ${fmtTF(r.tf_1d)}</span>
              <span>1h ${fmtTF(r.tf_1h)}</span>
              <span>15m ${fmtTF(r.tf_15m)}</span>
+             ${agreeStr}
            </div>`
         : '';
       const vr = r.volume_ratio;
@@ -985,6 +1311,11 @@ function applyState(s) {
           (r.atr_pct != null ? `<span>ATR ${r.atr_pct.toFixed(1)}%</span>` : '') + `</div>`
         : '';
 
+      // ML multiplier sub-line under Score
+      const mlRow = s.ml_status && s.ml_status.trained && r.ml_mult != null
+        ? `<div class="sig-sub"><span style="color:#a5b4fc">ML×${r.ml_mult.toFixed(2)}</span></div>`
+        : '';
+
       return `<tr style="${rowHighlight}">
         <td class="sym-link" style="font-weight:600" onclick="openChart('${r.symbol}')" title="Click for chart">${r.symbol}${pendingBadge}${corrBadgeCell}</td>
         <td style="color:#64748b;font-size:12px">${r.sector||'—'}</td>
@@ -998,7 +1329,7 @@ function applyState(s) {
             <span style="color:${barCol};font-weight:600">${r.score >= 0 ? '+' : ''}${fmt(r.score, 3)}</span>
             <div class="score-bar-bg"><div class="score-bar" style="width:${barPct}%;background:${barCol}"></div></div>
           </div>
-          ${mtfRow}
+          ${mtfRow}${mlRow}
         </td>
         <td>${r.rsi != null ? fmt(r.rsi, 1) : '—'}</td>
         <td class="z-col" style="color:${zCol};${zBold}">${zStr}</td>
@@ -1075,6 +1406,9 @@ function applyState(s) {
     </tr>`).join('');
   }
 
+  // sector allocation pie
+  renderSectorPie(s.positions);
+
   // after-hours panel
   renderExtHours(s.extended_hours || [], s.market_open);
 
@@ -1095,6 +1429,82 @@ function applyState(s) {
   const eb = document.getElementById('err-banner');
   if (s.error) { eb.textContent = '⚠ ' + s.error; eb.style.display = 'block'; }
   else { eb.style.display = 'none'; }
+}
+
+// ── Sector allocation pie chart ───────────────────────────────────────────────
+function renderSectorPie(positions) {
+  const panel = document.getElementById('sector-pie-panel');
+  const el    = document.getElementById('sector-pie-plot');
+  const ct    = document.getElementById('sector-pie-count');
+  if (!positions || !positions.length) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  ct.textContent = positions.length;
+
+  const byValue = {};
+  positions.forEach(p => {
+    const sec = (p.sector && p.sector !== '—') ? p.sector : 'Other';
+    byValue[sec] = (byValue[sec] || 0) + (p.current_price * p.shares);
+  });
+  const labels = Object.keys(byValue);
+  const values = labels.map(l => Math.round(byValue[l] * 100) / 100);
+
+  const PALETTE = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6',
+                   '#ec4899','#14b8a6','#f97316','#84cc16','#06b6d4','#a855f7'];
+  const isLight = document.body.classList.contains('light');
+  const bg      = isLight ? 'rgba(255,255,255,0)' : 'rgba(0,0,0,0)';
+  const lineCol = isLight ? '#ffffff' : '#1e293b';
+  const fontCol = isLight ? '#475569' : '#94a3b8';
+
+  Plotly.react(el, [{
+    type: 'pie', labels, values, hole: 0.38,
+    textinfo: 'label+percent',
+    textfont: {size: 11, color: fontCol},
+    marker: {colors: PALETTE, line: {color: lineCol, width: 2}},
+    hovertemplate: '<b>%{label}</b><br>$%{value:,.0f}<br>%{percent}<extra></extra>',
+  }], {
+    paper_bgcolor: bg, plot_bgcolor: bg,
+    font: {color: fontCol, family: 'Segoe UI,system-ui,sans-serif', size: 11},
+    margin: {l: 10, r: 10, t: 10, b: 10},
+    legend: {font: {color: fontCol, size: 11}, bgcolor: 'rgba(0,0,0,0)', orientation: 'v'},
+    showlegend: true,
+  }, {responsive: true, displayModeBar: false});
+}
+
+// ── Watchlist heat map ────────────────────────────────────────────────────────
+function renderHeatmap(items) {
+  const panel = document.getElementById('heatmap-panel');
+  const grid  = document.getElementById('hm-grid');
+  if (!items || !items.length) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  const isLight = document.body.classList.contains('light');
+
+  grid.innerHTML = items.map(item => {
+    const pct  = item.change_pct;
+    const abs  = Math.abs(pct);
+    const intensity = Math.min(1, abs / 2.5);   // saturates at ±2.5%
+    const alpha = 0.12 + intensity * 0.55;
+    const isUp  = pct >= 0;
+    const bgCol = isUp
+      ? (isLight ? `rgba(21,128,61,${alpha})` : `rgba(34,197,94,${alpha})`)
+      : (isLight ? `rgba(185,28,28,${alpha})` : `rgba(239,68,68,${alpha})`);
+    const pctCol = isUp
+      ? (intensity > 0.35 ? '#4ade80' : '#22c55e')
+      : (intensity > 0.35 ? '#f87171' : '#ef4444');
+    const sign  = pct >= 0 ? '+' : '';
+    return `<div class="hm-cell" style="background:${bgCol}">
+      <div class="hm-sym">${item.symbol}</div>
+      <div class="hm-pct" style="color:${pctCol}">${sign}${pct.toFixed(2)}%</div>
+      <div class="hm-price">$${item.price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+    </div>`;
+  }).join('');
+}
+
+async function loadHeatmap() {
+  try {
+    const res  = await fetch('/api/heatmap');
+    const data = await res.json();
+    if (data.ok) renderHeatmap(data.items);
+  } catch(_) {}
 }
 
 function renderExtHours(rows, marketOpen) {
@@ -1197,6 +1607,7 @@ async function refresh() {
     const res = await fetch('/api/state');
     const data = await res.json();
     applyState(data);
+    loadHeatmap();
   } catch(e) {
     document.getElementById('err-banner').textContent = 'Failed to fetch state: ' + e;
     document.getElementById('err-banner').style.display = 'block';
@@ -1249,6 +1660,53 @@ async function runCycle() {
   }
 }
 
+// ── Dark / light theme ────────────────────────────────────────────────────────
+function toggleTheme() {
+  const light = document.body.classList.toggle('light');
+  localStorage.setItem('theme', light ? 'light' : 'dark');
+  document.getElementById('theme-btn').textContent = light ? '🌙' : '☀️';
+}
+(function initTheme() {
+  if (localStorage.getItem('theme') === 'light') {
+    document.body.classList.add('light');
+    const btn = document.getElementById('theme-btn');
+    if (btn) btn.textContent = '🌙';
+  }
+})();
+
+// ── Live P&L ticker ───────────────────────────────────────────────────────────
+let _prevPnlVal = null;
+function updatePnlTicker(unrealized, unrealizedPct, openPositions) {
+  const ticker = document.getElementById('pnl-ticker');
+  const valEl  = document.getElementById('pnl-ticker-val');
+  const pctEl  = document.getElementById('pnl-ticker-pct');
+  if (!openPositions || unrealized == null) { ticker.style.display = 'none'; return; }
+  ticker.style.display = '';
+  const sign = unrealized >= 0 ? '+' : '';
+  const col  = unrealized > 0 ? '#22c55e' : unrealized < 0 ? '#ef4444' : '#94a3b8';
+  if (_prevPnlVal !== null && _prevPnlVal !== unrealized) {
+    valEl.classList.remove('pnl-flash');
+    void valEl.offsetWidth;   // force reflow to restart animation
+    valEl.classList.add('pnl-flash');
+  }
+  _prevPnlVal = unrealized;
+  valEl.textContent = sign + '$' + Math.abs(unrealized).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  valEl.style.color = col;
+  pctEl.textContent = sign + unrealizedPct.toFixed(2) + '%';
+  pctEl.style.color = col;
+}
+
+async function pollPnl() {
+  try {
+    const res  = await fetch('/api/pnl');
+    const data = await res.json();
+    if (data.ok) updatePnlTicker(data.unrealized_pnl, data.unrealized_pnl_pct, data.open_positions);
+  } catch(_) {}
+}
+// Poll the lightweight pnl endpoint between full state refreshes
+setInterval(pollPnl, 5000);
+pollPnl();
+
 // Countdown ticker — updates every second without a server round-trip
 let _nextCycleAt = null;
 let _lastCycleAt = null;
@@ -1269,6 +1727,8 @@ setInterval(updateCycleInfo, 1000);
 // Initial load + auto-refresh every 5s (picks up background cycle results quickly)
 refresh();
 setInterval(refresh, 5000);
+// Heat map refreshes on each full state refresh (called inside refresh()) — also once on init
+loadHeatmap();
 
 // ── Chart modal ───────────────────────────────────────────────────────────────
 async function openChart(symbol) {
@@ -1400,6 +1860,7 @@ STATS_HTML = """<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Performance — NYSE Trading Engine</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
@@ -1429,6 +1890,18 @@ tr:hover td{background:#263044}
 /* chart */
 .chart-wrap{padding:16px;background:#0f172a;min-height:180px;display:flex;align-items:center;justify-content:center}
 .chart-empty{color:#475569;font-size:13px}
+/* period tabs */
+.tab-btn{padding:3px 12px;border-radius:99px;border:1px solid #334155;background:none;color:#64748b;font-size:11px;font-weight:600;cursor:pointer;min-height:24px}
+.tab-btn.active{background:#334155;color:#e2e8f0;border-color:#334155}
+/* section divider */
+.section-label{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:.6px;margin:16px 0 8px;font-weight:600}
+/* risk metric cards */
+.card-rating{font-size:10px;font-weight:600;padding:2px 7px;border-radius:99px;margin-top:4px;display:inline-block}
+.rating-great{background:#14532d;color:#4ade80}
+.rating-good{background:#1e3a5f;color:#93c5fd}
+.rating-ok{background:#451a03;color:#fdba74}
+.rating-bad{background:#7f1d1d;color:#f87171}
+.rating-na{background:#1e293b;color:#475569}
 /* notification panel */
 .notif-row{display:flex;align-items:flex-start;gap:14px;padding:14px 16px;border-bottom:1px solid #334155}
 .notif-row:last-child{border-bottom:none}
@@ -1482,11 +1955,63 @@ tr:hover td{background:#263044}
     </div>
   </div>
 
+  <!-- Risk metric cards -->
+  <div class="section-label">Risk Metrics</div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-label">Sharpe Ratio</div>
+      <div class="card-value neu" id="s-sharpe">—</div>
+      <div id="s-sharpe-rating" class="card-rating rating-na" style="margin-top:4px">Insufficient data</div>
+      <div class="card-sub" style="margin-top:4px">Annualised · RF 5%</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Max Drawdown</div>
+      <div class="card-value" id="s-maxdd">—</div>
+      <div id="s-maxdd-rating" class="card-rating rating-na" style="margin-top:4px">Insufficient data</div>
+      <div class="card-sub" id="s-maxdd-dollar" style="margin-top:4px">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Current Drawdown</div>
+      <div class="card-value" id="s-curdd">—</div>
+      <div class="card-sub" style="margin-top:4px">From all-time high</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Calmar Ratio</div>
+      <div class="card-value neu" id="s-calmar">—</div>
+      <div id="s-calmar-rating" class="card-rating rating-na" style="margin-top:4px">Insufficient data</div>
+      <div class="card-sub" style="margin-top:4px">Ann. return ÷ max DD</div>
+    </div>
+  </div>
+
+  <!-- Drawdown history chart -->
+  <div class="panel">
+    <div class="panel-title">Drawdown History
+      <span style="font-size:11px;color:#475569;margin-left:8px;font-weight:400">% below running peak · shaded area = underwater period</span>
+    </div>
+    <div style="padding:8px 4px 4px">
+      <div id="dd-chart" style="height:200px"></div>
+    </div>
+  </div>
+
   <!-- Equity chart -->
   <div class="panel">
     <div class="panel-title">Portfolio Value Over Time</div>
     <div class="chart-wrap" id="chart-wrap">
       <div class="chart-empty">Loading chart…</div>
+    </div>
+  </div>
+
+  <!-- Period P&L bar chart -->
+  <div class="panel">
+    <div class="panel-title">P&amp;L by Period
+      <span style="margin-left:auto;display:flex;gap:6px" id="period-tabs">
+        <button class="tab-btn active" onclick="switchPeriod('daily',this)">Daily</button>
+        <button class="tab-btn" onclick="switchPeriod('weekly',this)">Weekly</button>
+        <button class="tab-btn" onclick="switchPeriod('monthly',this)">Monthly</button>
+      </span>
+    </div>
+    <div style="padding:8px 4px 4px">
+      <div id="period-chart" style="height:240px"></div>
     </div>
   </div>
 
@@ -1707,6 +2232,145 @@ function renderJournal(entries) {
   }).join('');
 }
 
+// ── Risk metrics ─────────────────────────────────────────────────────────────
+function sharpeRating(v) {
+  if (v == null) return ['na',  'Insufficient data'];
+  if (v >= 2.0)  return ['great','Excellent (>2)'];
+  if (v >= 1.0)  return ['good', 'Good (1–2)'];
+  if (v >= 0.5)  return ['ok',   'Mediocre (0.5–1)'];
+  if (v >= 0.0)  return ['bad',  'Poor (0–0.5)'];
+  return          ['bad',  'Negative — underperforming risk-free'];
+}
+function ddRating(pct) {
+  if (pct == null) return ['na', 'Insufficient data'];
+  if (pct < 5)     return ['great', 'Excellent (<5%)'];
+  if (pct < 10)    return ['good',  'Good (5–10%)'];
+  if (pct < 20)    return ['ok',    'Moderate (10–20%)'];
+  return            ['bad',  'High risk (>20%)'];
+}
+function calmarRating(v) {
+  if (v == null) return ['na',  'Insufficient data'];
+  if (v >= 3.0)  return ['great','Excellent (>3)'];
+  if (v >= 1.0)  return ['good', 'Good (1–3)'];
+  if (v >= 0.5)  return ['ok',   'Mediocre (0.5–1)'];
+  return          ['bad',  'Poor (<0.5)'];
+}
+
+function renderRiskMetrics(rm) {
+  if (!rm) return;
+  const fmt2 = n => n == null ? '—' : n.toFixed(2);
+
+  // Sharpe
+  const sharpeEl = document.getElementById('s-sharpe');
+  const sharpeR  = document.getElementById('s-sharpe-rating');
+  sharpeEl.textContent = fmt2(rm.sharpe);
+  const [sc, sl] = sharpeRating(rm.sharpe);
+  sharpeEl.className = 'card-value ' + (rm.sharpe == null ? 'neu' : rm.sharpe >= 1 ? 'pos' : rm.sharpe < 0 ? 'neg' : 'neu');
+  sharpeR.className  = `card-rating rating-${sc}`;
+  sharpeR.textContent = sl;
+
+  // Max drawdown
+  const maxddEl = document.getElementById('s-maxdd');
+  const maxddR  = document.getElementById('s-maxdd-rating');
+  const maxddSub = document.getElementById('s-maxdd-dollar');
+  maxddEl.textContent = rm.max_drawdown_pct != null ? '-' + fmt2(rm.max_drawdown_pct) + '%' : '—';
+  maxddEl.className = 'card-value ' + (rm.max_drawdown_pct > 0 ? 'neg' : 'neu');
+  const [dc, dl] = ddRating(rm.max_drawdown_pct);
+  maxddR.className  = `card-rating rating-${dc}`;
+  maxddR.textContent = dl;
+  maxddSub.textContent = rm.max_drawdown_dollar > 0 ? '-$' + rm.max_drawdown_dollar.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
+
+  // Current drawdown
+  const curddEl = document.getElementById('s-curdd');
+  const pct = rm.current_drawdown_pct;
+  curddEl.textContent = pct != null ? (pct > 0 ? '-' + fmt2(pct) + '%' : '0.00% — At peak') : '—';
+  curddEl.className = 'card-value ' + (pct > 0 ? 'neg' : 'pos');
+
+  // Calmar
+  const calmarEl = document.getElementById('s-calmar');
+  const calmarR  = document.getElementById('s-calmar-rating');
+  calmarEl.textContent = fmt2(rm.calmar);
+  calmarEl.className = 'card-value ' + (rm.calmar == null ? 'neu' : rm.calmar >= 1 ? 'pos' : rm.calmar < 0 ? 'neg' : 'neu');
+  const [cc, cl] = calmarRating(rm.calmar);
+  calmarR.className  = `card-rating rating-${cc}`;
+  calmarR.textContent = cl;
+}
+
+function renderDrawdownChart(curve) {
+  const el = document.getElementById('dd-chart');
+  if (!el) return;
+  if (!curve || curve.length < 2) {
+    el.innerHTML = '<div style="color:#475569;text-align:center;padding:60px 0;font-size:13px">Not enough data — chart updates as cycles run</div>';
+    return;
+  }
+  const xs = curve.map(p => p.ts);
+  const ys = curve.map(p => p.dd);   // already negative (%  below peak)
+  const minY = Math.min(...ys, -0.1);
+
+  Plotly.react(el, [
+    // Shaded fill under the curve (underwater area)
+    {type: 'scatter', x: xs, y: ys, fill: 'tozeroy',
+     fillcolor: 'rgba(239,68,68,0.15)', line: {color: '#ef4444', width: 1.5},
+     name: 'Drawdown', hovertemplate: '%{x}<br>%{y:.2f}%<extra></extra>'},
+  ], {
+    paper_bgcolor: '#0f172a', plot_bgcolor: '#0f172a',
+    font: {color: '#94a3b8', family: 'Segoe UI,system-ui,sans-serif', size: 11},
+    margin: {l: 52, r: 16, t: 8, b: 42},
+    xaxis: {type: 'date', tickfont: {size: 9, color: '#475569'}, gridcolor: '#1e293b',
+            rangeslider: {visible: false}},
+    yaxis: {ticksuffix: '%', tickfont: {size: 10, color: '#475569'}, gridcolor: '#1e293b',
+            zeroline: true, zerolinecolor: '#334155', range: [minY * 1.1, 0.5]},
+    showlegend: false,
+  }, {responsive: true, displayModeBar: false});
+}
+
+// ── Period P&L bar chart ──────────────────────────────────────────────────────
+let _periodData = null;
+let _activePeriod = 'daily';
+
+function renderPeriodChart(periodKey) {
+  const el = document.getElementById('period-chart');
+  if (!el || !_periodData) return;
+  const rows = (_periodData[periodKey] || []);
+  if (!rows.length) {
+    el.innerHTML = '<div style="color:#475569;text-align:center;padding:60px 0;font-size:13px">No closed trades yet</div>';
+    return;
+  }
+  // Filter trailing zero-only rows from daily view to keep chart tight
+  let display = rows;
+  if (periodKey === 'daily') {
+    const lastNonZero = rows.reduce((idx, r, i) => r.pnl !== 0 ? i : idx, -1);
+    display = lastNonZero >= 0 ? rows.slice(Math.max(0, lastNonZero - 13), lastNonZero + 1) : rows.slice(-14);
+  }
+  const labels = display.map(r => r.period);
+  const values = display.map(r => r.pnl);
+  const colors = values.map(v => v >= 0 ? '#22c55e' : '#ef4444');
+  const maxAbs  = Math.max(...values.map(Math.abs), 1);
+
+  Plotly.react(el, [{
+    type: 'bar', x: labels, y: values,
+    marker: {color: colors, opacity: 0.85},
+    hovertemplate: '<b>%{x}</b><br>$%{y:+,.2f}<extra></extra>',
+  }], {
+    paper_bgcolor: '#0f172a', plot_bgcolor: '#0f172a',
+    font: {color: '#94a3b8', family: 'Segoe UI,system-ui,sans-serif', size: 11},
+    margin: {l: 62, r: 16, t: 10, b: 56},
+    xaxis: {tickfont: {size: 9, color: '#475569'}, gridcolor: '#1e293b',
+            tickangle: labels.length > 10 ? -45 : 0},
+    yaxis: {tickprefix: '$', tickfont: {size: 10, color: '#475569'}, gridcolor: '#1e293b',
+            zeroline: true, zerolinecolor: '#334155', zerolinewidth: 1,
+            range: [-maxAbs * 1.15, maxAbs * 1.15]},
+    bargap: 0.3, showlegend: false,
+  }, {responsive: true, displayModeBar: false});
+}
+
+function switchPeriod(key, btn) {
+  _activePeriod = key;
+  document.querySelectorAll('#period-tabs .tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderPeriodChart(key);
+}
+
 fetch('/api/stats')
   .then(r => r.json())
   .then(data => {
@@ -1714,6 +2378,10 @@ fetch('/api/stats')
     renderChart(data.equity_snapshots, data.initial_capital);
     renderNotifications(data.notifications);
     renderTrades(data.trades);
+    _periodData = data.period_pnl || null;
+    renderPeriodChart(_activePeriod);
+    renderRiskMetrics(data.risk_metrics || null);
+    renderDrawdownChart((data.risk_metrics || {}).drawdown_curve || []);
   })
   .catch(e => {
     document.querySelector('main').innerHTML = '<p style="color:#f87171;padding:24px">Failed to load stats: ' + e + '</p>';

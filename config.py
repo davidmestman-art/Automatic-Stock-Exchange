@@ -102,6 +102,22 @@ class TradingConfig:
     # ── VOO 200-week MA monitor ───────────────────────────────────────────────
     voo_alert_threshold_pct: float = 2.0
 
+    # ── Multi-timeframe confirmation ──────────────────────────────────────────
+    mtf_min_agreeing: int = 2            # require ≥ N timeframes to agree before trading
+
+    # ── Market regime detection ───────────────────────────────────────────────
+    use_regime_detection: bool = True
+    regime_bull_vix_max: float = 25.0
+    regime_bear_vix_min: float = 27.0
+    regime_size_mult_bull: float = 1.0
+    regime_size_mult_choppy: float = 0.70
+    regime_size_mult_bear: float = 0.35
+    regime_bear_min_score_mult: float = 1.8   # BEAR: only trade if score > threshold × mult
+
+    # ── ML signal ranking ─────────────────────────────────────────────────────
+    use_ml_ranking: bool = True
+    ml_min_samples: int = 20
+
     # ── Notifications ─────────────────────────────────────────────────────────
     ntfy_topic: str = field(default_factory=lambda: os.getenv("NTFY_TOPIC", ""))
     pushover_token: str = field(default_factory=lambda: os.getenv("PUSHOVER_TOKEN", ""))

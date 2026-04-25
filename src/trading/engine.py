@@ -15,6 +15,8 @@ from .executor import PaperExecutor
 from .portfolio import Portfolio
 from .risk import RiskManager
 
+_REGIME_SIZE_MULT = {"BULL": 1.0, "CHOPPY": 0.70, "BEAR": 0.35}
+
 logger = logging.getLogger(__name__)
 
 _SEP = "=" * 64
@@ -98,6 +100,25 @@ class TradingEngine:
                 analyzer=self.analyzer,
                 buy_threshold=config.buy_threshold,
                 sell_threshold=config.sell_threshold,
+                min_agreeing=getattr(config, "mtf_min_agreeing", 2),
+            )
+
+        # Market regime detector
+        self._regime_detector = None
+        self._regime_result = None
+        if getattr(config, "use_regime_detection", False):
+            from ..data.market_regime import RegimeDetector
+            self._regime_detector = RegimeDetector(
+                bull_vix_max=getattr(config, "regime_bull_vix_max", 25.0),
+                bear_vix_min=getattr(config, "regime_bear_vix_min", 27.0),
+            )
+
+        # ML signal ranker
+        self._signal_ranker = None
+        if getattr(config, "use_ml_ranking", False):
+            from ..ml.signal_ranker import SignalRanker
+            self._signal_ranker = SignalRanker(
+                min_samples=getattr(config, "ml_min_samples", 20)
             )
 
         if config.use_alpaca:
@@ -137,6 +158,13 @@ class TradingEngine:
             return {}
 
         self._maybe_refresh_watchlist()
+
+        # Refresh market regime (cached; fetches at most once every 4 h)
+        if self._regime_detector is not None:
+            try:
+                self._regime_result = self._regime_detector.detect()
+            except Exception as e:
+                logger.warning(f"  Regime detection failed: {e}")
 
         # VOO monitor — cached daily; send alert notification at most once per day
         voo = self.voo_monitor.check()
@@ -226,6 +254,18 @@ class TradingEngine:
                     )
                     continue
 
+                # In BEAR regime, only trade if signal is strong enough
+                if self._regime_result is not None and self._regime_result.regime == "BEAR":
+                    bear_min = self.config.buy_threshold * getattr(
+                        self.config, "regime_bear_min_score_mult", 1.8
+                    )
+                    if signal.score < bear_min:
+                        logger.info(
+                            f"  BEAR regime: skipping BUY {symbol} "
+                            f"(score={signal.score:.3f} < {bear_min:.3f})"
+                        )
+                        continue
+
                 rc = self.risk.check_buy(
                     symbol=symbol,
                     price=current_price,
@@ -238,6 +278,14 @@ class TradingEngine:
                     atr_pct=ind.atr_pct,
                 )
                 if rc.approved:
+                    # Apply regime-based position-size multiplier
+                    if self._regime_result is not None:
+                        cfg = self.config
+                        mult_key = f"regime_size_mult_{self._regime_result.regime.lower()}"
+                        regime_mult = getattr(cfg, mult_key, _REGIME_SIZE_MULT.get(
+                            self._regime_result.regime, 1.0
+                        ))
+                        rc.max_shares = rc.max_shares * regime_mult
                     if self.config.use_confirmation and symbol not in _confirmed_buys:
                         # Queue for next-candle confirmation
                         self._pending_signals[symbol] = {
@@ -319,6 +367,13 @@ class TradingEngine:
         # Update correlation state so dashboard always reflects current positions
         self._last_corr_blocked = self._compute_corr_blocks(market_data)
 
+        # Refresh regime (cached)
+        if self._regime_detector is not None:
+            try:
+                self._regime_result = self._regime_detector.detect()
+            except Exception as e:
+                logger.warning(f"  Regime detection failed: {e}")
+
         signals, ind_map = {}, {}
         for symbol in symbols:
             if symbol not in market_data or symbol not in prices:
@@ -328,6 +383,19 @@ class TradingEngine:
             signals[symbol] = self._compute_signal(symbol, ind)
             ind_map[symbol] = ind
         return signals, prices, ind_map
+
+    @property
+    def current_regime(self):
+        """Most recently detected market regime result, or None."""
+        return self._regime_result
+
+    @property
+    def ml_status(self) -> dict:
+        """Current ML ranker status dict."""
+        if self._signal_ranker is None:
+            return {"trained": False, "samples": 0, "accuracy": None,
+                    "last_trained": None, "sklearn_available": False}
+        return self._signal_ranker.status()
 
     def refresh_watchlist(self) -> List[str]:
         """Force an immediate session scan and return the new watchlist."""
@@ -340,35 +408,57 @@ class TradingEngine:
     # ── Signal computation ────────────────────────────────────────────────────
 
     def _compute_signal(self, symbol: str, ind) -> SignalResult:
-        """Return a signal, optionally blending multi-timeframe scores."""
+        """Return a signal, optionally blending multi-timeframe scores and ML ranking."""
         base_signal = self.analyzer.analyze(ind)
-        if self._mtf_analyzer is None:
-            return base_signal
 
-        mtf = self._mtf_analyzer.analyze(symbol)
-        if mtf is None:
-            return base_signal
+        if self._mtf_analyzer is not None:
+            mtf = self._mtf_analyzer.analyze(symbol)
+            if mtf is not None:
+                action = mtf.action
+                score = mtf.composite
+                confidence = mtf.confidence
+                reasons = [
+                    f"MTF 1d={mtf.score_1d:+.3f} 1h={mtf.score_1h:+.3f} "
+                    f"15m={mtf.score_15m:+.3f} agree={mtf.agreement}/3",
+                    *base_signal.reasons[:2],
+                ]
+                indicator_scores = {
+                    "1d": mtf.score_1d,
+                    "1h": mtf.score_1h,
+                    "15m": mtf.score_15m,
+                    "mtf_agreement": float(mtf.agreement),
+                    **base_signal.indicator_scores,
+                }
+                base_signal = SignalResult(
+                    action=action,
+                    score=score,
+                    confidence=confidence,
+                    reasons=reasons,
+                    indicator_scores=indicator_scores,
+                )
 
-        # Blend: MTF composite replaces the score/action; keep 1d reasons for context
-        action = mtf.action
-        score = mtf.composite
-        confidence = mtf.confidence
-        reasons = [
-            f"MTF 1d={mtf.score_1d:+.3f} 1h={mtf.score_1h:+.3f} 15m={mtf.score_15m:+.3f}",
-            *base_signal.reasons[:2],
-        ]
-        return SignalResult(
-            action=action,
-            score=score,
-            confidence=confidence,
-            reasons=reasons,
-            indicator_scores={
-                "1d": mtf.score_1d,
-                "1h": mtf.score_1h,
-                "15m": mtf.score_15m,
-                **base_signal.indicator_scores,
-            },
-        )
+        # ML score adjustment — applied last as a final multiplier
+        ml_mult = 1.0
+        if self._signal_ranker is not None and self._signal_ranker.is_trained:
+            snap = self._indicator_snapshot(ind, base_signal)
+            ml_mult = self._signal_ranker.score_adjustment(snap)
+            adjusted_score = max(-1.0, min(1.0, base_signal.score * ml_mult))
+            buy_th = self.config.buy_threshold
+            sell_th = self.config.sell_threshold
+            action = (
+                "BUY" if adjusted_score >= buy_th
+                else "SELL" if adjusted_score <= sell_th
+                else "HOLD"
+            )
+            base_signal = SignalResult(
+                action=action,
+                score=round(adjusted_score, 4),
+                confidence=round(abs(adjusted_score), 4),
+                reasons=base_signal.reasons,
+                indicator_scores={**base_signal.indicator_scores, "ml_mult": ml_mult},
+            )
+
+        return base_signal
 
     @staticmethod
     def _indicator_snapshot(ind, signal: SignalResult) -> dict:
@@ -377,6 +467,8 @@ class TradingEngine:
             "macd_hist": round(ind.macd_hist, 4) if ind.macd_hist is not None else None,
             "ema_fast": round(ind.ema_fast, 2) if ind.ema_fast is not None else None,
             "ema_slow": round(ind.ema_slow, 2) if ind.ema_slow is not None else None,
+            "z_score": round(ind.z_score, 4) if getattr(ind, "z_score", None) is not None else None,
+            "atr_pct": round(ind.atr_pct, 4) if getattr(ind, "atr_pct", None) is not None else None,
             "score": round(signal.score, 4),
             "confidence": round(signal.confidence, 4),
         }
@@ -401,6 +493,13 @@ class TradingEngine:
                 logger.warning("  Scan returned empty watchlist — keeping previous")
         except Exception as e:
             logger.error(f"  Watchlist scan failed: {e} — keeping previous")
+
+        # Attempt ML model (re-)training at the start of each new session
+        if self._signal_ranker is not None:
+            try:
+                self._signal_ranker.maybe_train(self.journal)
+            except Exception as e:
+                logger.warning(f"  ML training failed: {e}")
 
     def _market_is_open(self) -> bool:
         clock = self.executor.get_clock_info()
