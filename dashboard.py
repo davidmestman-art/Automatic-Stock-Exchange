@@ -15,6 +15,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template_string
 
 from config import config
+from src.data.extended_hours import ExtendedHoursMonitor
 from src.trading.engine import TradingEngine
 from src.utils.sectors import get_sector, positions_by_sector
 
@@ -28,6 +29,7 @@ _last_cycle_at: Optional[datetime] = None
 _next_cycle_at: Optional[datetime] = None
 _equity_snapshots: list = []          # [{ts, value}] — portfolio value over time
 _last_snapshot_ts: Optional[datetime] = None
+_ext_hours = ExtendedHoursMonitor(cache_ttl_seconds=120)
 
 log = logging.getLogger(__name__)
 
@@ -77,16 +79,25 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 pnl_pct = float(p["pnl_pct"]) * 100 if p["pnl_pct"] is not None else (
                     (cp - entry) / entry * 100 if entry else 0
                 )
+                sym = p["symbol"]
+                local_pos = portfolio.positions.get(sym)
+                if local_pos and config.use_trailing_stop:
+                    trail_stop = round(local_pos.stop_loss, 2)
+                    highest = round(local_pos.highest_price, 2)
+                else:
+                    trail_stop = round(entry * (1 - config.stop_loss_pct), 2)
+                    highest = None
                 pos_list.append({
-                    "symbol": p["symbol"],
+                    "symbol": sym,
                     "shares": round(float(p["shares"]), 4),
                     "entry_price": round(entry, 2),
                     "current_price": round(cp, 2),
-                    "stop_loss": round(entry * (1 - config.stop_loss_pct), 2),
+                    "stop_loss": trail_stop,
+                    "highest_price": highest,
                     "take_profit": round(entry * (1 + config.take_profit_pct), 2),
                     "pnl": round(pnl, 2),
                     "pnl_pct": round(pnl_pct, 2),
-                    "sector": get_sector(p["symbol"]) or "—",
+                    "sector": get_sector(sym) or "—",
                 })
         except Exception as e:
             log.warning(f"Alpaca live positions failed: {e}")
@@ -101,6 +112,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "entry_price": round(pos.entry_price, 2),
                 "current_price": round(cp, 2),
                 "stop_loss": round(pos.stop_loss, 2),
+                "highest_price": round(pos.highest_price, 2) if config.use_trailing_stop else None,
                 "take_profit": round(pos.take_profit, 2),
                 "pnl": round(pos.unrealized_pnl(cp), 2),
                 "pnl_pct": round(pos.unrealized_pnl_pct(cp) * 100, 2),
@@ -218,6 +230,13 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         except Exception:
             market_open = None
 
+    # ── Extended hours ────────────────────────────────────────────────────────
+    ext_hours = []
+    try:
+        ext_hours = _ext_hours.fetch(_engine.watchlist)
+    except Exception as e:
+        log.debug(f"Extended hours fetch error: {e}")
+
     return {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "mode": mode,
@@ -251,6 +270,10 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "max_per_sector": config.max_positions_per_sector,
         "earnings_enabled": config.use_earnings_protection,
         "earnings_warnings": earnings_warnings,
+        "trailing_stop_enabled": config.use_trailing_stop,
+        "confirmation_enabled": config.use_confirmation,
+        "pending_confirmation": list(_engine.pending_confirmations.keys()),
+        "extended_hours": ext_hours,
     }
 
 
@@ -741,6 +764,19 @@ tr:hover td{background:#263044}
     <div style="display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px" id="wl-chips"></div>
   </div>
 
+  <!-- after-hours / pre-market panel -->
+  <div class="panel grid1" id="ext-hours-panel" style="display:none">
+    <div class="panel-title">Pre / Post-Market
+      <span style="font-size:11px;color:#475569;margin-left:8px" id="ext-hours-note">2-min cache</span>
+    </div>
+    <div class="tbl-wrap"><table>
+      <thead><tr>
+        <th>Ticker</th><th>Regular Close</th><th>Pre-Market</th><th>Pre Chg</th><th>Post-Market</th><th>Post Chg</th>
+      </tr></thead>
+      <tbody id="ext-hours-body"><tr><td colspan="6" class="empty">No data</td></tr></tbody>
+    </table></div>
+  </div>
+
   <!-- signal analysis -->
   <div class="panel grid1">
     <div class="panel-title">Signal Analysis <span class="count" id="sig-count">0</span>
@@ -757,13 +793,15 @@ tr:hover td{background:#263044}
   <!-- positions + trades -->
   <div class="grid2">
     <div class="panel">
-      <div class="panel-title">Positions <span class="count" id="pos-count">0</span></div>
+      <div class="panel-title">Positions <span class="count" id="pos-count">0</span>
+        <span id="trail-badge" style="display:none;margin-left:auto;font-size:10px;padding:2px 8px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600">TRAILING STOP ON</span>
+      </div>
       <div class="sector-strip" id="sector-strip" style="display:none"></div>
       <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Ticker</th><th>Sector</th><th>Entry</th><th>Current</th><th>Qty</th><th>Unrealized P&amp;L</th>
+          <th>Ticker</th><th>Sector</th><th>Entry</th><th>Current</th><th id="stop-th">Stop</th><th>Qty</th><th>Unrealized P&amp;L</th>
         </tr></thead>
-        <tbody id="pos-body"><tr><td colspan="6" class="empty">No open positions</td></tr></tbody>
+        <tbody id="pos-body"><tr><td colspan="7" class="empty">No open positions</td></tr></tbody>
       </table></div>
     </div>
     <div class="panel">
@@ -892,8 +930,12 @@ function applyState(s) {
       const vrBold = vr >= 1.5 ? 'font-weight:600;' : '';
       const vrStr  = vr == null ? '—' : `${vr.toFixed(1)}×${vrIcon}`;
       const rowHighlight = vr >= 2 ? 'background:rgba(249,115,22,0.05);' : '';
+      const isPending = s.confirmation_enabled && (s.pending_confirmation||[]).includes(r.symbol);
+      const pendingBadge = isPending
+        ? `<span title="Awaiting next-candle confirmation" style="margin-left:5px;font-size:10px;color:#f59e0b;font-weight:700">⏳</span>`
+        : '';
       return `<tr style="${rowHighlight}">
-        <td class="sym-link" style="font-weight:600" onclick="openChart('${r.symbol}')" title="Click for chart">${r.symbol}</td>
+        <td class="sym-link" style="font-weight:600" onclick="openChart('${r.symbol}')" title="Click for chart">${r.symbol}${pendingBadge}</td>
         <td style="color:#64748b;font-size:12px">${r.sector||'—'}</td>
         <td>$${fmt(r.price)}</td>
         <td><span class="pill pill-${r.action}">${r.action}</span></td>
@@ -926,20 +968,40 @@ function applyState(s) {
     strip.style.display = 'none';
   }
 
-  // positions — Ticker, Sector, Entry, Current, Qty, Unrealized P&L
+  // trailing stop badge
+  const trailBadge = document.getElementById('trail-badge');
+  if (s.trailing_stop_enabled) {
+    trailBadge.style.display = 'inline-block';
+    document.getElementById('stop-th').textContent = 'Trail Stop';
+  } else {
+    trailBadge.style.display = 'none';
+    document.getElementById('stop-th').textContent = 'Stop';
+  }
+
+  // positions — Ticker, Sector, Entry, Current, Stop/Trail, Qty, Unrealized P&L
   document.getElementById('pos-count').textContent = s.positions.length;
   const pb = document.getElementById('pos-body');
   if (!s.positions.length) {
-    pb.innerHTML = '<tr><td colspan="6" class="empty">No open positions</td></tr>';
+    pb.innerHTML = '<tr><td colspan="7" class="empty">No open positions</td></tr>';
   } else {
-    pb.innerHTML = s.positions.map(p => `<tr>
-      <td style="font-weight:600">${p.symbol}</td>
-      <td style="color:#64748b;font-size:12px">${p.sector||'—'}</td>
-      <td>$${fmt(p.entry_price)}</td>
-      <td>$${fmt(p.current_price)}</td>
-      <td>${p.shares}</td>
-      <td class="${cls(p.pnl)}">${p.pnl >= 0 ? '+' : ''}$${fmt(Math.abs(p.pnl))} (${p.pnl_pct >= 0 ? '+' : ''}${fmt(p.pnl_pct)}%)</td>
-    </tr>`).join('');
+    pb.innerHTML = s.positions.map(p => {
+      // Stop column: green when trailing stop has ratcheted above the fixed stop
+      const fixedStop = p.entry_price * (1 - 0.05);
+      const stopMoved = s.trailing_stop_enabled && p.stop_loss > fixedStop * 1.001;
+      const stopCol = stopMoved ? '#4ade80' : '#94a3b8';
+      const stopTip = stopMoved
+        ? `title="High: $${fmt(p.highest_price)}  Locked in ${fmt((p.stop_loss/p.entry_price-1)*100,1)}%"`
+        : '';
+      return `<tr>
+        <td style="font-weight:600">${p.symbol}</td>
+        <td style="color:#64748b;font-size:12px">${p.sector||'—'}</td>
+        <td>$${fmt(p.entry_price)}</td>
+        <td>$${fmt(p.current_price)}</td>
+        <td style="color:${stopCol};font-size:12px" ${stopTip}>$${fmt(p.stop_loss)}${stopMoved?' ↑':''}</td>
+        <td>${p.shares}</td>
+        <td class="${cls(p.pnl)}">${p.pnl >= 0 ? '+' : ''}$${fmt(Math.abs(p.pnl))} (${p.pnl_pct >= 0 ? '+' : ''}${fmt(p.pnl_pct)}%)</td>
+      </tr>`;
+    }).join('');
   }
 
   // trades — columns: Time, Ticker, Side, Qty, Price, Realized P&L
@@ -958,6 +1020,9 @@ function applyState(s) {
     </tr>`).join('');
   }
 
+  // after-hours panel
+  renderExtHours(s.extended_hours || [], s.market_open);
+
   // notification bell — full opacity when at least one channel is configured
   const bell = document.getElementById('notif-indicator');
   if (s.notifications && (s.notifications.ntfy || s.notifications.pushover)) {
@@ -975,6 +1040,40 @@ function applyState(s) {
   const eb = document.getElementById('err-banner');
   if (s.error) { eb.textContent = '⚠ ' + s.error; eb.style.display = 'block'; }
   else { eb.style.display = 'none'; }
+}
+
+function renderExtHours(rows, marketOpen) {
+  const panel = document.getElementById('ext-hours-panel');
+  const body  = document.getElementById('ext-hours-body');
+  const note  = document.getElementById('ext-hours-note');
+
+  if (!rows || !rows.length) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+
+  const hasAnyExt = rows.some(r => r.pre_market_price != null || r.post_market_price != null);
+  if (!hasAnyExt) {
+    note.textContent = marketOpen ? 'Market is open — extended hours data not available' : '2-min cache';
+    body.innerHTML = '<tr><td colspan="6" class="empty" style="font-size:12px">' +
+      (marketOpen ? 'Pre/post-market prices are unavailable while market is open.' : 'No extended-hours data available.') +
+      '</td></tr>';
+    return;
+  }
+  note.textContent = '2-min cache';
+
+  const chgCell = (price, pct) => {
+    if (price == null) return '<td style="color:#475569">—</td><td style="color:#475569">—</td>';
+    const col = pct == null ? '#e2e8f0' : pct > 0 ? '#22c55e' : pct < 0 ? '#ef4444' : '#94a3b8';
+    const pctStr = pct == null ? '—' : (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+    return `<td>$${fmt(price)}</td><td style="color:${col};font-weight:600">${pctStr}</td>`;
+  };
+  body.innerHTML = rows.map(r =>
+    `<tr>
+      <td style="font-weight:600">${r.symbol}</td>
+      <td>${r.regular_price != null ? '$' + fmt(r.regular_price) : '—'}</td>
+      ${chgCell(r.pre_market_price, r.pre_market_change_pct)}
+      ${chgCell(r.post_market_price, r.post_market_change_pct)}
+    </tr>`
+  ).join('');
 }
 
 function renderVOO(voo) {

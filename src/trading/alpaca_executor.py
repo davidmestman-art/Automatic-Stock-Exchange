@@ -112,11 +112,21 @@ class AlpacaExecutor:
             for sym, ap in alpaca_positions.items():
                 entry = float(ap.avg_entry_price)
                 qty = float(ap.qty)
-                sl = entry * (1 - (risk_mgr.stop_loss_pct if risk_mgr else 0.05))
+                current = float(ap.current_price) if ap.current_price else entry
+                base_sl = entry * (1 - (risk_mgr.stop_loss_pct if risk_mgr else 0.05))
                 tp = entry * (1 + (risk_mgr.take_profit_pct if risk_mgr else 0.15))
 
-                if sym not in portfolio.positions:
+                use_trail = risk_mgr and risk_mgr.use_trailing_stop
+                trail_pct = risk_mgr.trailing_stop_pct if use_trail else 0.05
+                if sym in portfolio.positions:
+                    # Carry over the highest_price tracked so far, then update
+                    existing = portfolio.positions[sym]
+                    highest = max(existing.highest_price, current)
+                else:
                     logger.info(f"  [SYNC] Added position {sym} ({qty} shares @ ${entry:.2f})")
+                    highest = max(entry, current)
+
+                sl = max(highest * (1 - trail_pct), base_sl) if use_trail else base_sl
                 portfolio.positions[sym] = Position(
                     symbol=sym,
                     shares=qty,
@@ -124,6 +134,7 @@ class AlpacaExecutor:
                     entry_time=datetime.now(),
                     stop_loss=sl,
                     take_profit=tp,
+                    highest_price=highest,
                 )
 
             portfolio.cash = float(acct.cash)

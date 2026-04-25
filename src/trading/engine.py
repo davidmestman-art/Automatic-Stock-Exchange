@@ -49,6 +49,8 @@ class TradingEngine:
             take_profit_pct=config.take_profit_pct,
             daily_loss_limit_pct=config.daily_loss_limit_pct,
             max_positions_per_sector=config.max_positions_per_sector,
+            use_trailing_stop=config.use_trailing_stop,
+            trailing_stop_pct=config.trailing_stop_pct,
         )
 
         # Optional components
@@ -111,6 +113,8 @@ class TradingEngine:
         self._session_date: Optional[str] = None
         self._voo_alert_sent_date: Optional[str] = None  # send at most one VOO alert per day
         self.watchlist: List[str] = list(config.symbols)
+        # BUY signals waiting for next-candle confirmation (symbol → {signal_price, queued_at})
+        self._pending_signals: Dict[str, dict] = {}
 
         logger.info(f"TradingEngine initialised  [mode={mode}]")
 
@@ -149,8 +153,23 @@ class TradingEngine:
         if self._cycle == 1:
             self.portfolio.update_day_start(prices)
 
-        if not self._use_alpaca:
-            self._check_exit_conditions(prices)
+        # Trailing stop updates + exit checks run in all modes
+        self._check_exit_conditions(prices)
+
+        # Process confirmations queued in the previous cycle
+        _confirmed_buys: set = set()
+        if self.config.use_confirmation and self._pending_signals:
+            tol = self.config.confirmation_tolerance_pct
+            for sym, info in list(self._pending_signals.items()):
+                if sym in prices:
+                    cp = prices[sym]
+                    floor = info["signal_price"] * (1 - tol)
+                    if cp >= floor:
+                        _confirmed_buys.add(sym)
+                        logger.info(f"  Confirmation PASSED {sym}: ${cp:.2f} ≥ ${floor:.2f}")
+                    else:
+                        logger.info(f"  Confirmation FAILED {sym}: ${cp:.2f} dropped below ${floor:.2f}")
+            self._pending_signals.clear()
 
         results: Dict[str, SignalResult] = {}
 
@@ -196,26 +215,34 @@ class TradingEngine:
                     sector_positions=sector_position_count(symbol, self.portfolio.positions),
                 )
                 if rc.approved:
-                    self.executor.execute_buy(
-                        symbol=symbol,
-                        shares=rc.max_shares,
-                        price=current_price,
-                        stop_loss=self.risk.stop_loss_price(current_price),
-                        take_profit=self.risk.take_profit_price(current_price),
-                        reason=", ".join(signal.reasons[:2]),
-                        portfolio=self.portfolio,
-                    )
-                    self.notifier.trade_buy(
-                        symbol, rc.max_shares, current_price, ", ".join(signal.reasons[:2])
-                    )
-                    self.journal.log(
-                        action="BUY",
-                        symbol=symbol,
-                        shares=rc.max_shares,
-                        price=current_price,
-                        reason=", ".join(signal.reasons[:2]),
-                        indicators=ind_snap,
-                    )
+                    if self.config.use_confirmation and symbol not in _confirmed_buys:
+                        # Queue for next-candle confirmation
+                        self._pending_signals[symbol] = {
+                            "signal_price": current_price,
+                            "queued_at": datetime.now().isoformat(),
+                        }
+                        logger.info(f"  {symbol}: BUY queued for confirmation @ ${current_price:.2f}")
+                    else:
+                        self.executor.execute_buy(
+                            symbol=symbol,
+                            shares=rc.max_shares,
+                            price=current_price,
+                            stop_loss=self.risk.stop_loss_price(current_price),
+                            take_profit=self.risk.take_profit_price(current_price),
+                            reason=", ".join(signal.reasons[:2]),
+                            portfolio=self.portfolio,
+                        )
+                        self.notifier.trade_buy(
+                            symbol, rc.max_shares, current_price, ", ".join(signal.reasons[:2])
+                        )
+                        self.journal.log(
+                            action="BUY",
+                            symbol=symbol,
+                            shares=rc.max_shares,
+                            price=current_price,
+                            reason=", ".join(signal.reasons[:2]),
+                            indicators=ind_snap,
+                        )
                 else:
                     logger.debug(f"  Risk rejected {symbol}: {rc.reason}")
 
@@ -246,6 +273,11 @@ class TradingEngine:
 
         self._log_summary(prices)
         return results
+
+    @property
+    def pending_confirmations(self) -> Dict[str, dict]:
+        """BUY signals queued for next-candle confirmation."""
+        return dict(self._pending_signals)
 
     def get_signals(self):
         """Fetch data and compute signals without placing any orders."""
@@ -320,6 +352,9 @@ class TradingEngine:
         today = datetime.now().strftime("%Y-%m-%d")
         if self._session_date == today:
             return
+        if self._pending_signals:
+            logger.info(f"  New session — clearing {len(self._pending_signals)} stale pending signals")
+            self._pending_signals.clear()
         logger.info(f"  New session ({today}) — running watchlist scan…")
         try:
             result = self.scanner.scan(self.indicators, self.analyzer)
@@ -356,8 +391,13 @@ class TradingEngine:
         exits = []
         for symbol, pos in self.portfolio.positions.items():
             price = prices.get(symbol, pos.entry_price)
-            if self.risk.check_stop_loss(pos.entry_price, price):
-                exits.append((symbol, price, "Stop loss triggered"))
+            self.risk.update_trailing_stop(pos, price)
+            stop_reason = (
+                "Trailing stop triggered" if self.risk.use_trailing_stop
+                else "Stop loss triggered"
+            )
+            if self.risk.check_stop_loss(pos.entry_price, price, pos):
+                exits.append((symbol, price, stop_reason))
             elif self.risk.check_take_profit(pos.entry_price, price):
                 exits.append((symbol, price, "Take profit triggered"))
         for symbol, price, reason in exits:

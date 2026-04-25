@@ -11,6 +11,11 @@ class Position:
     entry_time: datetime
     stop_loss: float
     take_profit: float
+    highest_price: float = 0.0   # tracks new highs for trailing stop
+
+    def __post_init__(self):
+        if self.highest_price == 0.0:
+            self.highest_price = self.entry_price
 
     @property
     def cost_basis(self) -> float:

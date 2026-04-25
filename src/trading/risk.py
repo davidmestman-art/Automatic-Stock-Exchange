@@ -17,6 +17,8 @@ class RiskManager:
         take_profit_pct: float = 0.15,
         daily_loss_limit_pct: float = 0.03,
         max_positions_per_sector: int = 3,
+        use_trailing_stop: bool = True,
+        trailing_stop_pct: float = 0.05,
     ):
         self.max_position_pct = max_position_pct
         self.max_open_positions = max_open_positions
@@ -24,6 +26,8 @@ class RiskManager:
         self.take_profit_pct = take_profit_pct
         self.daily_loss_limit_pct = daily_loss_limit_pct
         self.max_positions_per_sector = max_positions_per_sector
+        self.use_trailing_stop = use_trailing_stop
+        self.trailing_stop_pct = trailing_stop_pct
 
     def check_buy(
         self,
@@ -63,7 +67,19 @@ class RiskManager:
 
         return RiskCheck(True, "Risk checks passed", max_shares=position_value / price)
 
-    def check_stop_loss(self, entry_price: float, current_price: float) -> bool:
+    def update_trailing_stop(self, pos, current_price: float) -> bool:
+        """Ratchet pos.stop_loss up when price makes a new high. Returns True if updated."""
+        if not self.use_trailing_stop:
+            return False
+        if current_price > pos.highest_price:
+            pos.highest_price = current_price
+            pos.stop_loss = round(current_price * (1 - self.trailing_stop_pct), 4)
+            return True
+        return False
+
+    def check_stop_loss(self, entry_price: float, current_price: float, pos=None) -> bool:
+        if self.use_trailing_stop and pos is not None:
+            return current_price <= pos.stop_loss
         return current_price <= entry_price * (1 - self.stop_loss_pct)
 
     def check_take_profit(self, entry_price: float, current_price: float) -> bool:

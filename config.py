@@ -37,6 +37,14 @@ class TradingConfig:
     take_profit_pct: float = 0.15
     daily_loss_limit_pct: float = 0.03
 
+    # ── Trailing stop-loss ────────────────────────────────────────────────────
+    use_trailing_stop: bool = True
+    trailing_stop_pct: float = 0.05        # stop ratchets to -5% below new highs
+
+    # ── Entry confirmation ────────────────────────────────────────────────────
+    use_confirmation: bool = True
+    confirmation_tolerance_pct: float = 0.005   # allow 0.5% pullback before rejecting
+
     # ── Signal thresholds ─────────────────────────────────────────────────────
     buy_threshold: float = 0.20
     sell_threshold: float = -0.20
