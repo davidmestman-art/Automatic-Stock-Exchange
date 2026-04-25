@@ -351,6 +351,28 @@ def api_voo():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/pnl")
+def api_pnl():
+    """Lightweight endpoint — reads from cached state, no market data fetch."""
+    with _lock:
+        p = _last_state.get("portfolio", {})
+        positions = _last_state.get("positions", [])
+    if not p:
+        return jsonify({"ok": False, "reason": "no data yet"})
+    unrealized = sum(pos.get("pnl") or 0 for pos in positions)
+    basis = (p.get("total_value") or 0) - unrealized
+    unrealized_pct = round(unrealized / basis * 100, 2) if basis > 0 else 0.0
+    return jsonify({
+        "ok": True,
+        "unrealized_pnl": round(unrealized, 2),
+        "unrealized_pnl_pct": unrealized_pct,
+        "total_pnl": p.get("total_pnl"),
+        "total_pnl_pct": p.get("total_pnl_pct"),
+        "open_positions": len(positions),
+        "ts": _last_state.get("timestamp"),
+    })
+
+
 @app.route("/api/rescan", methods=["POST"])
 def api_rescan():
     global _last_state
@@ -695,6 +717,67 @@ tr:hover td{background:#263044}
   .score-bar-bg{width:36px}
   .pill{font-size:10px;padding:2px 6px}
 }
+
+/* ── Light theme ─────────────────────────────────────────────────────────────
+   Additive overrides — every dark colour is re-declared here so the rest of
+   the CSS never needs to be touched when the theme changes.
+   ─────────────────────────────────────────────────────────────────────────── */
+body.light{background:#f1f5f9;color:#1e293b}
+body.light header{background:#fff;border-bottom-color:#e2e8f0}
+body.light .logo{color:#0f172a}
+body.light .badge-sim{background:#e2e8f0;color:#475569}
+body.light #market-status{color:#475569}
+body.light #cycle-info,.ts{color:#94a3b8}
+body.light .card{background:#fff;border-color:#e2e8f0}
+body.light .card-label{color:#64748b}
+body.light .card-sub{color:#94a3b8}
+body.light .panel{background:#fff;border-color:#e2e8f0}
+body.light .panel-title{color:#475569;border-bottom-color:#e2e8f0}
+body.light .panel-title .count{background:#e2e8f0;color:#475569}
+body.light th{color:#475569;border-bottom-color:#e2e8f0}
+body.light td{border-bottom-color:#f1f5f9}
+body.light tr:hover td{background:#f8fafc}
+body.light .btn-refresh{background:#e2e8f0;color:#1e293b}
+body.light .score-bar-bg{background:#e2e8f0}
+body.light .pill-HOLD{background:#e2e8f0;color:#475569}
+body.light .spinner{border-color:#e2e8f0}
+body.light .loading-overlay{background:rgba(241,245,249,.85)}
+body.light .error-banner{background:#fee2e2;color:#991b1b}
+body.light .empty{color:#94a3b8}
+body.light .mtf-scores{color:#94a3b8}
+body.light .sig-sub{color:#94a3b8}
+body.light .sym-link{color:#1d4ed8}
+body.light .voo-panel{background:#fff;border-color:#e2e8f0}
+body.light .voo-header{background:#fff;border-bottom-color:#e2e8f0}
+body.light .voo-title{color:#475569}
+body.light .voo-stat{border-right-color:#e2e8f0}
+body.light .voo-stat-label{color:#64748b}
+body.light .voo-loading{color:#94a3b8}
+body.light .voo-checked{color:#94a3b8}
+body.light .voo-above{background:#f0fdf4;color:#166534;border-top-color:#bbf7d0}
+body.light .voo-below{background:#dcfce7;color:#14532d;border-top-color:#86efac}
+body.light .chart-box{background:#fff;border-color:#e2e8f0}
+body.light .chart-hdr{border-bottom-color:#e2e8f0}
+body.light .chart-sym{color:#0f172a}
+body.light .chart-close{background:#e2e8f0;color:#1e293b}
+body.light .chart-body{background:#f8fafc}
+body.light .sector-chip{background:#dbeafe;color:#1d4ed8;border-color:#93c5fd}
+body.light .sector-chip.near-limit{background:#fff7ed;color:#c2410c;border-color:#fdba74}
+body.light .sector-chip.at-limit{background:#fee2e2;color:#b91c1c;border-color:#fca5a5}
+
+/* ── Theme toggle button ──────────────────────────────────────────────────── */
+.theme-toggle{background:none;border:1px solid #334155;color:#e2e8f0;padding:0;border-radius:99px;font-size:16px;min-height:32px;width:36px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+body.light .theme-toggle{border-color:#cbd5e1;color:#1e293b}
+
+/* ── Live P&L ticker (header) ─────────────────────────────────────────────── */
+.pnl-ticker{display:flex;flex-direction:column;align-items:flex-end;font-variant-numeric:tabular-nums;white-space:nowrap;line-height:1.25;padding:0 4px;border-left:1px solid #334155;margin-left:4px}
+body.light .pnl-ticker{border-left-color:#e2e8f0}
+.pnl-ticker-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.4px}
+.pnl-ticker-value{font-size:15px;font-weight:700}
+.pnl-ticker-pct{font-size:11px;font-weight:600}
+@keyframes pnl-flash{0%{opacity:1}35%{opacity:.25}100%{opacity:1}}
+.pnl-flash{animation:pnl-flash .55s ease}
+@media(max-width:600px){.pnl-ticker{display:none}}
 </style>
 </head>
 <body>
@@ -725,10 +808,17 @@ tr:hover td{background:#263044}
     <span class="market-dot market-unknown" id="market-dot"></span>
     <span id="market-label">Market —</span>
   </span>
+  <!-- Live unrealized P&L ticker -->
+  <div class="pnl-ticker" id="pnl-ticker" style="display:none">
+    <div class="pnl-ticker-label">Unrealized P&amp;L</div>
+    <div class="pnl-ticker-value" id="pnl-ticker-val">—</div>
+    <div class="pnl-ticker-pct" id="pnl-ticker-pct" style="color:#64748b">—</div>
+  </div>
   <div class="hdr-right">
     <span class="ts" id="cycle-info" style="color:#475569">—</span>
     <span class="ts" id="last-ts">—</span>
     <span id="notif-indicator" title="Notifications" style="font-size:17px;cursor:default;opacity:.4" onclick="window.location='/stats'">🔔</span>
+    <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
     <button class="btn-refresh" onclick="refresh()">Refresh</button>
     <button class="btn-rescan" id="btn-rescan" onclick="rescan()">Re-scan</button>
     <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
@@ -894,6 +984,14 @@ function applyState(s) {
 
   document.getElementById('c-open').textContent = p.open_positions;
   document.getElementById('c-trades').textContent = p.total_trades;
+
+  // live P&L ticker — sum unrealized from all open positions
+  {
+    const unrealized = (s.positions || []).reduce((sum, pos) => sum + (pos.pnl || 0), 0);
+    const basis = (p.total_value || 0) - unrealized;
+    const unrealizedPct = basis > 0 ? unrealized / basis * 100 : 0;
+    updatePnlTicker(unrealized, unrealizedPct, (s.positions || []).length);
+  }
 
   // regime card
   const regimeCard = document.getElementById('regime-card');
@@ -1301,6 +1399,53 @@ async function runCycle() {
     overlay.classList.remove('active');
   }
 }
+
+// ── Dark / light theme ────────────────────────────────────────────────────────
+function toggleTheme() {
+  const light = document.body.classList.toggle('light');
+  localStorage.setItem('theme', light ? 'light' : 'dark');
+  document.getElementById('theme-btn').textContent = light ? '🌙' : '☀️';
+}
+(function initTheme() {
+  if (localStorage.getItem('theme') === 'light') {
+    document.body.classList.add('light');
+    const btn = document.getElementById('theme-btn');
+    if (btn) btn.textContent = '🌙';
+  }
+})();
+
+// ── Live P&L ticker ───────────────────────────────────────────────────────────
+let _prevPnlVal = null;
+function updatePnlTicker(unrealized, unrealizedPct, openPositions) {
+  const ticker = document.getElementById('pnl-ticker');
+  const valEl  = document.getElementById('pnl-ticker-val');
+  const pctEl  = document.getElementById('pnl-ticker-pct');
+  if (!openPositions || unrealized == null) { ticker.style.display = 'none'; return; }
+  ticker.style.display = '';
+  const sign = unrealized >= 0 ? '+' : '';
+  const col  = unrealized > 0 ? '#22c55e' : unrealized < 0 ? '#ef4444' : '#94a3b8';
+  if (_prevPnlVal !== null && _prevPnlVal !== unrealized) {
+    valEl.classList.remove('pnl-flash');
+    void valEl.offsetWidth;   // force reflow to restart animation
+    valEl.classList.add('pnl-flash');
+  }
+  _prevPnlVal = unrealized;
+  valEl.textContent = sign + '$' + Math.abs(unrealized).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  valEl.style.color = col;
+  pctEl.textContent = sign + unrealizedPct.toFixed(2) + '%';
+  pctEl.style.color = col;
+}
+
+async function pollPnl() {
+  try {
+    const res  = await fetch('/api/pnl');
+    const data = await res.json();
+    if (data.ok) updatePnlTicker(data.unrealized_pnl, data.unrealized_pnl_pct, data.open_positions);
+  } catch(_) {}
+}
+// Poll the lightweight pnl endpoint between full state refreshes
+setInterval(pollPnl, 5000);
+pollPnl();
 
 // Countdown ticker — updates every second without a server round-trip
 let _nextCycleAt = null;
