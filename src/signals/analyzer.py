@@ -16,16 +16,25 @@ class SignalResult:
 
 
 class SignalAnalyzer:
-    def __init__(self, buy_threshold: float = 0.35, sell_threshold: float = -0.35):
+    def __init__(
+        self,
+        buy_threshold: float = 0.35,
+        sell_threshold: float = -0.35,
+        use_mean_reversion: bool = True,
+    ):
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
+        self.use_mean_reversion = use_mean_reversion
 
-        self._weights = {
-            "rsi": 0.25,
-            "macd": 0.30,
-            "ema_cross": 0.25,
-            "bollinger": 0.20,
+        raw = {
+            "rsi": 0.20,
+            "macd": 0.25,
+            "ema_cross": 0.20,
+            "bollinger": 0.15,
+            "mean_reversion": 0.20 if use_mean_reversion else 0.0,
         }
+        total = sum(raw.values())
+        self._weights = {k: v / total for k, v in raw.items()}
 
     def analyze(self, ind: IndicatorValues) -> SignalResult:
         scores: Dict[str, float] = {}
@@ -46,6 +55,10 @@ class SignalAnalyzer:
         bb_score, bb_reasons = self._bollinger_signal(ind)
         scores["bollinger"] = bb_score
         reasons.extend(bb_reasons)
+
+        mr_score, mr_reasons = self._mean_reversion_signal(ind)
+        scores["mean_reversion"] = mr_score
+        reasons.extend(mr_reasons)
 
         vol_mult = self._volume_multiplier(ind)
         composite = sum(scores[k] * self._weights[k] for k in scores) * vol_mult
@@ -169,6 +182,34 @@ class SignalAnalyzer:
             reasons.append("Price approaching upper Bollinger Band")
         else:
             score = -position * 0.3
+
+        return score, reasons
+
+    def _mean_reversion_signal(self, ind: IndicatorValues):
+        """Z-score of close vs 20-day SMA. Extreme deviations forecast reversion."""
+        if ind.z_score is None or not self.use_mean_reversion:
+            return 0.0, []
+        z = ind.z_score
+        reasons: List[str] = []
+
+        if z <= -2.0:
+            score = 1.0
+            reasons.append(f"Mean reversion: extreme oversold (z={z:.2f})")
+        elif z <= -1.5:
+            score = 0.7
+            reasons.append(f"Mean reversion: oversold (z={z:.2f})")
+        elif z <= -1.0:
+            score = 0.3
+        elif z >= 2.0:
+            score = -1.0
+            reasons.append(f"Mean reversion: extreme overbought (z={z:.2f})")
+        elif z >= 1.5:
+            score = -0.7
+            reasons.append(f"Mean reversion: overbought (z={z:.2f})")
+        elif z >= 1.0:
+            score = -0.3
+        else:
+            score = 0.0
 
         return score, reasons
 

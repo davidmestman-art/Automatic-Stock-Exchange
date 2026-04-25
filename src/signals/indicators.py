@@ -27,6 +27,13 @@ class IndicatorValues:
     volume: Optional[float] = None
     avg_volume: Optional[float] = None
 
+    # Mean reversion
+    z_score: Optional[float] = None        # (close - sma20) / std20
+
+    # Volatility — used by adaptive position sizing
+    atr: Optional[float] = None            # 14-day ATR in dollars
+    atr_pct: Optional[float] = None        # ATR as fraction of close price
+
 
 class TechnicalIndicators:
     def __init__(
@@ -82,6 +89,23 @@ class TechnicalIndicators:
         vals.bb_upper = float((sma + self.bb_std * std).iloc[-1])
         vals.bb_middle = float(sma.iloc[-1])
         vals.bb_lower = float((sma - self.bb_std * std).iloc[-1])
+
+        # Z-score: how many std-devs the close is from its 20-day SMA
+        z = (close - sma) / std.replace(0, np.nan)
+        vals.z_score = float(z.iloc[-1]) if not np.isnan(z.iloc[-1]) else None
+
+        # ATR (14-day EMA of True Range) for volatility-based position sizing
+        high = df["High"]
+        low = df["Low"]
+        prev_close = close.shift(1)
+        tr = pd.concat([
+            high - low,
+            (high - prev_close).abs(),
+            (low  - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        atr_ser = tr.ewm(span=14, adjust=False).mean()
+        vals.atr = float(atr_ser.iloc[-1])
+        vals.atr_pct = float(vals.atr / vals.close) if vals.close else None
 
         return vals
 

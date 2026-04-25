@@ -180,6 +180,8 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
     _record_snapshot(summary["total_value"])
 
     # ── Signals ───────────────────────────────────────────────────────────────
+    corr_blocked = _engine.last_corr_blocked   # {sym: reason}
+
     sig_list = []
     if signals:
         for sym, sig in signals.items():
@@ -188,6 +190,11 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
             vol_ratio = None
             if ind and ind.volume and ind.avg_volume and ind.avg_volume > 0:
                 vol_ratio = round(ind.volume / ind.avg_volume, 2)
+            # Estimated adaptive position size for BUY signals
+            est_size_pct = None
+            if sig.action == "BUY" and ind and ind.atr_pct:
+                raw = _engine.risk.compute_position_pct(sig.confidence, ind.atr_pct)
+                est_size_pct = round(raw * 100, 1)
             sig_list.append({
                 "symbol": sym,
                 "price": round(price_lookup.get(sym, 0), 2),
@@ -195,7 +202,11 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "score": round(sig.score, 3),
                 "confidence": round(sig.confidence, 3),
                 "rsi": round(ind.rsi, 1) if ind and ind.rsi else None,
+                "z_score": round(ind.z_score, 2) if ind and ind.z_score is not None else None,
+                "atr_pct": round(ind.atr_pct * 100, 2) if ind and ind.atr_pct else None,
                 "volume_ratio": vol_ratio,
+                "est_size_pct": est_size_pct,
+                "corr_blocked": corr_blocked.get(sym),
                 "reasons": sig.reasons[:3],
                 "tf_1d":  round(iscores["1d"],  3) if "1d"  in iscores else None,
                 "tf_1h":  round(iscores["1h"],  3) if "1h"  in iscores else None,
@@ -274,6 +285,9 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "confirmation_enabled": config.use_confirmation,
         "pending_confirmation": list(_engine.pending_confirmations.keys()),
         "extended_hours": ext_hours,
+        "mean_reversion_enabled": config.use_mean_reversion,
+        "correlation_filter_enabled": config.use_correlation_filter,
+        "adaptive_sizing_enabled": config.use_adaptive_sizing,
     }
 
 
@@ -609,6 +623,10 @@ tr:hover td{background:#263044}
 .mtf-scores{font-size:10px;color:#64748b;margin-top:2px;letter-spacing:.2px}
 .mtf-scores span{margin-right:5px;white-space:nowrap}
 
+/* ── Sub-lines inside signal table cells ─────────────────────────────────── */
+.sig-sub{font-size:10px;color:#475569;margin-top:2px}
+.sig-sub span{margin-right:5px;white-space:nowrap}
+
 /* ── Misc ────────────────────────────────────────────────────────────────── */
 .empty{padding:28px;text-align:center;color:#475569}
 .error-banner{background:#7f1d1d;color:#fecaca;border-radius:8px;padding:10px 16px;margin-bottom:14px;font-size:13px;display:none}
@@ -637,7 +655,7 @@ tr:hover td{background:#263044}
 
 /* ── Responsive — phone (≤ 600 px) ──────────────────────────────────────── */
 @media(max-width:600px){
-  .vol-col{display:none}
+  .vol-col,.z-col{display:none}
 
   header{padding:10px 14px;gap:8px}
   .logo{font-size:15px}
@@ -781,12 +799,15 @@ tr:hover td{background:#263044}
   <div class="panel grid1">
     <div class="panel-title">Signal Analysis <span class="count" id="sig-count">0</span>
       <span id="mtf-badge" style="display:none;margin-left:6px;font-size:10px;padding:2px 8px;border-radius:99px;background:#1e3a5f;color:#93c5fd;font-weight:600">MTF ON · 1d 50% · 1h 30% · 15m 20%</span>
+      <span id="mr-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600">MR ON</span>
+      <span id="corr-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#1e3a5f;color:#93c5fd;font-weight:600">CORR FILTER ON</span>
+      <span id="sizing-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#451a03;color:#fdba74;font-weight:600">ADAPTIVE SIZE</span>
     </div>
     <div class="tbl-wrap"><table>
       <thead><tr>
-        <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="vol-col">Volume</th>
+        <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="z-col">Z-Score</th><th class="vol-col">Volume</th>
       </tr></thead>
-      <tbody id="sig-body"><tr><td colspan="7" class="empty">No data yet — click Refresh</td></tr></tbody>
+      <tbody id="sig-body"><tr><td colspan="8" class="empty">No data yet — click Refresh</td></tr></tbody>
     </table></div>
   </div>
 
@@ -907,11 +928,19 @@ function applyState(s) {
   if (s.mtf_enabled) mtfBadge.style.display = 'inline-block';
   else               mtfBadge.style.display = 'none';
 
+  // feature badges in signal panel header
+  const mrBadge   = document.getElementById('mr-badge');
+  const corrBadge = document.getElementById('corr-badge');
+  const sizeBadge = document.getElementById('sizing-badge');
+  if (mrBadge)   mrBadge.style.display   = s.mean_reversion_enabled      ? 'inline-block' : 'none';
+  if (corrBadge) corrBadge.style.display = s.correlation_filter_enabled   ? 'inline-block' : 'none';
+  if (sizeBadge) sizeBadge.style.display = s.adaptive_sizing_enabled      ? 'inline-block' : 'none';
+
   // signals
   document.getElementById('sig-count').textContent = s.signals.length;
   const sb = document.getElementById('sig-body');
   if (!s.signals.length) {
-    sb.innerHTML = '<tr><td colspan="7" class="empty">No signals — click Refresh</td></tr>';
+    sb.innerHTML = '<tr><td colspan="8" class="empty">No signals — click Refresh</td></tr>';
   } else {
     sb.innerHTML = s.signals.map(r => {
       const barPct = Math.round(Math.abs(r.score) * 100);
@@ -930,15 +959,40 @@ function applyState(s) {
       const vrBold = vr >= 1.5 ? 'font-weight:600;' : '';
       const vrStr  = vr == null ? '—' : `${vr.toFixed(1)}×${vrIcon}`;
       const rowHighlight = vr >= 2 ? 'background:rgba(249,115,22,0.05);' : '';
+
+      // Pending confirmation badge
       const isPending = s.confirmation_enabled && (s.pending_confirmation||[]).includes(r.symbol);
       const pendingBadge = isPending
         ? `<span title="Awaiting next-candle confirmation" style="margin-left:5px;font-size:10px;color:#f59e0b;font-weight:700">⏳</span>`
         : '';
+
+      // Correlation-blocked badge
+      const corrBlock = r.corr_blocked;
+      const corrBadgeCell = corrBlock
+        ? `<span title="Blocked: correlated with ${corrBlock}" style="margin-left:5px;font-size:10px;color:#f87171;font-weight:700">ρ</span>`
+        : '';
+
+      // Z-score column
+      const z = r.z_score;
+      const zCol = z == null ? '#475569' : z <= -1.5 ? '#22c55e' : z <= -1.0 ? '#4ade80'
+                 : z >= 1.5 ? '#ef4444' : z >= 1.0 ? '#f87171' : '#475569';
+      const zBold = z != null && Math.abs(z) >= 1.5 ? 'font-weight:600;' : '';
+      const zStr  = z == null ? '—' : (z >= 0 ? '+' : '') + z.toFixed(2);
+
+      // Adaptive size sub-line (shown for BUY signals when adaptive sizing is on)
+      const sizeRow = s.adaptive_sizing_enabled && r.est_size_pct != null && r.action === 'BUY'
+        ? `<div class="sig-sub"><span style="color:#f59e0b">~${r.est_size_pct}% portfolio</span>` +
+          (r.atr_pct != null ? `<span>ATR ${r.atr_pct.toFixed(1)}%</span>` : '') + `</div>`
+        : '';
+
       return `<tr style="${rowHighlight}">
-        <td class="sym-link" style="font-weight:600" onclick="openChart('${r.symbol}')" title="Click for chart">${r.symbol}${pendingBadge}</td>
+        <td class="sym-link" style="font-weight:600" onclick="openChart('${r.symbol}')" title="Click for chart">${r.symbol}${pendingBadge}${corrBadgeCell}</td>
         <td style="color:#64748b;font-size:12px">${r.sector||'—'}</td>
         <td>$${fmt(r.price)}</td>
-        <td><span class="pill pill-${r.action}">${r.action}</span></td>
+        <td>
+          <span class="pill pill-${r.action}">${r.action}</span>
+          ${sizeRow}
+        </td>
         <td>
           <div class="score-wrap">
             <span style="color:${barCol};font-weight:600">${r.score >= 0 ? '+' : ''}${fmt(r.score, 3)}</span>
@@ -947,6 +1001,7 @@ function applyState(s) {
           ${mtfRow}
         </td>
         <td>${r.rsi != null ? fmt(r.rsi, 1) : '—'}</td>
+        <td class="z-col" style="color:${zCol};${zBold}">${zStr}</td>
         <td class="vol-col" style="color:${vrCol};${vrBold}">${vrStr}</td>
       </tr>`;
     }).join('');
