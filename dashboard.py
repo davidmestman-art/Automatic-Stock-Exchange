@@ -173,6 +173,9 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         for sym, sig in signals.items():
             ind = ind_map.get(sym) if ind_map else None
             iscores = sig.indicator_scores or {}
+            vol_ratio = None
+            if ind and ind.volume and ind.avg_volume and ind.avg_volume > 0:
+                vol_ratio = round(ind.volume / ind.avg_volume, 2)
             sig_list.append({
                 "symbol": sym,
                 "price": round(price_lookup.get(sym, 0), 2),
@@ -180,6 +183,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "score": round(sig.score, 3),
                 "confidence": round(sig.confidence, 3),
                 "rsi": round(ind.rsi, 1) if ind and ind.rsi else None,
+                "volume_ratio": vol_ratio,
                 "reasons": sig.reasons[:3],
                 "tf_1d":  round(iscores["1d"],  3) if "1d"  in iscores else None,
                 "tf_1h":  round(iscores["1h"],  3) if "1h"  in iscores else None,
@@ -357,6 +361,58 @@ def api_stats():
     })
 
 
+def _compute_sr_levels(df, n_swing: int = 5, cluster_pct: float = 0.008, max_each: int = 3):
+    """Identify support/resistance levels from swing highs/lows + classic pivots."""
+    highs   = df["High"].values.astype(float)
+    lows    = df["Low"].values.astype(float)
+    current = float(df["Close"].iloc[-1])
+
+    raw: list = []   # (price, weight)
+
+    # Swing highs and lows (look-left / look-right window)
+    for i in range(n_swing, len(df) - n_swing):
+        h, l = highs[i], lows[i]
+        if h >= max(highs[i - n_swing: i]) and h >= max(highs[i + 1: i + n_swing + 1]):
+            raw.append((h, 1))
+        if l <= min(lows[i - n_swing: i]) and l <= min(lows[i + 1: i + n_swing + 1]):
+            raw.append((l, 1))
+
+    # Classic pivot points from the last 20 sessions
+    tail = df.tail(20)
+    ph = float(tail["High"].max())
+    pl = float(tail["Low"].min())
+    pp = (ph + pl + current) / 3
+    rng = ph - pl
+    if rng > 0:
+        raw += [(pp, 2), (2*pp - pl, 2), (pp + rng, 2), (2*pp - ph, 2), (pp - rng, 2)]
+
+    if not raw:
+        return []
+
+    # Cluster levels within cluster_pct band
+    raw.sort(key=lambda x: x[0])
+    clustered: list = []
+    i = 0
+    while i < len(raw):
+        grp = [raw[i]]
+        j = i + 1
+        while j < len(raw) and abs(raw[j][0] - raw[i][0]) / raw[i][0] < cluster_pct:
+            grp.append(raw[j])
+            j += 1
+        avg_p    = sum(g[0] for g in grp) / len(grp)
+        strength = sum(g[1] for g in grp)
+        clustered.append({
+            "price":    round(avg_p, 2),
+            "strength": strength,
+            "type":     "resistance" if avg_p > current else "support",
+        })
+        i = j
+
+    supports    = sorted([l for l in clustered if l["type"] == "support"],    key=lambda x: -x["price"])[:max_each]
+    resistances = sorted([l for l in clustered if l["type"] == "resistance"], key=lambda x:  x["price"])[:max_each]
+    return supports + resistances
+
+
 @app.route("/api/chart/<symbol>")
 def api_chart(symbol):
     symbol = symbol.upper()
@@ -369,7 +425,8 @@ def api_chart(symbol):
             return jsonify({"ok": False, "error": f"No data for {symbol}"}), 404
         if df.index.tz is not None:
             df.index = df.index.tz_convert("UTC").tz_localize(None)
-        close = df["Close"]
+        close  = df["Close"]
+        volume = df["Volume"]
         ema_f = close.ewm(span=config.ema_fast, adjust=False).mean()
         ema_s = close.ewm(span=config.ema_slow, adjust=False).mean()
         bb_mid = close.rolling(config.bb_period).mean()
@@ -383,24 +440,30 @@ def api_chart(symbol):
         avg_loss = loss.ewm(com=config.rsi_period - 1, min_periods=config.rsi_period).mean()
         rs = avg_gain / avg_loss.replace(0, float("nan"))
         rsi_ser = 100 - (100 / (1 + rs))
+        avg_vol = volume.rolling(20).mean()
+        vol_ratio = (volume / avg_vol.replace(0, float("nan"))).fillna(1.0)
         def to_list(s):
             return [None if (v is None or (isinstance(v, float) and math.isnan(v))) else round(float(v), 4) for v in s]
+        sr_levels = _compute_sr_levels(df)
         return jsonify({
             "ok": True,
             "symbol": symbol,
             "ema_fast_period": config.ema_fast,
             "ema_slow_period": config.ema_slow,
-            "dates": df.index.strftime("%Y-%m-%d").tolist(),
-            "open":      to_list(df["Open"]),
-            "high":      to_list(df["High"]),
-            "low":       to_list(df["Low"]),
-            "close":     to_list(close),
-            "ema_fast":  to_list(ema_f),
-            "ema_slow":  to_list(ema_s),
-            "bb_upper":  to_list(bb_upper),
-            "bb_middle": to_list(bb_mid),
-            "bb_lower":  to_list(bb_lower),
-            "rsi":       to_list(rsi_ser),
+            "dates":      df.index.strftime("%Y-%m-%d").tolist(),
+            "open":       to_list(df["Open"]),
+            "high":       to_list(df["High"]),
+            "low":        to_list(df["Low"]),
+            "close":      to_list(close),
+            "volume":     [int(v) if v is not None else None for v in to_list(volume)],
+            "vol_ratio":  to_list(vol_ratio),
+            "ema_fast":   to_list(ema_f),
+            "ema_slow":   to_list(ema_s),
+            "bb_upper":   to_list(bb_upper),
+            "bb_middle":  to_list(bb_mid),
+            "bb_lower":   to_list(bb_lower),
+            "rsi":        to_list(rsi_ser),
+            "sr_levels":  sr_levels,
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -551,6 +614,8 @@ tr:hover td{background:#263044}
 
 /* ── Responsive — phone (≤ 600 px) ──────────────────────────────────────── */
 @media(max-width:600px){
+  .vol-col{display:none}
+
   header{padding:10px 14px;gap:8px}
   .logo{font-size:15px}
   .ts{display:none}
@@ -683,9 +748,9 @@ tr:hover td{background:#263044}
     </div>
     <div class="tbl-wrap"><table>
       <thead><tr>
-        <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th>
+        <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="vol-col">Volume</th>
       </tr></thead>
-      <tbody id="sig-body"><tr><td colspan="6" class="empty">No data yet — click Refresh</td></tr></tbody>
+      <tbody id="sig-body"><tr><td colspan="7" class="empty">No data yet — click Refresh</td></tr></tbody>
     </table></div>
   </div>
 
@@ -808,7 +873,7 @@ function applyState(s) {
   document.getElementById('sig-count').textContent = s.signals.length;
   const sb = document.getElementById('sig-body');
   if (!s.signals.length) {
-    sb.innerHTML = '<tr><td colspan="6" class="empty">No signals — click Refresh</td></tr>';
+    sb.innerHTML = '<tr><td colspan="7" class="empty">No signals — click Refresh</td></tr>';
   } else {
     sb.innerHTML = s.signals.map(r => {
       const barPct = Math.round(Math.abs(r.score) * 100);
@@ -821,7 +886,13 @@ function applyState(s) {
              <span>15m ${fmtTF(r.tf_15m)}</span>
            </div>`
         : '';
-      return `<tr>
+      const vr = r.volume_ratio;
+      const vrCol  = vr == null ? '#475569' : vr >= 3 ? '#f97316' : vr >= 2 ? '#fb923c' : vr >= 1.5 ? '#fbbf24' : '#475569';
+      const vrIcon = vr >= 3 ? ' ●' : vr >= 2 ? ' ▲' : '';
+      const vrBold = vr >= 1.5 ? 'font-weight:600;' : '';
+      const vrStr  = vr == null ? '—' : `${vr.toFixed(1)}×${vrIcon}`;
+      const rowHighlight = vr >= 2 ? 'background:rgba(249,115,22,0.05);' : '';
+      return `<tr style="${rowHighlight}">
         <td class="sym-link" style="font-weight:600" onclick="openChart('${r.symbol}')" title="Click for chart">${r.symbol}</td>
         <td style="color:#64748b;font-size:12px">${r.sector||'—'}</td>
         <td>$${fmt(r.price)}</td>
@@ -834,6 +905,7 @@ function applyState(s) {
           ${mtfRow}
         </td>
         <td>${r.rsi != null ? fmt(r.rsi, 1) : '—'}</td>
+        <td class="vol-col" style="color:${vrCol};${vrBold}">${vrStr}</td>
       </tr>`;
     }).join('');
   }
@@ -1070,8 +1142,13 @@ function closeChart() {
 }
 
 function renderChart(d) {
+  // Volume bar colours: spike = orange, normal = slate
+  const volColors = (d.vol_ratio || []).map(vr =>
+    vr >= 3 ? '#f97316' : vr >= 2 ? '#fb923c' : vr >= 1.5 ? '#fbbf24' : '#334155'
+  );
+
   const traces = [
-    // Bollinger Band fill (upper drawn first, lower fills to it)
+    // Bollinger Band fill (upper first, lower fills to it)
     {type:'scatter',mode:'lines',x:d.dates,y:d.bb_upper,
      line:{color:'rgba(96,165,250,0.3)',width:1},xaxis:'x',yaxis:'y',
      name:'BB Upper',showlegend:false},
@@ -1090,32 +1167,67 @@ function renderChart(d) {
      name:'EMA '+d.ema_fast_period,line:{color:'#f97316',width:1.5},xaxis:'x',yaxis:'y'},
     {type:'scatter',mode:'lines',x:d.dates,y:d.ema_slow,
      name:'EMA '+d.ema_slow_period,line:{color:'#8b5cf6',width:1.5},xaxis:'x',yaxis:'y'},
-    // RSI (separate y-axis)
+    // RSI subplot
     {type:'scatter',mode:'lines',x:d.dates,y:d.rsi,name:'RSI',
      line:{color:'#f59e0b',width:1.5},xaxis:'x',yaxis:'y2'},
+    // Volume bars (coloured by spike ratio)
+    {type:'bar',x:d.dates,y:d.volume,name:'Volume',
+     marker:{color:volColors,opacity:0.7},
+     xaxis:'x',yaxis:'y3',showlegend:false},
   ];
+
+  // Base shapes: RSI reference lines
+  const shapes = [
+    {type:'line',xref:'paper',x0:0,x1:1,y0:70,y1:70,yref:'y2',
+     line:{color:'rgba(239,68,68,0.45)',width:1,dash:'dot'}},
+    {type:'line',xref:'paper',x0:0,x1:1,y0:30,y1:30,yref:'y2',
+     line:{color:'rgba(34,197,94,0.45)',width:1,dash:'dot'}},
+  ];
+  const annotations = [
+    {text:'RSI',x:0.004,xref:'paper',y:0.205,yref:'paper',
+     showarrow:false,font:{color:'#f59e0b',size:10}},
+    {text:'Vol',x:0.004,xref:'paper',y:0.055,yref:'paper',
+     showarrow:false,font:{color:'#64748b',size:10}},
+  ];
+
+  // Support / resistance horizontal lines + price labels
+  (d.sr_levels || []).forEach(lvl => {
+    const isRes = lvl.type === 'resistance';
+    const col   = isRes ? 'rgba(239,68,68,0.6)' : 'rgba(34,197,94,0.6)';
+    const dash  = isRes ? 'dash' : 'dot';
+    shapes.push({
+      type:'line', xref:'paper', x0:0, x1:1,
+      y0:lvl.price, y1:lvl.price, yref:'y',
+      line:{color:col, width:1, dash:dash},
+    });
+    annotations.push({
+      x:1, xref:'paper', y:lvl.price, yref:'y',
+      text:'$'+lvl.price.toFixed(2),
+      showarrow:false,
+      font:{color:col, size:9},
+      xanchor:'right',
+      bgcolor:'rgba(15,23,42,0.75)',
+      borderpad:2,
+    });
+  });
+
   const layout = {
     paper_bgcolor:'#0f172a', plot_bgcolor:'#0f172a',
     font:{color:'#94a3b8',family:'Segoe UI,system-ui,sans-serif',size:11},
-    margin:{l:55,r:20,t:12,b:40},
+    margin:{l:55,r:72,t:12,b:40},
     xaxis:{type:'date',rangeslider:{visible:false},gridcolor:'#1e293b',
            tickfont:{color:'#475569',size:10},showgrid:true},
-    yaxis:{domain:[0.33,1],gridcolor:'#1e293b',tickfont:{color:'#475569',size:10},
+    yaxis:{domain:[0.38,1],gridcolor:'#1e293b',tickfont:{color:'#475569',size:10},
            tickprefix:'$',showgrid:true},
-    yaxis2:{domain:[0,0.27],gridcolor:'#1e293b',tickfont:{color:'#475569',size:10},
-            range:[0,100],showgrid:true},
+    yaxis2:{domain:[0.2,0.34],gridcolor:'#1e293b',tickfont:{color:'#475569',size:10},
+            range:[0,100],showgrid:false},
+    yaxis3:{domain:[0,0.16],gridcolor:'#1e293b',tickfont:{color:'#475569',size:10},
+            showgrid:false,showticklabels:false},
     legend:{orientation:'h',x:0,y:1.06,font:{size:10,color:'#94a3b8'},
             bgcolor:'rgba(0,0,0,0)'},
-    shapes:[
-      {type:'line',xref:'paper',x0:0,x1:1,y0:70,y1:70,yref:'y2',
-       line:{color:'rgba(239,68,68,0.45)',width:1,dash:'dot'}},
-      {type:'line',xref:'paper',x0:0,x1:1,y0:30,y1:30,yref:'y2',
-       line:{color:'rgba(34,197,94,0.45)',width:1,dash:'dot'}},
-    ],
-    annotations:[
-      {text:'RSI',x:0.005,xref:'paper',y:0.13,yref:'paper',
-       showarrow:false,font:{color:'#f59e0b',size:10}},
-    ],
+    shapes,
+    annotations,
+    bargap:0.1,
   };
   Plotly.newPlot('chart-plotly', traces, layout, {
     responsive:true, displayModeBar:true,
