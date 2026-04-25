@@ -134,6 +134,47 @@ class AlpacaExecutor:
         except Exception as e:
             logger.error(f"Portfolio sync from Alpaca failed: {e}")
 
+    def get_live_positions(self) -> List[dict]:
+        """Return all current Alpaca positions as plain dicts for dashboard display."""
+        positions = self.trading.get_all_positions()
+        result = []
+        for p in positions:
+            result.append({
+                "symbol": p.symbol,
+                "shares": float(p.qty),
+                "entry_price": float(p.avg_entry_price),
+                "current_price": float(p.current_price) if p.current_price else None,
+                "pnl": float(p.unrealized_pl) if p.unrealized_pl else None,
+                "pnl_pct": float(p.unrealized_plpc) if p.unrealized_plpc else None,
+            })
+        return result
+
+    def get_filled_orders(self, limit: int = 30) -> List[dict]:
+        """Return recent filled orders from Alpaca, newest first."""
+        orders = self.trading.get_orders(
+            GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=limit * 2)
+        )
+        result = []
+        for o in orders:
+            if not o.filled_at:
+                continue
+            side = "BUY" if "buy" in str(o.side).lower() else "SELL"
+            order_class = str(getattr(o, "order_class", "") or "")
+            reason = "bracket order" if "bracket" in order_class else "market"
+            result.append({
+                "timestamp": o.filled_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "action": side,
+                "symbol": o.symbol,
+                "shares": round(float(o.filled_qty), 4) if o.filled_qty else 0,
+                "price": round(float(o.filled_avg_price), 2) if o.filled_avg_price else 0,
+                "pnl": None,
+                "pnl_pct": None,
+                "reason": reason,
+            })
+            if len(result) >= limit:
+                break
+        return result
+
     # ── Order execution ───────────────────────────────────────────────────────
 
     def execute_buy(

@@ -27,20 +27,22 @@ SP500_UNIVERSE: List[str] = [
     # Technology
     "AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CRM", "ADBE", "AMD", "QCOM", "TXN",
     "INTC", "AMAT", "LRCX", "KLAC", "MU", "ADI", "MRVL", "NOW", "PANW", "SNPS",
-    "CDNS", "FTNT", "ANSS", "KEYS", "CTSH", "IBM", "ACN", "CSCO", "HPQ", "CDW",
-    # Communication services
+    "CDNS", "FTNT", "KEYS", "CTSH", "IBM", "ACN", "CSCO", "HPQ", "CDW",
+    "PLTR", "DELL", "ANET", "APP", "CRWD",
+    # Communication Services
     "GOOGL", "META", "NFLX", "T", "VZ", "TMUS", "DIS", "CMCSA", "CHTR", "WBD",
-    # Consumer discretionary
+    # Consumer Discretionary
     "AMZN", "TSLA", "HD", "MCD", "NKE", "SBUX", "TGT", "LOW", "BKNG", "MAR",
     "CMG", "HLT", "YUM", "DG", "DLTR", "ORLY", "AZO", "GM", "F", "PHM",
-    # Consumer staples
+    "ABNB", "UBER",
+    # Consumer Staples
     "WMT", "COST", "PG", "KO", "PEP", "PM", "MO", "CL", "MDLZ", "GIS",
     "STZ", "SYY", "HSY", "CHD", "EL", "CLX", "KHC",
     # Financials
     "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "AXP",
     "C", "USB", "PNC", "TFC", "COF", "CME", "ICE", "CB", "MET", "PRU",
     "AFL", "AON", "MMC", "BX", "KKR", "SPGI", "MCO", "FIS", "PYPL", "FI",
-    # Health care
+    # Health Care
     "UNH", "LLY", "JNJ", "MRK", "ABBV", "TMO", "ABT", "DHR", "BMY", "PFE",
     "AMGN", "GILD", "CVS", "CI", "ELV", "HUM", "MDT", "SYK", "BSX", "ISRG",
     "ZTS", "REGN", "VRTX", "DXCM", "IDXX", "RMD", "BAX", "MRNA", "BIIB", "IQV",
@@ -48,15 +50,17 @@ SP500_UNIVERSE: List[str] = [
     "GE", "RTX", "HON", "CAT", "DE", "BA", "UNP", "UPS", "FDX", "LMT",
     "NOC", "GD", "EMR", "ETN", "ROK", "PH", "ITW", "MMM", "IR", "CTAS",
     "CSX", "NSC", "EXPD", "GWW", "FAST", "VRSK", "PWR", "ODFL", "CARR", "OTIS",
-    # Energy
+    "GEV",
+    # Energy — HES acquired by CVX Oct 2024; MRO acquired by COP Aug 2024
     "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "MPC", "PSX", "VLO", "BKR",
-    "HAL", "DVN", "HES", "MRO", "WMB", "KMI", "OKE", "LNG", "TRGP",
+    "HAL", "DVN", "WMB", "KMI", "OKE", "LNG", "TRGP", "FANG", "APA",
     # Materials
     "LIN", "APD", "SHW", "ECL", "NEM", "FCX", "NUE", "VMC", "MLM", "ALB",
     "DOW", "PPG", "IFF", "DD", "RPM",
     # Utilities
     "NEE", "SO", "DUK", "D", "AEP", "EXC", "SRE", "PEG", "XEL", "ES",
-    # Real estate
+    "VST", "CEG",
+    # Real Estate
     "AMT", "PLD", "EQIX", "CCI", "PSA", "O", "SPG", "WELL", "AVB", "DLR",
 ]
 
