@@ -64,43 +64,114 @@ def _background_loop() -> None:
 
 def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
     portfolio = _engine.portfolio
-
     price_lookup = prices or {}
-    pos_list = []
-    for sym, pos in portfolio.positions.items():
-        cp = price_lookup.get(sym, pos.entry_price)
-        pos_list.append({
-            "symbol": sym,
-            "shares": round(pos.shares, 4),
-            "entry_price": round(pos.entry_price, 2),
-            "current_price": round(cp, 2),
-            "stop_loss": round(pos.stop_loss, 2),
-            "take_profit": round(pos.take_profit, 2),
-            "pnl": round(pos.unrealized_pnl(cp), 2),
-            "pnl_pct": round(pos.unrealized_pnl_pct(cp) * 100, 2),
-            "sector": get_sector(sym) or "—",
-        })
-    sector_exposure = {
-        sector: len(syms)
-        for sector, syms in positions_by_sector(portfolio.positions).items()
-    }
 
-    summary = portfolio.get_summary(price_lookup) if price_lookup else {
-        "total_value": portfolio.cash,
-        "cash": portfolio.cash,
-        "position_value": 0,
-        "total_pnl": 0,
-        "total_pnl_pct": 0,
-        "open_positions": len(portfolio.positions),
-        "total_trades": len(portfolio.trades),
-    }
+    # ── Positions — pull live from Alpaca when enabled ────────────────────────
+    pos_list = []
+    if config.use_alpaca:
+        try:
+            for p in _engine.executor.get_live_positions():
+                entry = float(p["entry_price"])
+                cp = float(p["current_price"] or entry)
+                pnl = float(p["pnl"]) if p["pnl"] is not None else (cp - entry) * float(p["shares"])
+                pnl_pct = float(p["pnl_pct"]) * 100 if p["pnl_pct"] is not None else (
+                    (cp - entry) / entry * 100 if entry else 0
+                )
+                pos_list.append({
+                    "symbol": p["symbol"],
+                    "shares": round(float(p["shares"]), 4),
+                    "entry_price": round(entry, 2),
+                    "current_price": round(cp, 2),
+                    "stop_loss": round(entry * (1 - config.stop_loss_pct), 2),
+                    "take_profit": round(entry * (1 + config.take_profit_pct), 2),
+                    "pnl": round(pnl, 2),
+                    "pnl_pct": round(pnl_pct, 2),
+                    "sector": get_sector(p["symbol"]) or "—",
+                })
+        except Exception as e:
+            log.warning(f"Alpaca live positions failed: {e}")
+
+    # Fallback: local portfolio mirror (Local Simulation or Alpaca fetch failed)
+    if not pos_list:
+        for sym, pos in portfolio.positions.items():
+            cp = price_lookup.get(sym, pos.entry_price)
+            pos_list.append({
+                "symbol": sym,
+                "shares": round(pos.shares, 4),
+                "entry_price": round(pos.entry_price, 2),
+                "current_price": round(cp, 2),
+                "stop_loss": round(pos.stop_loss, 2),
+                "take_profit": round(pos.take_profit, 2),
+                "pnl": round(pos.unrealized_pnl(cp), 2),
+                "pnl_pct": round(pos.unrealized_pnl_pct(cp) * 100, 2),
+                "sector": get_sector(sym) or "—",
+            })
+
+    sector_exposure: dict = {}
+    for p in pos_list:
+        sec = p["sector"]
+        if sec and sec != "—":
+            sector_exposure[sec] = sector_exposure.get(sec, 0) + 1
+
+    # ── Trades — pull filled orders from Alpaca when enabled ──────────────────
+    trades_list = []
+    if config.use_alpaca:
+        try:
+            trades_list = _engine.executor.get_filled_orders(limit=30)
+        except Exception as e:
+            log.warning(f"Alpaca orders fetch failed: {e}")
+
+    if not trades_list:
+        trades_list = [
+            {
+                "timestamp": t.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "action": t.action,
+                "symbol": t.symbol,
+                "shares": round(t.shares, 4),
+                "price": round(t.price, 2),
+                "pnl": round(t.pnl, 2) if t.pnl is not None else None,
+                "pnl_pct": round(t.pnl_pct * 100, 2) if t.pnl_pct is not None else None,
+                "reason": t.reason,
+            }
+            for t in reversed(portfolio.trades[-30:])
+        ]
+
+    # ── Portfolio summary — prefer Alpaca account data ────────────────────────
+    summary = None
+    if config.use_alpaca:
+        try:
+            acct = _engine.executor.get_account_summary()
+            total_pnl = acct["portfolio_value"] - config.initial_capital
+            summary = {
+                "total_value": acct["portfolio_value"],
+                "cash": acct["cash"],
+                "position_value": acct["portfolio_value"] - acct["cash"],
+                "total_pnl": total_pnl,
+                "total_pnl_pct": (total_pnl / config.initial_capital * 100) if config.initial_capital else 0,
+                "open_positions": len(pos_list),
+                "total_trades": len(trades_list),
+            }
+        except Exception as e:
+            log.warning(f"Alpaca account fetch failed: {e}")
+
+    if summary is None:
+        summary = portfolio.get_summary(price_lookup) if price_lookup else {
+            "total_value": portfolio.cash,
+            "cash": portfolio.cash,
+            "position_value": 0,
+            "total_pnl": 0,
+            "total_pnl_pct": 0,
+            "open_positions": len(pos_list),
+            "total_trades": len(trades_list),
+        }
+
     _record_snapshot(summary["total_value"])
 
+    # ── Signals ───────────────────────────────────────────────────────────────
     sig_list = []
     if signals:
         for sym, sig in signals.items():
             ind = ind_map.get(sym) if ind_map else None
-            # Pull 1d/1h/15m sub-scores when MTF is active
             iscores = sig.indicator_scores or {}
             sig_list.append({
                 "symbol": sym,
@@ -117,7 +188,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
             })
         sig_list.sort(key=lambda x: -abs(x["score"]))
 
-    # Earnings warnings — {symbol: days_until_earnings} for watchlist symbols
+    # ── Earnings warnings ─────────────────────────────────────────────────────
     earnings_warnings: dict = {}
     if _engine.earnings_cal:
         for sym in _engine.watchlist:
@@ -129,20 +200,6 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                         earnings_warnings[sym] = days_away
             except Exception:
                 pass
-
-    trades_list = [
-        {
-            "timestamp": t.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-            "action": t.action,
-            "symbol": t.symbol,
-            "shares": round(t.shares, 4),
-            "price": round(t.price, 2),
-            "pnl": round(t.pnl, 2) if t.pnl is not None else None,
-            "pnl_pct": round(t.pnl_pct * 100, 2) if t.pnl_pct is not None else None,
-            "reason": t.reason,
-        }
-        for t in reversed(portfolio.trades[-30:])
-    ]
 
     mode = (
         "Alpaca Paper" if config.use_alpaca and config.paper_trading
@@ -220,11 +277,6 @@ def api_state():
     global _last_state
     with _lock:
         try:
-            if config.use_alpaca:
-                try:
-                    _engine.executor.sync_portfolio(_engine.portfolio, risk_mgr=_engine.risk)
-                except Exception as sync_err:
-                    log.warning(f"Position sync failed: {sync_err}")
             signals, prices, ind_map = _engine.get_signals()
             _last_state = _build_state(signals, prices, ind_map)
         except Exception as e:
@@ -259,11 +311,6 @@ def api_rescan():
     global _last_state
     with _lock:
         try:
-            if config.use_alpaca:
-                try:
-                    _engine.executor.sync_portfolio(_engine.portfolio, risk_mgr=_engine.risk)
-                except Exception as sync_err:
-                    log.warning(f"Position sync failed: {sync_err}")
             _engine.refresh_watchlist()
             signals, prices, ind_map = _engine.get_signals()
             _last_state = _build_state(signals, prices, ind_map)
@@ -310,6 +357,55 @@ def api_stats():
     })
 
 
+@app.route("/api/chart/<symbol>")
+def api_chart(symbol):
+    symbol = symbol.upper()
+    try:
+        import math
+        from src.data.fetcher import MarketDataFetcher
+        fetcher = MarketDataFetcher(lookback_days=90, interval="1d")
+        df = fetcher.fetch(symbol)
+        if df is None or df.empty:
+            return jsonify({"ok": False, "error": f"No data for {symbol}"}), 404
+        if df.index.tz is not None:
+            df.index = df.index.tz_convert("UTC").tz_localize(None)
+        close = df["Close"]
+        ema_f = close.ewm(span=config.ema_fast, adjust=False).mean()
+        ema_s = close.ewm(span=config.ema_slow, adjust=False).mean()
+        bb_mid = close.rolling(config.bb_period).mean()
+        bb_std_ser = close.rolling(config.bb_period).std()
+        bb_upper = bb_mid + config.bb_std * bb_std_ser
+        bb_lower = bb_mid - config.bb_std * bb_std_ser
+        delta = close.diff()
+        gain = delta.clip(lower=0)
+        loss = (-delta.clip(upper=0))
+        avg_gain = gain.ewm(com=config.rsi_period - 1, min_periods=config.rsi_period).mean()
+        avg_loss = loss.ewm(com=config.rsi_period - 1, min_periods=config.rsi_period).mean()
+        rs = avg_gain / avg_loss.replace(0, float("nan"))
+        rsi_ser = 100 - (100 / (1 + rs))
+        def to_list(s):
+            return [None if (v is None or (isinstance(v, float) and math.isnan(v))) else round(float(v), 4) for v in s]
+        return jsonify({
+            "ok": True,
+            "symbol": symbol,
+            "ema_fast_period": config.ema_fast,
+            "ema_slow_period": config.ema_slow,
+            "dates": df.index.strftime("%Y-%m-%d").tolist(),
+            "open":      to_list(df["Open"]),
+            "high":      to_list(df["High"]),
+            "low":       to_list(df["Low"]),
+            "close":     to_list(close),
+            "ema_fast":  to_list(ema_f),
+            "ema_slow":  to_list(ema_s),
+            "bb_upper":  to_list(bb_upper),
+            "bb_middle": to_list(bb_mid),
+            "bb_lower":  to_list(bb_lower),
+            "rsi":       to_list(rsi_ser),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/journal")
 def api_journal():
     try:
@@ -327,6 +423,7 @@ HTML = """<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>NYSE Trading Engine</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
@@ -434,6 +531,19 @@ tr:hover td{background:#263044}
 .loading-overlay{display:none;position:fixed;inset:0;background:rgba(15,23,42,.7);z-index:50;align-items:center;justify-content:center;flex-direction:column;gap:12px}
 .loading-overlay.active{display:flex}
 
+/* ── Chart modal ─────────────────────────────────────────────────────────── */
+.chart-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:200;overflow:auto;padding:16px}
+.chart-modal.active{display:block}
+.chart-box{max-width:1120px;margin:0 auto;background:#1e293b;border-radius:12px;border:1px solid #334155;overflow:hidden}
+.chart-hdr{padding:12px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #334155}
+.chart-sym{font-weight:700;font-size:16px;color:#f1f5f9}
+.chart-meta{font-size:12px;color:#64748b}
+.chart-close{margin-left:auto;background:#334155;color:#e2e8f0;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600}
+.chart-close:hover{opacity:.8}
+.chart-body{padding:8px;background:#0f172a}
+.sym-link{cursor:pointer;color:#93c5fd}
+.sym-link:hover{text-decoration:underline}
+
 /* ── Responsive — tablet (≤ 900 px) ─────────────────────────────────────── */
 @media(max-width:900px){
   .grid2{grid-template-columns:1fr}
@@ -473,6 +583,20 @@ tr:hover td{background:#263044}
 </style>
 </head>
 <body>
+
+<!-- Chart modal — click any ticker in Signal Analysis to open -->
+<div class="chart-modal" id="chart-modal" onclick="if(event.target===this)closeChart()">
+  <div class="chart-box">
+    <div class="chart-hdr">
+      <span class="chart-sym" id="chart-sym">—</span>
+      <span class="chart-meta" id="chart-meta">90-day daily</span>
+      <button class="chart-close" onclick="closeChart()">✕ Close</button>
+    </div>
+    <div class="chart-body">
+      <div id="chart-plotly" style="height:540px"></div>
+    </div>
+  </div>
+</div>
 
 <div class="loading-overlay" id="overlay">
   <div class="spinner" style="width:36px;height:36px;border-width:4px"></div>
@@ -698,7 +822,7 @@ function applyState(s) {
            </div>`
         : '';
       return `<tr>
-        <td style="font-weight:600">${r.symbol}</td>
+        <td class="sym-link" style="font-weight:600" onclick="openChart('${r.symbol}')" title="Click for chart">${r.symbol}</td>
         <td style="color:#64748b;font-size:12px">${r.sector||'—'}</td>
         <td>$${fmt(r.price)}</td>
         <td><span class="pill pill-${r.action}">${r.action}</span></td>
@@ -919,6 +1043,86 @@ setInterval(updateCycleInfo, 1000);
 // Initial load + auto-refresh every 5s (picks up background cycle results quickly)
 refresh();
 setInterval(refresh, 5000);
+
+// ── Chart modal ───────────────────────────────────────────────────────────────
+async function openChart(symbol) {
+  const modal = document.getElementById('chart-modal');
+  modal.classList.add('active');
+  document.getElementById('chart-sym').textContent = symbol;
+  document.getElementById('chart-meta').textContent = 'Loading…';
+  document.getElementById('chart-plotly').innerHTML = '';
+  try {
+    const res  = await fetch('/api/chart/' + symbol);
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error);
+    document.getElementById('chart-meta').textContent = '90-day daily  ·  EMA ' + data.ema_fast_period + '/' + data.ema_slow_period + '  ·  BB  ·  RSI';
+    renderChart(data);
+  } catch(e) {
+    document.getElementById('chart-plotly').innerHTML =
+      '<div style="color:#f87171;padding:32px;text-align:center">Chart error: ' + e + '</div>';
+    document.getElementById('chart-meta').textContent = '';
+  }
+}
+
+function closeChart() {
+  document.getElementById('chart-modal').classList.remove('active');
+  if (window.Plotly) Plotly.purge('chart-plotly');
+}
+
+function renderChart(d) {
+  const traces = [
+    // Bollinger Band fill (upper drawn first, lower fills to it)
+    {type:'scatter',mode:'lines',x:d.dates,y:d.bb_upper,
+     line:{color:'rgba(96,165,250,0.3)',width:1},xaxis:'x',yaxis:'y',
+     name:'BB Upper',showlegend:false},
+    {type:'scatter',mode:'lines',x:d.dates,y:d.bb_lower,
+     line:{color:'rgba(96,165,250,0.3)',width:1},
+     fill:'tonexty',fillcolor:'rgba(96,165,250,0.05)',
+     xaxis:'x',yaxis:'y',name:'Bollinger Bands'},
+    // Candlestick
+    {type:'candlestick',x:d.dates,open:d.open,high:d.high,low:d.low,close:d.close,
+     name:d.symbol,
+     increasing:{line:{color:'#22c55e'},fillcolor:'#14532d'},
+     decreasing:{line:{color:'#ef4444'},fillcolor:'#7f1d1d'},
+     xaxis:'x',yaxis:'y'},
+    // EMAs
+    {type:'scatter',mode:'lines',x:d.dates,y:d.ema_fast,
+     name:'EMA '+d.ema_fast_period,line:{color:'#f97316',width:1.5},xaxis:'x',yaxis:'y'},
+    {type:'scatter',mode:'lines',x:d.dates,y:d.ema_slow,
+     name:'EMA '+d.ema_slow_period,line:{color:'#8b5cf6',width:1.5},xaxis:'x',yaxis:'y'},
+    // RSI (separate y-axis)
+    {type:'scatter',mode:'lines',x:d.dates,y:d.rsi,name:'RSI',
+     line:{color:'#f59e0b',width:1.5},xaxis:'x',yaxis:'y2'},
+  ];
+  const layout = {
+    paper_bgcolor:'#0f172a', plot_bgcolor:'#0f172a',
+    font:{color:'#94a3b8',family:'Segoe UI,system-ui,sans-serif',size:11},
+    margin:{l:55,r:20,t:12,b:40},
+    xaxis:{type:'date',rangeslider:{visible:false},gridcolor:'#1e293b',
+           tickfont:{color:'#475569',size:10},showgrid:true},
+    yaxis:{domain:[0.33,1],gridcolor:'#1e293b',tickfont:{color:'#475569',size:10},
+           tickprefix:'$',showgrid:true},
+    yaxis2:{domain:[0,0.27],gridcolor:'#1e293b',tickfont:{color:'#475569',size:10},
+            range:[0,100],showgrid:true},
+    legend:{orientation:'h',x:0,y:1.06,font:{size:10,color:'#94a3b8'},
+            bgcolor:'rgba(0,0,0,0)'},
+    shapes:[
+      {type:'line',xref:'paper',x0:0,x1:1,y0:70,y1:70,yref:'y2',
+       line:{color:'rgba(239,68,68,0.45)',width:1,dash:'dot'}},
+      {type:'line',xref:'paper',x0:0,x1:1,y0:30,y1:30,yref:'y2',
+       line:{color:'rgba(34,197,94,0.45)',width:1,dash:'dot'}},
+    ],
+    annotations:[
+      {text:'RSI',x:0.005,xref:'paper',y:0.13,yref:'paper',
+       showarrow:false,font:{color:'#f59e0b',size:10}},
+    ],
+  };
+  Plotly.newPlot('chart-plotly', traces, layout, {
+    responsive:true, displayModeBar:true,
+    modeBarButtonsToRemove:['lasso2d','select2d','toggleSpikelines'],
+    displaylogo:false,
+  });
+}
 </script>
 </body>
 </html>"""
