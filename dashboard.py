@@ -5,11 +5,13 @@ Run:  python dashboard.py
 Then open http://localhost:8080
 """
 
+import json
 import logging
 import threading
 import time
 import traceback
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from flask import Flask, jsonify, render_template_string
@@ -30,6 +32,15 @@ _next_cycle_at: Optional[datetime] = None
 _equity_snapshots: list = []          # [{ts, value}] — portfolio value over time
 _last_snapshot_ts: Optional[datetime] = None
 _ext_hours = ExtendedHoursMonitor(cache_ttl_seconds=120)
+
+# ── News feed cache ───────────────────────────────────────────────────────────
+_news_cache: dict = {}       # {symbol: {"items": [...], "fetched_at": datetime}}
+_NEWS_CACHE_TTL = 900        # 15-minute TTL
+
+# ── Weekend backtest state ────────────────────────────────────────────────────
+_backtest_report: dict = {}
+_backtest_running: bool = False
+_BACKTEST_REPORT_PATH = Path(__file__).resolve().parent / "backtest_report.json"
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +70,14 @@ def _background_loop() -> None:
                 _last_cycle_at = datetime.now()
             except Exception as e:
                 log.error(f"Background cycle error: {e}")
+        # Auto-trigger weekend backtest on Fridays after market close (≥16:00)
+        _now = datetime.now()
+        if _now.weekday() == 4 and _now.hour >= 16 and not _backtest_running:
+            last_end = _backtest_report.get("period_end") if _backtest_report else None
+            if last_end != _now.date().isoformat():
+                threading.Thread(target=_run_backtest_bg, daemon=True,
+                                 name="friday-backtest").start()
+                log.info("Friday auto-backtest triggered")
         _next_cycle_at = datetime.now() + timedelta(seconds=CYCLE_INTERVAL)
         time.sleep(CYCLE_INTERVAL)
 
@@ -396,6 +415,102 @@ def _compute_risk_metrics() -> dict:
     }
 
 
+# ── News feed helpers ─────────────────────────────────────────────────────────
+
+def _parse_news_item(n: dict, sym: str) -> dict:
+    """Normalise yfinance news dict (old flat format or new nested 'content' format)."""
+    if "content" in n:
+        c = n["content"]
+        pub = c.get("pubDate", "")
+        ts = 0
+        if pub:
+            try:
+                dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+                ts = int(dt.timestamp())
+            except Exception:
+                pass
+        return {
+            "symbol": sym,
+            "title": c.get("title", ""),
+            "publisher": (c.get("provider") or {}).get("displayName", ""),
+            "url": (c.get("canonicalUrl") or {}).get("url", ""),
+            "published_at": ts,
+        }
+    return {
+        "symbol": sym,
+        "title": n.get("title", ""),
+        "publisher": n.get("publisher", ""),
+        "url": n.get("link", ""),
+        "published_at": int(n.get("providerPublishTime") or 0),
+    }
+
+
+# ── Backtest background runner ────────────────────────────────────────────────
+
+def _run_backtest_bg() -> None:
+    global _backtest_report, _backtest_running
+    if _backtest_running:
+        return
+    _backtest_running = True
+    try:
+        from src.backtest.backtester import Backtester
+        from datetime import date, timedelta as td
+
+        end_d   = date.today()
+        start_d = end_d - td(days=182)
+        end_s   = end_d.isoformat()
+        start_s = start_d.isoformat()
+
+        symbols = _engine.watchlist or config.symbols
+        bt      = Backtester(config)
+        metrics = bt.run(symbols, start_s, end_s)
+
+        # SPY buy-and-hold benchmark
+        spy_return = None
+        try:
+            import yfinance as yf
+            spy = yf.download("SPY", start=start_s, end=end_s,
+                              progress=False, auto_adjust=True)
+            if len(spy) > 1:
+                spy_return = round(
+                    float(spy["Close"].iloc[-1] / spy["Close"].iloc[0] - 1) * 100, 2
+                )
+        except Exception as e:
+            log.debug(f"SPY benchmark fetch: {e}")
+
+        report = {
+            "generated_at":   datetime.now().isoformat(),
+            "period_start":   start_s,
+            "period_end":     end_s,
+            "symbols":        symbols,
+            "algo": {
+                "total_return_pct":      round(metrics.total_return_pct, 2),
+                "annualized_return_pct": round(metrics.annualized_return_pct, 2),
+                "sharpe_ratio":          round(metrics.sharpe_ratio, 3) if metrics.sharpe_ratio else None,
+                "max_drawdown_pct":      round(metrics.max_drawdown_pct, 2),
+                "win_rate_pct":          round(metrics.win_rate_pct, 1),
+                "profit_factor":         round(metrics.profit_factor, 3) if metrics.profit_factor else None,
+                "total_trades":          metrics.total_trades,
+            },
+            "spy_return_pct": spy_return,
+            "beats_spy":      (metrics.total_return_pct > spy_return)
+                              if spy_return is not None else None,
+        }
+
+        _backtest_report = report
+        with open(_BACKTEST_REPORT_PATH, "w") as f:
+            json.dump(report, f, indent=2)
+        log.info(
+            f"Backtest done: algo={metrics.total_return_pct:.1f}%  "
+            f"SPY={spy_return}%  beats={'yes' if report['beats_spy'] else 'no'}"
+        )
+    except Exception as e:
+        log.error(f"Backtest error: {e}")
+        _backtest_report = {"error": str(e), "generated_at": datetime.now().isoformat()}
+    finally:
+        _backtest_running = False
+
+
 # ── API endpoints ─────────────────────────────────────────────────────────────
 
 @app.route("/api/state")
@@ -682,6 +797,114 @@ def api_journal():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/news")
+def api_news():
+    """Return recent headlines for watchlist symbols (15-min cache, ≤8 symbols)."""
+    import yfinance as yf
+    watchlist = (_engine.watchlist or [])[:8]
+    if not watchlist:
+        return jsonify({"ok": True, "items": []})
+
+    now      = datetime.now()
+    all_items: list = []
+
+    for sym in watchlist:
+        cached = _news_cache.get(sym)
+        if cached and (now - cached["fetched_at"]).total_seconds() < _NEWS_CACHE_TTL:
+            all_items.extend(cached["items"])
+            continue
+        try:
+            raw   = yf.Ticker(sym).news or []
+            items = [_parse_news_item(n, sym) for n in raw[:5] if n]
+            items = [it for it in items if it.get("title")]
+            _news_cache[sym] = {"items": items, "fetched_at": now}
+            all_items.extend(items)
+        except Exception as e:
+            log.debug(f"News fetch {sym}: {e}")
+
+    all_items.sort(key=lambda x: x.get("published_at") or 0, reverse=True)
+    return jsonify({"ok": True, "items": all_items[:30]})
+
+
+@app.route("/api/backtest/run", methods=["POST"])
+def api_backtest_run():
+    if _backtest_running:
+        return jsonify({"ok": False, "reason": "backtest already running"})
+    threading.Thread(target=_run_backtest_bg, daemon=True, name="backtest-manual").start()
+    return jsonify({"ok": True, "message": "Backtest started — poll /api/backtest/report"})
+
+
+@app.route("/api/backtest/report")
+def api_backtest_report():
+    if _backtest_report:
+        return jsonify({"ok": True, "report": _backtest_report, "running": _backtest_running})
+    if _BACKTEST_REPORT_PATH.exists():
+        try:
+            with open(_BACKTEST_REPORT_PATH) as f:
+                return jsonify({"ok": True, "report": json.load(f), "running": _backtest_running})
+        except Exception:
+            pass
+    return jsonify({"ok": False, "running": _backtest_running, "reason": "no report yet"})
+
+
+# ── PWA routes ────────────────────────────────────────────────────────────────
+
+@app.route("/manifest.json")
+def pwa_manifest():
+    from flask import Response
+    m = {
+        "name":             "NYSE Trading Engine",
+        "short_name":       "TradingEng",
+        "start_url":        "/",
+        "display":          "standalone",
+        "background_color": "#0f172a",
+        "theme_color":      "#1e293b",
+        "description":      "Algorithmic NYSE trading engine dashboard",
+        "icons": [
+            {"src": "/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml"},
+            {"src": "/icon-512.svg", "sizes": "512x512", "type": "image/svg+xml"},
+        ],
+    }
+    return Response(json.dumps(m), mimetype="application/manifest+json")
+
+
+@app.route("/icon-<size>.svg")
+def pwa_icon(size):
+    from flask import Response
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+        '<rect width="100" height="100" rx="22" fill="#1e293b"/>'
+        '<polyline points="10,80 28,50 48,62 68,28 90,18" fill="none" '
+        'stroke="#22c55e" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>'
+        '</svg>'
+    )
+    return Response(svg, mimetype="image/svg+xml")
+
+
+@app.route("/sw.js")
+def service_worker():
+    from flask import Response
+    js = """
+const CACHE = 'nyse-v1';
+self.addEventListener('install', e =>
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(['/'])))
+);
+self.addEventListener('fetch', e => {
+  // Always use network for API calls; cache-first for the shell
+  if (e.request.url.includes('/api/')) {
+    e.respondWith(fetch(e.request).catch(() => new Response('{}', {headers:{'Content-Type':'application/json'}})));
+  } else {
+    e.respondWith(
+      caches.match(e.request).then(r => r || fetch(e.request).then(res => {
+        return caches.open(CACHE).then(c => { c.put(e.request, res.clone()); return res; });
+      }))
+    );
+  }
+});
+""".strip()
+    return Response(js, mimetype="application/javascript")
+
+
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
 
 HTML = """<!doctype html>
@@ -689,6 +912,11 @@ HTML = """<!doctype html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="theme-color" content="#1e293b"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<link rel="manifest" href="/manifest.json"/>
+<link rel="apple-touch-icon" href="/icon-192.svg"/>
 <title>NYSE Trading Engine</title>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
 <style>
@@ -940,6 +1168,22 @@ body.light .pnl-ticker{border-left-color:#e2e8f0}
 @keyframes pnl-flash{0%{opacity:1}35%{opacity:.25}100%{opacity:1}}
 .pnl-flash{animation:pnl-flash .55s ease}
 @media(max-width:600px){.pnl-ticker{display:none}}
+
+/* ── News feed panel ─────────────────────────────────────────────────────────── */
+.news-item{display:flex;flex-direction:column;gap:2px;padding:10px 14px;border-bottom:1px solid #1e293b;transition:background .12s}
+.news-item:last-child{border-bottom:none}
+.news-item:hover{background:#263044}
+.news-sym{display:inline-block;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:700;background:#1e3a5f;color:#93c5fd;margin-right:6px;flex-shrink:0}
+.news-title{font-size:13px;color:#e2e8f0;line-height:1.4;cursor:pointer}
+.news-title:hover{color:#93c5fd;text-decoration:underline}
+.news-meta{font-size:10px;color:#475569;margin-top:1px}
+.news-loading{padding:22px;text-align:center;color:#475569;font-size:13px}
+body.light .news-item{border-bottom-color:#f1f5f9}
+body.light .news-item:hover{background:#f8fafc}
+body.light .news-sym{background:#dbeafe;color:#1d4ed8}
+body.light .news-title{color:#1e293b}
+body.light .news-title:hover{color:#1d4ed8}
+body.light .news-meta{color:#94a3b8}
 </style>
 </head>
 <body>
@@ -1094,6 +1338,17 @@ body.light .pnl-ticker{border-left-color:#e2e8f0}
       <span style="font-size:11px;color:#475569;margin-left:6px">daily % change</span>
     </div>
     <div class="hm-grid" id="hm-grid"></div>
+  </div>
+
+  <!-- news feed panel -->
+  <div class="panel grid1" id="news-panel" style="display:none">
+    <div class="panel-title">
+      Market News
+      <span id="news-count" style="background:#334155;color:#94a3b8;border-radius:99px;padding:1px 8px;font-size:11px">0</span>
+      <span style="font-size:11px;color:#475569;margin-left:8px" id="news-note">15-min cache · watchlist only</span>
+      <button id="btn-news-refresh" onclick="loadNews(true)" style="margin-left:auto;background:none;border:1px solid #334155;color:#64748b;font-size:11px;padding:2px 10px;border-radius:99px;min-height:22px;cursor:pointer">↻ Refresh</button>
+    </div>
+    <div id="news-body"><div class="news-loading">Loading headlines…</div></div>
   </div>
 
   <!-- positions + trades -->
@@ -1755,6 +2010,56 @@ function closeChart() {
   if (window.Plotly) Plotly.purge('chart-plotly');
 }
 
+// ── News feed ─────────────────────────────────────────────────────────────────
+let _newsLoaded = false;
+function _relTime(ts) {
+  if (!ts) return '';
+  const diff = Math.floor(Date.now() / 1000) - ts;
+  if (diff < 3600)  return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+
+async function loadNews(force) {
+  const panel = document.getElementById('news-panel');
+  const body  = document.getElementById('news-body');
+  const count = document.getElementById('news-count');
+  const btn   = document.getElementById('btn-news-refresh');
+  if (!force && _newsLoaded) return;
+  if (btn) btn.disabled = true;
+  try {
+    const res  = await fetch('/api/news');
+    const data = await res.json();
+    if (!data.ok || !data.items || !data.items.length) {
+      body.innerHTML = '<div class="news-loading">No headlines available — watchlist may be empty or market closed.</div>';
+      panel.style.display = '';
+      return;
+    }
+    _newsLoaded = true;
+    panel.style.display = '';
+    count.textContent = data.items.length;
+    body.innerHTML = data.items.map(n => {
+      const urlAttr = n.url ? `href="${n.url}" target="_blank" rel="noopener"` : '';
+      const time = _relTime(n.published_at);
+      return `<div class="news-item">
+        <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:4px">
+          <span class="news-sym">${n.symbol}</span>
+          <a class="news-title" ${urlAttr}>${n.title || '(no title)'}</a>
+        </div>
+        <div class="news-meta">${n.publisher || ''}${n.publisher && time ? ' · ' : ''}${time}</div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    body.innerHTML = '<div class="news-loading" style="color:#f87171">News fetch failed: ' + e + '</div>';
+    panel.style.display = '';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+// Load news once on init; auto-refresh every 15 min
+loadNews(false);
+setInterval(() => loadNews(true), 900000);
+
 function renderChart(d) {
   // Volume bar colours: spike = orange, normal = slate
   const volColors = (d.vol_ratio || []).map(vr =>
@@ -1849,6 +2154,11 @@ function renderChart(d) {
     displaylogo:false,
   });
 }
+
+// ── Service Worker (PWA) ──────────────────────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 </script>
 </body>
 </html>"""
@@ -1859,6 +2169,9 @@ STATS_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="theme-color" content="#1e293b"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<link rel="manifest" href="/manifest.json"/>
 <title>Performance — NYSE Trading Engine</title>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
 <style>
@@ -1902,6 +2215,16 @@ tr:hover td{background:#263044}
 .rating-ok{background:#451a03;color:#fdba74}
 .rating-bad{background:#7f1d1d;color:#f87171}
 .rating-na{background:#1e293b;color:#475569}
+/* backtest panel */
+.bt-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;padding:14px 16px}
+.bt-card{background:#0f172a;border-radius:8px;padding:12px 14px;border:1px solid #334155}
+.bt-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.bt-value{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+.bt-sub{font-size:11px;color:#64748b;margin-top:2px}
+.bt-beats{margin:0 16px 14px;padding:10px 14px;border-radius:8px;font-size:13px;font-weight:600}
+.bt-beats-yes{background:#0f2318;color:#4ade80;border:1px solid #166534}
+.bt-beats-no{background:#1c0a0a;color:#f87171;border:1px solid #7f1d1d}
+.bt-run-wrap{padding:12px 16px;border-top:1px solid #334155;display:flex;align-items:center;gap:10px}
 /* notification panel */
 .notif-row{display:flex;align-items:flex-start;gap:14px;padding:14px 16px;border-bottom:1px solid #334155}
 .notif-row:last-child{border-bottom:none}
@@ -2012,6 +2335,25 @@ tr:hover td{background:#263044}
     </div>
     <div style="padding:8px 4px 4px">
       <div id="period-chart" style="height:240px"></div>
+    </div>
+  </div>
+
+  <!-- Backtest report -->
+  <div class="section-label">Backtest vs S&amp;P 500</div>
+  <div class="panel" id="bt-panel">
+    <div class="panel-title">6-Month Backtest Report
+      <span id="bt-gen-at" style="font-size:11px;color:#475569;font-weight:400;margin-left:8px">—</span>
+      <span id="bt-running-badge" style="display:none;margin-left:8px;font-size:10px;padding:2px 8px;border-radius:99px;background:#1e3a5f;color:#93c5fd;font-weight:600">Running…</span>
+    </div>
+    <div id="bt-body">
+      <div style="padding:22px;text-align:center;color:#475569;font-size:13px">
+        No report yet — run a backtest to compare algo performance vs S&amp;P 500.<br>
+        <em style="font-size:11px">Auto-runs every Friday after market close.</em>
+      </div>
+    </div>
+    <div class="bt-run-wrap">
+      <button id="btn-bt-run" onclick="runBacktest()" style="background:#7c3aed;color:#fff;padding:7px 18px;border-radius:6px;border:none;font-size:13px;font-weight:600;cursor:pointer">▶ Run Now</button>
+      <span style="font-size:12px;color:#475569">Backtests the current watchlist over the past 6 months — runs in background.</span>
     </div>
   </div>
 
@@ -2394,6 +2736,113 @@ fetch('/api/journal')
     document.getElementById('journal-body').innerHTML =
       '<tr><td colspan="9" class="empty" style="color:#f87171">Failed to load journal</td></tr>';
   });
+
+// ── Backtest report ───────────────────────────────────────────────────────────
+function renderBacktest(report) {
+  const body   = document.getElementById('bt-body');
+  const genAt  = document.getElementById('bt-gen-at');
+  if (!report || report.error) {
+    body.innerHTML = `<div style="padding:18px 16px;color:#f87171;font-size:13px">
+      ${report ? 'Error: ' + report.error : 'No report yet.'}</div>`;
+    return;
+  }
+  const a   = report.algo || {};
+  const spy = report.spy_return_pct;
+  const gen = report.generated_at ? new Date(report.generated_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—';
+  genAt.textContent = 'Generated ' + gen + '  ·  ' + (report.period_start||'') + ' → ' + (report.period_end||'');
+
+  const clsR = v => v == null ? 'neu' : v > 0 ? 'pos' : v < 0 ? 'neg' : 'neu';
+  const fmtR = v => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+
+  const beatsHtml = report.beats_spy != null
+    ? `<div class="bt-beats ${report.beats_spy ? 'bt-beats-yes' : 'bt-beats-no'}">
+         ${report.beats_spy
+           ? '✓ Algo outperformed SPY (+' + (a.total_return_pct - spy).toFixed(2) + '% alpha)'
+           : '✗ Algo underperformed SPY by ' + (spy - a.total_return_pct).toFixed(2) + '%'}
+       </div>`
+    : '';
+
+  body.innerHTML = beatsHtml + `
+    <div class="bt-grid">
+      <div class="bt-card">
+        <div class="bt-label">Algo 6M Return</div>
+        <div class="bt-value ${clsR(a.total_return_pct)}">${fmtR(a.total_return_pct)}</div>
+        <div class="bt-sub">Annualised: ${fmtR(a.annualized_return_pct)}</div>
+      </div>
+      <div class="bt-card">
+        <div class="bt-label">SPY 6M Return</div>
+        <div class="bt-value ${clsR(spy)}">${fmtR(spy)}</div>
+        <div class="bt-sub">Buy &amp; hold benchmark</div>
+      </div>
+      <div class="bt-card">
+        <div class="bt-label">Sharpe Ratio</div>
+        <div class="bt-value neu">${a.sharpe_ratio != null ? a.sharpe_ratio.toFixed(2) : '—'}</div>
+        <div class="bt-sub">Risk-adjusted return</div>
+      </div>
+      <div class="bt-card">
+        <div class="bt-label">Max Drawdown</div>
+        <div class="bt-value ${a.max_drawdown_pct > 0 ? 'neg' : 'neu'}">${a.max_drawdown_pct != null ? '-' + a.max_drawdown_pct.toFixed(2) + '%' : '—'}</div>
+      </div>
+      <div class="bt-card">
+        <div class="bt-label">Win Rate</div>
+        <div class="bt-value ${(a.win_rate_pct||0) >= 50 ? 'pos' : 'neg'}">${a.win_rate_pct != null ? a.win_rate_pct.toFixed(1) + '%' : '—'}</div>
+        <div class="bt-sub">${a.total_trades||0} trades</div>
+      </div>
+      <div class="bt-card">
+        <div class="bt-label">Profit Factor</div>
+        <div class="bt-value ${(a.profit_factor||0) >= 1 ? 'pos' : 'neg'}">${a.profit_factor != null ? a.profit_factor.toFixed(2) : '—'}</div>
+        <div class="bt-sub">Gross wins / gross losses</div>
+      </div>
+    </div>`;
+}
+
+let _btPolling = null;
+async function loadBacktest() {
+  try {
+    const res  = await fetch('/api/backtest/report');
+    const data = await res.json();
+    const runBadge = document.getElementById('bt-running-badge');
+    if (data.running) {
+      if (runBadge) runBadge.style.display = 'inline-block';
+    } else {
+      if (runBadge) runBadge.style.display = 'none';
+      if (_btPolling) { clearInterval(_btPolling); _btPolling = null; }
+    }
+    if (data.ok && data.report) renderBacktest(data.report);
+  } catch(e) {}
+}
+
+async function runBacktest() {
+  const btn = document.getElementById('btn-bt-run');
+  const badge = document.getElementById('bt-running-badge');
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  try {
+    const res  = await fetch('/api/backtest/run', {method:'POST'});
+    const data = await res.json();
+    if (data.ok) {
+      if (badge) badge.style.display = 'inline-block';
+      document.getElementById('bt-body').innerHTML =
+        '<div style="padding:18px 16px;color:#94a3b8;font-size:13px">Backtest running — this may take a minute…</div>';
+      // Poll every 5s until done
+      _btPolling = setInterval(loadBacktest, 5000);
+    } else {
+      alert('Could not start backtest: ' + (data.reason || 'unknown error'));
+    }
+  } catch(e) {
+    alert('Backtest request failed: ' + e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '▶ Run Now';
+  }
+}
+
+loadBacktest();
+
+// ── Service Worker (PWA) ──────────────────────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 </script>
 </body>
 </html>"""
