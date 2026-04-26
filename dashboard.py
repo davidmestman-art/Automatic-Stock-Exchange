@@ -706,7 +706,15 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "volume_ratio": vol_ratio,
                 "est_size_pct": est_size_pct,
                 "corr_blocked": corr_blocked.get(sym),
-                "reasons": sig.reasons[:3],
+                "reasons": sig.reasons,
+                "macd_hist":      round(ind.macd_hist, 4)      if ind and ind.macd_hist      is not None else None,
+                "macd_hist_prev": round(ind.macd_hist_prev, 4) if ind and ind.macd_hist_prev is not None else None,
+                "ema_fast":       round(ind.ema_fast, 2)       if ind and ind.ema_fast       else None,
+                "ema_slow":       round(ind.ema_slow, 2)       if ind and ind.ema_slow       else None,
+                "bb_upper":       round(ind.bb_upper, 2)       if ind and ind.bb_upper       else None,
+                "bb_lower":       round(ind.bb_lower, 2)       if ind and ind.bb_lower       else None,
+                "roc_10":         round(ind.roc_10, 4)         if ind and getattr(ind, "roc_10",    None) is not None else None,
+                "stoch_rsi":      round(ind.stoch_rsi, 1)      if ind and getattr(ind, "stoch_rsi", None) is not None else None,
                 "tf_1d":  round(iscores["1d"],  3) if "1d"  in iscores else None,
                 "tf_1h":  round(iscores["1h"],  3) if "1h"  in iscores else None,
                 "tf_15m": round(iscores["15m"], 3) if "15m" in iscores else None,
@@ -1844,6 +1852,53 @@ body.light .news-sym{background:#dbeafe;color:#1d4ed8}
 body.light .news-title{color:#1e293b}
 body.light .news-title:hover{color:#1d4ed8}
 body.light .news-meta{color:#94a3b8}
+
+/* ── Explain Trade modal ─────────────────────────────────────────────────── */
+.explain-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);
+               z-index:300;padding:20px;align-items:center;justify-content:center}
+.explain-modal.active{display:flex}
+.explain-box{width:100%;max-width:560px;background:#0f1629;border-radius:14px;
+             border:1px solid #1e2d45;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.7)}
+.explain-hdr{padding:16px 20px;display:flex;align-items:center;justify-content:space-between;
+             border-bottom:1px solid #1e2d45;background:#141d2e;gap:10px}
+.explain-sym{font-weight:800;font-size:20px;color:#f1f5f9;letter-spacing:-.5px}
+.explain-close{background:none;border:1px solid #1e2d45;color:#8898b8;padding:5px 12px;
+               border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;
+               min-height:unset;transition:border-color .15s}
+.explain-close:hover{border-color:#3b82f6;color:#e2e8f0}
+.explain-body{padding:20px;max-height:70vh;overflow-y:auto}
+.explain-score{font-size:13px;color:#8898b8;margin-bottom:16px;padding-bottom:14px;
+               border-bottom:1px solid #1e2d45}
+.explain-score strong{color:#f1f5f9;font-size:18px;font-weight:800}
+.explain-item{display:flex;gap:12px;margin-bottom:14px;align-items:flex-start}
+.explain-item:last-child{margin-bottom:0}
+.explain-icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;
+              justify-content:center;font-size:15px;flex-shrink:0;margin-top:1px}
+.ei-bull{background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.2)}
+.ei-bear{background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.2)}
+.ei-neu{background:rgba(100,116,139,.15);border:1px solid rgba(100,116,139,.2)}
+.explain-text{flex:1}
+.explain-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+               margin-bottom:3px}
+.el-bull{color:#34d399}.el-bear{color:#f87171}.el-neu{color:#94a3b8}
+.explain-detail{font-size:13px;color:#c8d4e8;line-height:1.55}
+.explain-val{font-weight:700;color:#f1f5f9}
+.explain-reasons{margin-top:16px;padding-top:14px;border-top:1px solid #1e2d45}
+.explain-reasons-title{font-size:11px;font-weight:700;text-transform:uppercase;
+                        letter-spacing:.5px;color:#4d6380;margin-bottom:8px}
+.explain-reason{font-size:12px;color:#8898b8;padding:5px 0;border-bottom:1px solid rgba(30,45,69,.5);
+                line-height:1.45}
+.explain-reason:last-child{border-bottom:none}
+body.light .explain-box{background:#fff;border-color:#e2e8f0}
+body.light .explain-hdr{background:#f8fafc;border-bottom-color:#e2e8f0}
+body.light .explain-sym{color:#0f172a}
+body.light .explain-score{border-bottom-color:#e2e8f0;color:#475569}
+body.light .explain-score strong{color:#1e293b}
+body.light .explain-detail{color:#374151}
+body.light .explain-val{color:#0f172a}
+body.light .explain-reasons{border-top-color:#e2e8f0}
+body.light .explain-reason{color:#64748b;border-bottom-color:#f1f5f9}
+body.light .explain-close{border-color:#e2e8f0;color:#64748b}
 </style>
 </head>
 <body>
@@ -1859,6 +1914,20 @@ body.light .news-meta{color:#94a3b8}
     <div class="chart-body">
       <div id="chart-plotly" style="height:540px"></div>
     </div>
+  </div>
+</div>
+
+<!-- Explain Trade modal -->
+<div class="explain-modal" id="explain-modal" onclick="if(event.target===this)closeExplain()">
+  <div class="explain-box">
+    <div class="explain-hdr">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="explain-sym" id="explain-sym">—</span>
+        <span class="pill" id="explain-pill">—</span>
+      </div>
+      <button class="explain-close" onclick="closeExplain()">✕ Close</button>
+    </div>
+    <div class="explain-body" id="explain-body"></div>
   </div>
 </div>
 
@@ -2019,9 +2088,9 @@ body.light .news-meta{color:#94a3b8}
     </div>
     <div class="tbl-wrap"><table>
       <thead><tr>
-        <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="z-col">Z-Score</th><th class="vol-col">Volume</th>
+        <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="z-col">Z-Score</th><th class="vol-col">Volume</th><th></th>
       </tr></thead>
-      <tbody id="sig-body"><tr><td colspan="8" class="empty">No data yet — click Refresh</td></tr></tbody>
+      <tbody id="sig-body"><tr><td colspan="9" class="empty">No data yet — click Refresh</td></tr></tbody>
     </table></div>
   </div>
 
@@ -2212,7 +2281,7 @@ function applyState(s) {
   document.getElementById('sig-count').textContent = s.signals.length;
   const sb = document.getElementById('sig-body');
   if (!s.signals.length) {
-    sb.innerHTML = '<tr><td colspan="8" class="empty">No signals — click Refresh</td></tr>';
+    sb.innerHTML = '<tr><td colspan="9" class="empty">No signals — click Refresh</td></tr>';
   } else {
     sb.innerHTML = s.signals.map(r => {
       const barPct = Math.round(Math.abs(r.score) * 100);
@@ -2282,6 +2351,7 @@ function applyState(s) {
         <td>${r.rsi != null ? fmt(r.rsi, 1) : '—'}</td>
         <td class="z-col" style="color:${zCol};${zBold}">${zStr}</td>
         <td class="vol-col" style="color:${vrCol};${vrBold}">${vrStr}</td>
+        <td><button onclick="explainSignal('${r.symbol}')" style="padding:4px 10px;font-size:11px;font-weight:600;background:rgba(59,130,246,.12);color:#93c5fd;border:1px solid rgba(59,130,246,.25);border-radius:5px;cursor:pointer;white-space:nowrap;min-height:unset" title="Explain this signal in plain English">Explain</button></td>
       </tr>`;
     }).join('');
   }
@@ -2722,6 +2792,219 @@ async function openChart(symbol) {
 function closeChart() {
   document.getElementById('chart-modal').classList.remove('active');
   if (window.Plotly) Plotly.purge('chart-plotly');
+}
+
+// ── Explain Trade modal ───────────────────────────────────────────────────────
+function explainSignal(sym) {
+  const s = window._state;
+  if (!s) return;
+  const r = (s.signals || []).find(x => x.symbol === sym);
+  if (!r) return;
+
+  // helpers
+  const fmtN = (v, d=1) => v == null ? null : Number(v).toFixed(d);
+  const pct   = v => v == null ? null : (v * 100).toFixed(1) + '%';
+
+  const items = [];
+
+  // ── RSI ──────────────────────────────────────────────────────────────────
+  if (r.rsi != null) {
+    const v = r.rsi;
+    let tone, label, detail;
+    if (v < 30) {
+      tone = 'bull'; label = 'Oversold (Bullish)';
+      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — below 30 signals oversold territory. The stock may be undervalued and due for a bounce.`;
+    } else if (v < 45) {
+      tone = 'bull'; label = 'Mildly Oversold';
+      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — below 45, leaning oversold. Selling pressure is easing.`;
+    } else if (v < 55) {
+      tone = 'neu'; label = 'Neutral';
+      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — in the neutral zone, no strong directional bias.`;
+    } else if (v < 70) {
+      tone = 'bear'; label = 'Mildly Overbought';
+      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — above 55, leaning overbought. Buying momentum is strong but watch for a pullback.`;
+    } else {
+      tone = 'bear'; label = 'Overbought (Bearish)';
+      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — above 70 signals overbought territory. The stock may be due for a correction.`;
+    }
+    items.push({icon: tone === 'bull' ? '📊' : tone === 'bear' ? '📊' : '📊', tone, label, detail});
+  }
+
+  // ── MACD ──────────────────────────────────────────────────────────────────
+  if (r.macd_hist != null) {
+    const h = r.macd_hist, hp = r.macd_hist_prev;
+    let tone, label, detail;
+    const crossed = hp != null && ((h > 0 && hp <= 0) || (h < 0 && hp >= 0));
+    if (h > 0 && crossed) {
+      tone = 'bull'; label = 'MACD Bullish Crossover';
+      detail = `MACD histogram just crossed above zero — a fresh bullish signal indicating momentum is turning upward.`;
+    } else if (h > 0 && hp != null && h > hp) {
+      tone = 'bull'; label = 'MACD Bullish & Strengthening';
+      detail = `MACD histogram is <span class="explain-val">positive and rising</span> — bullish momentum is building.`;
+    } else if (h > 0) {
+      tone = 'bull'; label = 'MACD Bullish (Fading)';
+      detail = `MACD histogram is positive but <span class="explain-val">declining</span> — bullish momentum exists but may be weakening.`;
+    } else if (h < 0 && crossed) {
+      tone = 'bear'; label = 'MACD Bearish Crossover';
+      detail = `MACD histogram just crossed below zero — a fresh bearish signal indicating momentum is turning downward.`;
+    } else if (h < 0 && hp != null && h < hp) {
+      tone = 'bear'; label = 'MACD Bearish & Strengthening';
+      detail = `MACD histogram is <span class="explain-val">negative and falling</span> — bearish momentum is building.`;
+    } else {
+      tone = 'bear'; label = 'MACD Bearish (Recovering)';
+      detail = `MACD histogram is negative but <span class="explain-val">recovering</span> — bearish momentum may be easing.`;
+    }
+    items.push({icon: '📈', tone, label, detail});
+  }
+
+  // ── EMA Trend ──────────────────────────────────────────────────────────────
+  if (r.ema_fast != null && r.ema_slow != null) {
+    const ef = r.ema_fast, es = r.ema_slow;
+    const spread = ((ef - es) / es * 100).toFixed(2);
+    const tone = ef > es ? 'bull' : 'bear';
+    const label = ef > es ? 'EMA Uptrend' : 'EMA Downtrend';
+    const detail = ef > es
+      ? `Fast EMA (<span class="explain-val">$${fmtN(ef,2)}</span>) is above slow EMA (<span class="explain-val">$${fmtN(es,2)}</span>) — the stock is in a short-term <strong>uptrend</strong> (spread ${spread}%).`
+      : `Fast EMA (<span class="explain-val">$${fmtN(ef,2)}</span>) is below slow EMA (<span class="explain-val">$${fmtN(es,2)}</span>) — the stock is in a short-term <strong>downtrend</strong> (spread ${spread}%).`;
+    items.push({icon: '📉', tone, label, detail});
+  }
+
+  // ── Bollinger Bands ────────────────────────────────────────────────────────
+  if (r.bb_upper != null && r.bb_lower != null && r.price) {
+    const p = r.price, bu = r.bb_upper, bl = r.bb_lower;
+    let tone, label, detail;
+    if (p < bl) {
+      tone = 'bull'; label = 'Below Lower Bollinger Band';
+      detail = `Price <span class="explain-val">$${fmtN(p,2)}</span> is below the lower band (<span class="explain-val">$${fmtN(bl,2)}</span>) — statistically oversold. Mean-reversion setups often appear here.`;
+    } else if (p > bu) {
+      tone = 'bear'; label = 'Above Upper Bollinger Band';
+      detail = `Price <span class="explain-val">$${fmtN(p,2)}</span> is above the upper band (<span class="explain-val">$${fmtN(bu,2)}</span>) — statistically overbought. The stock is extended above its normal range.`;
+    } else {
+      const pos = Math.round((p - bl) / (bu - bl) * 100);
+      tone = 'neu'; label = 'Within Bollinger Bands';
+      detail = `Price is within the bands at <span class="explain-val">${pos}%</span> of the range (lower <span class="explain-val">$${fmtN(bl,2)}</span> → upper <span class="explain-val">$${fmtN(bu,2)}</span>). Normal trading range.`;
+    }
+    items.push({icon: '〰️', tone, label, detail});
+  }
+
+  // ── Z-score ────────────────────────────────────────────────────────────────
+  if (r.z_score != null) {
+    const z = r.z_score;
+    let tone, label, detail;
+    if (z <= -2) {
+      tone = 'bull'; label = 'Deeply Oversold (Z-Score)';
+      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is more than 2 standard deviations below its 20-day mean. Strong mean-reversion candidate.`;
+    } else if (z <= -1) {
+      tone = 'bull'; label = 'Below Average (Z-Score)';
+      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is below its recent average, a mild mean-reversion opportunity.`;
+    } else if (z < 1) {
+      tone = 'neu'; label = 'Near Average (Z-Score)';
+      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is close to its 20-day average. No strong mean-reversion signal.`;
+    } else if (z < 2) {
+      tone = 'bear'; label = 'Above Average (Z-Score)';
+      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is above its recent average. Mild overextension.`;
+    } else {
+      tone = 'bear'; label = 'Significantly Extended (Z-Score)';
+      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is more than 2 standard deviations above its 20-day mean. May be overextended.`;
+    }
+    items.push({icon: '📐', tone, label, detail});
+  }
+
+  // ── Momentum (ROC) ─────────────────────────────────────────────────────────
+  if (r.roc_10 != null) {
+    const roc = r.roc_10;
+    let tone, label, detail;
+    if (roc > 0.08) {
+      tone = 'bull'; label = 'Strong Upward Momentum';
+      detail = `Price is up <span class="explain-val">${pct(roc)}</span> over the last 10 days — strong bullish momentum.`;
+    } else if (roc > 0.02) {
+      tone = 'bull'; label = 'Mild Upward Momentum';
+      detail = `Price is up <span class="explain-val">${pct(roc)}</span> over the last 10 days — positive but modest momentum.`;
+    } else if (roc > -0.02) {
+      tone = 'neu'; label = 'Flat Momentum';
+      detail = `Price has moved <span class="explain-val">${pct(roc)}</span> over the last 10 days — essentially flat, no directional momentum.`;
+    } else if (roc > -0.08) {
+      tone = 'bear'; label = 'Mild Downward Momentum';
+      detail = `Price is down <span class="explain-val">${pct(roc)}</span> over the last 10 days — moderate selling pressure.`;
+    } else {
+      tone = 'bear'; label = 'Strong Downward Momentum';
+      detail = `Price is down <span class="explain-val">${pct(roc)}</span> over the last 10 days — heavy selling pressure.`;
+    }
+    items.push({icon: '🚀', tone, label, detail});
+  }
+
+  // ── StochRSI ───────────────────────────────────────────────────────────────
+  if (r.stoch_rsi != null) {
+    const sr = r.stoch_rsi;
+    let tone, label, detail;
+    if (sr < 20) {
+      tone = 'bull'; label = 'StochRSI Oversold';
+      detail = `StochRSI is <span class="explain-val">${fmtN(sr)}</span> — deeply oversold momentum reading. Historically a precursor to short-term bounces.`;
+    } else if (sr > 80) {
+      tone = 'bear'; label = 'StochRSI Overbought';
+      detail = `StochRSI is <span class="explain-val">${fmtN(sr)}</span> — deeply overbought momentum reading. Pullbacks are more common at these levels.`;
+    } else {
+      tone = 'neu'; label = 'StochRSI Neutral';
+      detail = `StochRSI is <span class="explain-val">${fmtN(sr)}</span> — in the neutral 20–80 range, no extreme momentum signal.`;
+    }
+    items.push({icon: '⚡', tone, label, detail});
+  }
+
+  // ── Volume ─────────────────────────────────────────────────────────────────
+  if (r.volume_ratio != null) {
+    const vr = r.volume_ratio;
+    let tone, label, detail;
+    if (vr >= 3) {
+      tone = 'bull'; label = 'Exceptional Volume';
+      detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> its average volume — unusually high activity often signals institutional interest or a major catalyst.`;
+    } else if (vr >= 2) {
+      tone = 'bull'; label = 'High Volume';
+      detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> its average volume — elevated participation lends conviction to the current move.`;
+    } else if (vr >= 1.2) {
+      tone = 'neu'; label = 'Above-Average Volume';
+      detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> its average volume — slightly elevated, adds modest confirmation.`;
+    } else {
+      tone = 'neu'; label = 'Normal Volume';
+      detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> average — normal volume. The signal lacks volume confirmation.`;
+    }
+    items.push({icon: '📦', tone, label, detail});
+  }
+
+  // ── Build HTML ─────────────────────────────────────────────────────────────
+  const scoreOut10 = (Math.abs(r.score) * 10).toFixed(1);
+  const scoreHtml = `<div class="explain-score">
+    Overall composite score: <strong>${r.score >= 0 ? '+' : ''}${r.score} / ±1.0</strong>
+    &nbsp;·&nbsp; Confidence: <strong>${Math.round(r.confidence * 100)}%</strong>
+    ${r.ml_mult != null ? `&nbsp;·&nbsp; ML rank multiplier: <strong>${r.ml_mult.toFixed(2)}×</strong>` : ''}
+  </div>`;
+
+  const itemsHtml = items.map(it => `
+    <div class="explain-item">
+      <div class="explain-icon ei-${it.tone}">${it.icon}</div>
+      <div class="explain-text">
+        <div class="explain-label el-${it.tone}">${it.label}</div>
+        <div class="explain-detail">${it.detail}</div>
+      </div>
+    </div>`).join('');
+
+  const reasonsHtml = r.reasons && r.reasons.length
+    ? `<div class="explain-reasons">
+        <div class="explain-reasons-title">Algorithm signal reasons</div>
+        ${r.reasons.map(re => `<div class="explain-reason">· ${re}</div>`).join('')}
+       </div>`
+    : '';
+
+  // Update modal
+  document.getElementById('explain-sym').textContent = sym;
+  const pill = document.getElementById('explain-pill');
+  pill.className = `pill pill-${r.action}`;
+  pill.textContent = r.action + ' SIGNAL';
+  document.getElementById('explain-body').innerHTML = scoreHtml + itemsHtml + reasonsHtml;
+  document.getElementById('explain-modal').classList.add('active');
+}
+
+function closeExplain() {
+  document.getElementById('explain-modal').classList.remove('active');
 }
 
 // ── Stock search & personal watchlist ────────────────────────────────────────
