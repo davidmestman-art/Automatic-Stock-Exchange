@@ -234,6 +234,7 @@ footer{border-top:1px solid var(--border);padding:32px 48px;display:flex;align-i
     <a href="/login" class="btn-hero-p">Start Paper Trading Free &rarr;</a>
     <a href="#how-it-works" class="btn-hero-s">See how it works</a>
     {% endif %}
+    <a href="/leaderboard" class="btn-hero-s" style="border-color:rgba(16,185,129,.4);color:#6ee7b7">&#127942; See Our Track Record</a>
   </div>
 
   <!-- Stats bar -->
@@ -347,6 +348,7 @@ footer{border-top:1px solid var(--border);padding:32px 48px;display:flex;align-i
   <div class="footer-links">
     <a href="/dashboard" class="footer-link">Dashboard</a>
     <a href="/login" class="footer-link">Login</a>
+    <a href="/leaderboard" class="footer-link">Leaderboard</a>
     <a href="/stats" class="footer-link">Stats</a>
   </div>
   <div class="footer-note">For research and education only. Not financial advice. Past simulated performance does not guarantee future results.</div>
@@ -422,7 +424,8 @@ logging.info(
 )
 
 # Routes exempt from auth — public pages and static assets
-_PUBLIC_ENDPOINTS = {"login", "logout", "home", "pwa_manifest", "pwa_icon", "service_worker"}
+_PUBLIC_ENDPOINTS = {"login", "logout", "home", "pwa_manifest", "pwa_icon", "service_worker",
+                     "leaderboard_page", "api_leaderboard"}
 
 
 @app.before_request
@@ -1385,6 +1388,79 @@ def api_journal():
     try:
         entries = list(reversed(_engine.journal.read_recent(200)))
         return jsonify({"ok": True, "entries": entries, "stats": _engine.journal.stats()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/leaderboard")
+def api_leaderboard():
+    try:
+        entries = _engine.journal.read_all()
+        sells = [e for e in entries if e.get("action") == "SELL" and e.get("pnl_pct") is not None]
+        buys  = [e for e in entries if e.get("action") == "BUY"]
+
+        if not sells:
+            return jsonify({"ok": True, "stats": {"total_trades": 0}, "trades": [], "chart": []})
+
+        pnl_pcts = [e["pnl_pct"] for e in sells]
+        winners  = [p for p in pnl_pcts if p > 0]
+
+        # Build buy-timestamp index for holding period
+        buys_by_sym: dict = {}
+        for b in buys:
+            buys_by_sym.setdefault(b["symbol"], []).append(b["timestamp"])
+
+        def _hold_days(sell_entry):
+            sym = sell_entry["symbol"]
+            sell_ts = sell_entry["timestamp"]
+            prior = [ts for ts in buys_by_sym.get(sym, []) if ts <= sell_ts]
+            if not prior:
+                return None
+            buy_dt  = datetime.fromisoformat(max(prior))
+            sell_dt = datetime.fromisoformat(sell_ts)
+            return max(0, (sell_dt - buy_dt).days)
+
+        hold_days_list = [d for d in (_hold_days(s) for s in sells) if d is not None]
+        avg_hold = round(sum(hold_days_list) / len(hold_days_list), 0) if hold_days_list else None
+
+        best_idx  = pnl_pcts.index(max(pnl_pcts))
+        worst_idx = pnl_pcts.index(min(pnl_pcts))
+
+        stats = {
+            "total_trades":    len(sells),
+            "winners":         len(winners),
+            "win_rate":        round(len(winners) / len(sells) * 100, 1),
+            "total_return_pct": round(sum(pnl_pcts) * 100, 2),
+            "best_trade_pct":  round(max(pnl_pcts) * 100, 2),
+            "best_symbol":     sells[best_idx]["symbol"],
+            "worst_trade_pct": round(min(pnl_pcts) * 100, 2),
+            "worst_symbol":    sells[worst_idx]["symbol"],
+            "avg_hold_days":   int(avg_hold) if avg_hold is not None else None,
+        }
+
+        # Cumulative returns chart points
+        chart, cumulative = [], 0.0
+        for e in sells:
+            cumulative += e["pnl_pct"] * 100
+            chart.append({"ts": e["timestamp"][:10], "value": round(cumulative, 2)})
+
+        # Last 20 trades table
+        last20 = list(reversed(sells[-20:]))
+        trades = []
+        for e in last20:
+            exit_px  = e["price"]
+            pp       = e["pnl_pct"]
+            entry_px = round(exit_px / (1 + pp), 2) if pp != -1 else None
+            trades.append({
+                "date":        e["timestamp"][:10],
+                "symbol":      e["symbol"],
+                "exit_price":  round(exit_px, 2),
+                "entry_price": entry_px,
+                "pnl_pct":     round(pp * 100, 2),
+                "hold_days":   _hold_days(e),
+            })
+
+        return jsonify({"ok": True, "stats": stats, "trades": trades, "chart": chart})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -3437,6 +3513,301 @@ if ('serviceWorker' in navigator) {
 </html>"""
 
 
+LEADERBOARD_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Performance Leaderboard — NYSE Trading Engine</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#07090f;--surface:#0d1220;--surface2:#121a2e;
+  --border:#1a2540;--border2:#223060;
+  --accent:#2563eb;--accent2:#3b82f6;
+  --green:#10b981;--green2:#34d399;
+  --red:#ef4444;--red2:#f87171;
+  --amber:#f59e0b;
+  --text:#eaf0fb;--text2:#8898b8;--text3:#4a5a78;
+}
+body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;
+     -webkit-font-smoothing:antialiased;min-height:100vh}
+a{color:inherit;text-decoration:none}
+/* Nav */
+nav{display:flex;align-items:center;justify-content:space-between;padding:0 40px;height:60px;
+    background:rgba(7,9,15,.96);border-bottom:1px solid var(--border);
+    position:sticky;top:0;z-index:20;backdrop-filter:blur(16px)}
+.nav-brand{display:flex;align-items:center;gap:10px}
+.nav-dot{width:8px;height:8px;background:var(--accent2);border-radius:50%;box-shadow:0 0 10px var(--accent2)}
+.nav-name{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
+.nav-right{display:flex;align-items:center;gap:10px}
+.btn-nav{padding:7px 18px;border-radius:7px;background:var(--accent);color:#fff;
+         font-size:13px;font-weight:700;text-decoration:none;transition:all .15s}
+.btn-nav:hover{background:var(--accent2)}
+.btn-nav-ghost{padding:7px 16px;border-radius:7px;border:1px solid var(--border);
+               color:var(--text2);font-size:13px;font-weight:600;text-decoration:none;transition:all .15s}
+.btn-nav-ghost:hover{border-color:var(--accent2);color:var(--text)}
+/* Page layout */
+.page{max-width:1100px;margin:0 auto;padding:48px 24px 80px}
+/* Header */
+.lb-header{text-align:center;margin-bottom:52px}
+.lb-eyebrow{display:inline-flex;align-items:center;gap:7px;padding:5px 14px;border-radius:99px;
+            background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.25);
+            font-size:11px;font-weight:700;color:var(--green2);letter-spacing:.6px;
+            text-transform:uppercase;margin-bottom:20px}
+.lb-eyebrow-dot{width:6px;height:6px;background:var(--green2);border-radius:50%;
+                box-shadow:0 0 6px var(--green2)}
+.lb-title{font-size:clamp(28px,4vw,42px);font-weight:800;letter-spacing:-1.5px;margin-bottom:10px}
+.lb-sub{font-size:15px;color:var(--text2);max-width:480px;margin:0 auto}
+/* Stats grid */
+.stats-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:40px}
+@media(max-width:640px){.stats-grid{grid-template-columns:repeat(2,1fr)}}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:22px 20px}
+.sc-label{font-size:11px;font-weight:700;color:var(--text3);letter-spacing:.5px;
+          text-transform:uppercase;margin-bottom:8px}
+.sc-value{font-size:28px;font-weight:800;letter-spacing:-1px;line-height:1}
+.sc-sub{font-size:12px;color:var(--text2);margin-top:4px}
+.sc-pos{color:var(--green2)}
+.sc-neg{color:var(--red2)}
+.sc-neu{color:var(--text)}
+.sc-blue{color:var(--accent2)}
+/* Chart */
+.chart-wrap{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+            padding:24px;margin-bottom:40px}
+.chart-title{font-size:14px;font-weight:700;color:var(--text2);margin-bottom:20px;
+             letter-spacing:.3px;text-transform:uppercase;font-size:11px}
+.chart-canvas-wrap{position:relative;height:240px}
+.chart-empty{display:flex;align-items:center;justify-content:center;height:180px;
+             color:var(--text3);font-size:14px}
+/* Trades table */
+.trades-wrap{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+             overflow:hidden;margin-bottom:32px}
+.trades-hdr{padding:16px 20px;font-size:11px;font-weight:700;color:var(--text2);
+            background:var(--surface2);border-bottom:1px solid var(--border);
+            letter-spacing:.5px;text-transform:uppercase}
+table{width:100%;border-collapse:collapse}
+th{padding:11px 16px;font-size:11px;font-weight:700;color:var(--text3);
+   text-align:left;border-bottom:1px solid var(--border);letter-spacing:.4px;text-transform:uppercase}
+td{padding:12px 16px;font-size:13px;border-bottom:1px solid rgba(26,37,64,.45);color:var(--text2)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(18,26,46,.6)}
+.badge{display:inline-block;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.4px}
+.badge-buy{background:rgba(16,185,129,.15);color:var(--green2);border:1px solid rgba(16,185,129,.3)}
+.badge-sell{background:rgba(239,68,68,.12);color:var(--red2);border:1px solid rgba(239,68,68,.25)}
+.pnl-pos{color:var(--green2);font-weight:700}
+.pnl-neg{color:var(--red2);font-weight:700}
+.sym{color:var(--text);font-weight:700}
+.empty-row td{text-align:center;color:var(--text3);padding:32px;border-bottom:none}
+/* Disclaimer */
+.disclaimer{background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.2);
+            border-radius:10px;padding:16px 20px;font-size:12px;color:#92693b;
+            line-height:1.6;text-align:center}
+.disc-icon{font-size:16px;margin-right:6px}
+/* Loading */
+.loading{text-align:center;padding:60px 0;color:var(--text3);font-size:14px}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-brand">
+    <div class="nav-dot"></div>
+    <span class="nav-name">NYSE Trading Engine</span>
+  </div>
+  <div class="nav-right">
+    <a href="/" class="btn-nav-ghost">Home</a>
+    <a href="/login" class="btn-nav">Dashboard &rarr;</a>
+  </div>
+</nav>
+
+<div class="page">
+  <div class="lb-header">
+    <div class="lb-eyebrow"><span class="lb-eyebrow-dot"></span>Live Track Record</div>
+    <div class="lb-title">Performance Leaderboard</div>
+    <div class="lb-sub">Real-time results from the paper trading engine. Updated after every completed trade.</div>
+  </div>
+
+  <div id="loading" class="loading">Loading performance data…</div>
+
+  <div id="content" style="display:none">
+    <!-- Stats -->
+    <div class="stats-grid" id="stats-grid"></div>
+
+    <!-- Chart -->
+    <div class="chart-wrap">
+      <div class="chart-title">Cumulative Returns Over Time (%)</div>
+      <div class="chart-canvas-wrap" id="chart-wrap">
+        <canvas id="perf-chart"></canvas>
+      </div>
+    </div>
+
+    <!-- Trades table -->
+    <div class="trades-wrap">
+      <div class="trades-hdr">Last 20 Completed Trades</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Ticker</th>
+            <th>Action</th>
+            <th>Entry Price</th>
+            <th>Exit Price</th>
+            <th>Hold (days)</th>
+            <th>P&amp;L %</th>
+          </tr>
+        </thead>
+        <tbody id="trades-body"></tbody>
+      </table>
+    </div>
+
+    <!-- Disclaimer -->
+    <div class="disclaimer">
+      <span class="disc-icon">&#9888;</span>
+      <strong>Past performance does not guarantee future results.</strong>
+      This is a paper trading account for demonstration purposes only. All trades are simulated using real market prices but no real money is at risk. Not financial advice.
+    </div>
+  </div>
+</div>
+
+<script>
+function fmt(v, dec=2) {
+  if (v == null) return "—";
+  const s = v > 0 ? "+" : "";
+  return s + v.toFixed(dec) + "%";
+}
+function fmtDays(d) {
+  if (d == null) return "—";
+  if (d === 0) return "< 1d";
+  return d + "d";
+}
+function fmtPrice(v) {
+  if (v == null) return "—";
+  return "$" + v.toFixed(2);
+}
+function fmtDate(s) {
+  if (!s) return "—";
+  return s.slice(0, 10);
+}
+
+async function load() {
+  try {
+    const res  = await fetch("/api/leaderboard");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error);
+    render(data);
+  } catch(e) {
+    document.getElementById("loading").textContent = "Unable to load data: " + e.message;
+  }
+}
+
+function render({ stats, trades, chart }) {
+  document.getElementById("loading").style.display = "none";
+  document.getElementById("content").style.display = "block";
+  renderStats(stats);
+  renderChart(chart);
+  renderTrades(trades);
+}
+
+function renderStats(s) {
+  const hasTrades = s.total_trades > 0;
+  const totalRetClass = !hasTrades ? "sc-neu" : s.total_return_pct >= 0 ? "sc-pos" : "sc-neg";
+  const cards = [
+    { label:"Total Return", value: hasTrades ? fmt(s.total_return_pct) : "—", cls: totalRetClass, sub: "Cumulative trade returns" },
+    { label:"Win Rate",     value: hasTrades ? s.win_rate + "%" : "—", cls: "sc-blue", sub: `${s.winners || 0} wins / ${s.total_trades} trades` },
+    { label:"Total Trades", value: s.total_trades, cls: "sc-neu", sub: "Completed buy-sell cycles" },
+    { label:"Best Trade",   value: hasTrades ? fmt(s.best_trade_pct) : "—", cls: "sc-pos", sub: s.best_symbol || "" },
+    { label:"Worst Trade",  value: hasTrades ? fmt(s.worst_trade_pct) : "—", cls: "sc-neg", sub: s.worst_symbol || "" },
+    { label:"Avg Hold",     value: hasTrades && s.avg_hold_days != null ? fmtDays(s.avg_hold_days) : "—", cls: "sc-neu", sub: "Average days per trade" },
+  ];
+  document.getElementById("stats-grid").innerHTML = cards.map(c =>
+    `<div class="stat-card">
+      <div class="sc-label">${c.label}</div>
+      <div class="sc-value ${c.cls}">${c.value}</div>
+      <div class="sc-sub">${c.sub}</div>
+    </div>`
+  ).join("");
+}
+
+function renderChart(pts) {
+  if (!pts || pts.length === 0) {
+    document.getElementById("chart-wrap").innerHTML =
+      '<div class="chart-empty">No completed trades yet — chart will appear here.</div>';
+    return;
+  }
+  const labels = pts.map(p => p.ts);
+  const values = pts.map(p => p.value);
+  const color  = values[values.length - 1] >= 0 ? "#10b981" : "#ef4444";
+  new Chart(document.getElementById("perf-chart"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        borderColor: color,
+        borderWidth: 2,
+        pointRadius: pts.length < 40 ? 3 : 0,
+        pointHoverRadius: 5,
+        pointBackgroundColor: color,
+        fill: true,
+        backgroundColor: (ctx) => {
+          const g = ctx.chart.ctx.createLinearGradient(0, 0, 0, ctx.chart.height);
+          g.addColorStop(0, color + "26");
+          g.addColorStop(1, color + "04");
+          return g;
+        },
+        tension: 0.3,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => (ctx.parsed.y >= 0 ? "+" : "") + ctx.parsed.y.toFixed(2) + "%",
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color: "#4a5a78", maxTicksLimit: 8, font: { size: 11 } }, grid: { color: "#1a254010" } },
+        y: {
+          ticks: { color: "#4a5a78", font: { size: 11 }, callback: v => v + "%" },
+          grid: { color: "#1a2540" },
+        },
+      },
+    },
+  });
+}
+
+function renderTrades(trades) {
+  const tbody = document.getElementById("trades-body");
+  if (!trades || trades.length === 0) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No completed trades yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.map(t => {
+    const pnlClass = t.pnl_pct >= 0 ? "pnl-pos" : "pnl-neg";
+    const sign = t.pnl_pct >= 0 ? "+" : "";
+    return `<tr>
+      <td>${fmtDate(t.date)}</td>
+      <td class="sym">${t.symbol}</td>
+      <td><span class="badge badge-sell">SELL</span></td>
+      <td>${fmtPrice(t.entry_price)}</td>
+      <td>${fmtPrice(t.exit_price)}</td>
+      <td>${fmtDays(t.hold_days)}</td>
+      <td class="${pnlClass}">${sign}${t.pnl_pct.toFixed(2)}%</td>
+    </tr>`;
+  }).join("");
+}
+
+load();
+</script>
+</body>
+</html>"""
+
+
 SETTINGS_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -4693,6 +5064,13 @@ if ('serviceWorker' in navigator) {
 </script>
 </body>
 </html>"""
+
+
+@app.route("/leaderboard")
+def leaderboard_page():
+    resp = make_response(render_template_string(LEADERBOARD_HTML))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return resp
 
 
 @app.route("/stats")
