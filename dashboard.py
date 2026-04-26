@@ -20,6 +20,7 @@ from flask import (
     Flask, jsonify, redirect, render_template_string,
     request, session, url_for,
 )
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import config
 from src.data.extended_hours import ExtendedHoursMonitor
@@ -29,6 +30,9 @@ from src.utils.sectors import get_sector, positions_by_sector
 CYCLE_INTERVAL = 60  # seconds between automatic trading cycles
 
 app = Flask(__name__)
+# Tell Flask it's behind Railway's HTTPS reverse proxy so it reads
+# X-Forwarded-Proto/Host correctly — required for secure session cookies.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # ── Login page template ────────────────────────────────────────────────────────
 _LOGIN_HTML = """<!doctype html>
@@ -79,14 +83,16 @@ input::placeholder{color:#475569}
 # ── Authentication ─────────────────────────────────────────────────────────────
 # Set DASH_USERNAME and DASH_PASSWORD in .env to enable login protection.
 # Leave both blank (default) to run without authentication.
-_DASH_USER = os.getenv("DASH_USERNAME", "")
-_DASH_PASS = os.getenv("DASH_PASSWORD", "")
+_DASH_USER = os.getenv("DASH_USERNAME", "").strip()
+_DASH_PASS = os.getenv("DASH_PASSWORD", "").strip()
 _AUTH_ENABLED = bool(_DASH_USER and _DASH_PASS)
 
 # Secret key signs session cookies. Set DASH_SECRET_KEY in .env for persistence
 # across restarts; otherwise a random key is generated (sessions reset on restart).
 app.secret_key = os.getenv("DASH_SECRET_KEY") or secrets.token_hex(32)
 app.permanent_session_lifetime = timedelta(days=30)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 
 @app.before_request
@@ -96,6 +102,8 @@ def _require_login():
     if request.endpoint in ("login", "logout"):
         return
     if not session.get("logged_in"):
+        if request.path.startswith("/api/"):
+            return jsonify({"ok": False, "error": "Not authenticated"}), 401
         return redirect(f"/login?next={request.path}")
 
 
@@ -110,7 +118,10 @@ def login():
         if user_ok and pass_ok:
             session.permanent = True
             session["logged_in"] = True
-            return redirect(request.args.get("next") or "/")
+            next_url = request.args.get("next", "/")
+            if not next_url.startswith("/"):
+                next_url = "/"
+            return redirect(next_url)
         error = "Invalid username or password."
     return render_template_string(_LOGIN_HTML, error=error, auth=_AUTH_ENABLED)
 
