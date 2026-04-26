@@ -5,6 +5,8 @@ Run:  python dashboard.py
 Then open http://localhost:8080
 """
 
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -16,6 +18,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from cryptography.fernet import Fernet
+
 from flask import (
     Flask, jsonify, make_response, redirect, render_template_string,
     request, session, url_for,
@@ -23,9 +27,10 @@ from flask import (
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from config import config
+from config import TradingConfig, config
 from src.data.extended_hours import ExtendedHoursMonitor
 from src.trading.engine import TradingEngine
+from src.utils.journal import TradeJournal
 from src.utils.models import User, db
 from src.utils.sectors import get_sector, positions_by_sector
 
@@ -52,6 +57,44 @@ db.init_app(app)
 
 with app.app_context():
     db.create_all()
+    # Migrate: add Alpaca columns to existing tables created before this column existed
+    from sqlalchemy import text as _sql
+    with db.engine.connect() as _conn:
+        for _col in [
+            "ALTER TABLE users ADD COLUMN alpaca_api_key_enc    TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN alpaca_secret_key_enc TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN alpaca_paper          INTEGER NOT NULL DEFAULT 1",
+        ]:
+            try:
+                _conn.execute(_sql(_col))
+                _conn.commit()
+            except Exception:
+                pass  # column already exists
+
+# ── Encryption helpers (Fernet key derived from app secret) ───────────────────
+def _make_fernet() -> Fernet:
+    raw = hashlib.sha256(
+        (app.secret_key if isinstance(app.secret_key, str)
+         else app.secret_key.decode("utf-8", errors="replace"))
+        .encode()
+    ).digest()
+    return Fernet(base64.urlsafe_b64encode(raw))
+
+
+def _encrypt_key(plaintext: str) -> str:
+    if not plaintext:
+        return ""
+    return _make_fernet().encrypt(plaintext.encode()).decode()
+
+
+def _decrypt_key(ciphertext: str) -> str:
+    if not ciphertext:
+        return ""
+    try:
+        return _make_fernet().decrypt(ciphertext.encode()).decode()
+    except Exception:
+        return ""
+
 
 # ── Public landing page ───────────────────────────────────────────────────────
 _LANDING_HTML = """<!doctype html>
@@ -576,12 +619,16 @@ def login():
         )
 
         if authenticated:
+            # Re-fetch in case _ensure_admin_in_db() just created the row
+            if db_user is None:
+                db_user = User.query.filter_by(username=username).first()
             session.permanent = True
             session["logged_in"] = True
+            session["user_id"] = db_user.id if db_user else None
             next_url = request.args.get("next", "/dashboard")
             if not next_url.startswith("/"):
                 next_url = "/dashboard"
-            logging.info("[AUTH] Login OK: %r", username)
+            logging.info("[AUTH] Login OK: %r (id=%s)", username, session["user_id"])
             return redirect(next_url)
 
         error = "Invalid username or password."
@@ -647,13 +694,53 @@ def register():
 
 
 _lock = threading.Lock()
-_engine = TradingEngine(config)
+_engine = TradingEngine(config)        # admin / shared engine
+_user_engines: dict = {}               # user_id → TradingEngine
+_ue_lock = threading.Lock()            # guards _user_engines dict
 _last_state: dict = {}
 _last_cycle_at: Optional[datetime] = None
 _next_cycle_at: Optional[datetime] = None
 _equity_snapshots: list = []          # [{ts, value}] — portfolio value over time
 _last_snapshot_ts: Optional[datetime] = None
 _ext_hours = ExtendedHoursMonitor(cache_ttl_seconds=120)
+
+
+def _create_user_engine(user_id: int) -> TradingEngine:
+    """Build a TradingEngine configured with the user's stored Alpaca keys."""
+    user = db.session.get(User, user_id)
+    cfg = TradingConfig()
+    if user:
+        api_key    = _decrypt_key(user.alpaca_api_key_enc or "")
+        secret_key = _decrypt_key(user.alpaca_secret_key_enc or "")
+        if api_key and secret_key:
+            cfg.use_alpaca       = True
+            cfg.alpaca_api_key   = api_key
+            cfg.alpaca_secret_key = secret_key
+            cfg.paper_trading    = bool(user.alpaca_paper)
+    journal_dir = Path(__file__).resolve().parent / "journals"
+    journal_dir.mkdir(exist_ok=True)
+    eng = TradingEngine(cfg)
+    eng.journal = TradeJournal(journal_dir / f"user_{user_id}.jsonl")
+    return eng
+
+
+def _get_engine() -> TradingEngine:
+    """Return the TradingEngine for the currently logged-in user."""
+    if not _AUTH_ENABLED:
+        return _engine
+    user_id = session.get("user_id")
+    if not user_id:
+        return _engine
+    with _ue_lock:
+        if user_id not in _user_engines:
+            _user_engines[user_id] = _create_user_engine(user_id)
+        return _user_engines[user_id]
+
+
+def _invalidate_user_engine(user_id: int) -> None:
+    """Drop a cached user engine so it is recreated on next request."""
+    with _ue_lock:
+        _user_engines.pop(user_id, None)
 
 # ── Risk profiles / settings ──────────────────────────────────────────────────
 _SETTINGS_PATH = Path(__file__).resolve().parent / "user_settings.json"
@@ -824,14 +911,15 @@ def _background_loop() -> None:
 # ── State builder ─────────────────────────────────────────────────────────────
 
 def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
-    portfolio = _engine.portfolio
+    eng = _get_engine()
+    portfolio = eng.portfolio
     price_lookup = prices or {}
 
     # ── Positions — pull live from Alpaca when enabled ────────────────────────
     pos_list = []
-    if config.use_alpaca:
+    if eng.config.use_alpaca:
         try:
-            for p in _engine.executor.get_live_positions():
+            for p in eng.executor.get_live_positions():
                 entry = float(p["entry_price"])
                 cp = float(p["current_price"] or entry)
                 pnl = float(p["pnl"]) if p["pnl"] is not None else (cp - entry) * float(p["shares"])
@@ -840,11 +928,11 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 )
                 sym = p["symbol"]
                 local_pos = portfolio.positions.get(sym)
-                if local_pos and config.use_trailing_stop:
+                if local_pos and eng.config.use_trailing_stop:
                     trail_stop = round(local_pos.stop_loss, 2)
                     highest = round(local_pos.highest_price, 2)
                 else:
-                    trail_stop = round(entry * (1 - config.stop_loss_pct), 2)
+                    trail_stop = round(entry * (1 - eng.config.stop_loss_pct), 2)
                     highest = None
                 pos_list.append({
                     "symbol": sym,
@@ -853,7 +941,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                     "current_price": round(cp, 2),
                     "stop_loss": trail_stop,
                     "highest_price": highest,
-                    "take_profit": round(entry * (1 + config.take_profit_pct), 2),
+                    "take_profit": round(entry * (1 + eng.config.take_profit_pct), 2),
                     "pnl": round(pnl, 2),
                     "pnl_pct": round(pnl_pct, 2),
                     "sector": get_sector(sym) or "—",
@@ -871,7 +959,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "entry_price": round(pos.entry_price, 2),
                 "current_price": round(cp, 2),
                 "stop_loss": round(pos.stop_loss, 2),
-                "highest_price": round(pos.highest_price, 2) if config.use_trailing_stop else None,
+                "highest_price": round(pos.highest_price, 2) if eng.config.use_trailing_stop else None,
                 "take_profit": round(pos.take_profit, 2),
                 "pnl": round(pos.unrealized_pnl(cp), 2),
                 "pnl_pct": round(pos.unrealized_pnl_pct(cp) * 100, 2),
@@ -886,9 +974,9 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
 
     # ── Trades — pull filled orders from Alpaca when enabled ──────────────────
     trades_list = []
-    if config.use_alpaca:
+    if eng.config.use_alpaca:
         try:
-            trades_list = _engine.executor.get_filled_orders(limit=30)
+            trades_list = eng.executor.get_filled_orders(limit=30)
         except Exception as e:
             log.warning(f"Alpaca orders fetch failed: {e}")
 
@@ -909,16 +997,16 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
 
     # ── Portfolio summary — prefer Alpaca account data ────────────────────────
     summary = None
-    if config.use_alpaca:
+    if eng.config.use_alpaca:
         try:
-            acct = _engine.executor.get_account_summary()
-            total_pnl = acct["portfolio_value"] - config.initial_capital
+            acct = eng.executor.get_account_summary()
+            total_pnl = acct["portfolio_value"] - eng.config.initial_capital
             summary = {
                 "total_value": acct["portfolio_value"],
                 "cash": acct["cash"],
                 "position_value": acct["portfolio_value"] - acct["cash"],
                 "total_pnl": total_pnl,
-                "total_pnl_pct": (total_pnl / config.initial_capital * 100) if config.initial_capital else 0,
+                "total_pnl_pct": (total_pnl / eng.config.initial_capital * 100) if eng.config.initial_capital else 0,
                 "open_positions": len(pos_list),
                 "total_trades": len(trades_list),
             }
@@ -939,7 +1027,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
     _record_snapshot(summary["total_value"])
 
     # ── Signals ───────────────────────────────────────────────────────────────
-    corr_blocked = _engine.last_corr_blocked   # {sym: reason}
+    corr_blocked = eng.last_corr_blocked   # {sym: reason}
 
     sig_list = []
     if signals:
@@ -952,7 +1040,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
             # Estimated adaptive position size for BUY signals
             est_size_pct = None
             if sig.action == "BUY" and ind and ind.atr_pct:
-                raw = _engine.risk.compute_position_pct(sig.confidence, ind.atr_pct)
+                raw = eng.risk.compute_position_pct(sig.confidence, ind.atr_pct)
                 est_size_pct = round(raw * 100, 1)
             sig_list.append({
                 "symbol": sym,
@@ -986,11 +1074,11 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
 
     # ── Earnings warnings ─────────────────────────────────────────────────────
     earnings_warnings: dict = {}
-    if _engine.earnings_cal:
-        for sym in _engine.watchlist:
+    if eng.earnings_cal:
+        for sym in eng.watchlist:
             try:
-                if _engine.earnings_cal.has_upcoming_earnings(sym):
-                    cached_dt = _engine.earnings_cal._cache.get(sym)
+                if eng.earnings_cal.has_upcoming_earnings(sym):
+                    cached_dt = eng.earnings_cal._cache.get(sym)
                     if cached_dt:
                         days_away = max(0, (cached_dt - datetime.now()).days)
                         earnings_warnings[sym] = days_away
@@ -998,22 +1086,22 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 pass
 
     mode = (
-        "Alpaca Paper" if config.use_alpaca and config.paper_trading
-        else "Alpaca LIVE" if config.use_alpaca
+        "Alpaca Paper" if eng.config.use_alpaca and eng.config.paper_trading
+        else "Alpaca LIVE" if eng.config.use_alpaca
         else "Local Simulation"
     )
 
     market_open = None
-    if config.use_alpaca:
+    if eng.config.use_alpaca:
         try:
-            market_open = _engine.executor.is_market_open()
+            market_open = eng.executor.is_market_open()
         except Exception:
             market_open = None
 
     # ── Extended hours ────────────────────────────────────────────────────────
     ext_hours = []
     try:
-        ext_hours = _ext_hours.fetch(_engine.watchlist)
+        ext_hours = _ext_hours.fetch(eng.watchlist)
     except Exception as e:
         log.debug(f"Extended hours fetch error: {e}")
 
@@ -1029,7 +1117,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
             "total_pnl_pct": round(summary["total_pnl_pct"], 2),
             "open_positions": summary["open_positions"],
             "total_trades": summary["total_trades"],
-            "initial_capital": config.initial_capital,
+            "initial_capital": eng.config.initial_capital,
         },
         "positions": pos_list,
         "signals": sig_list,
@@ -1038,35 +1126,36 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "last_cycle_at": _last_cycle_at.isoformat() if _last_cycle_at else None,
         "next_cycle_at": _next_cycle_at.isoformat() if _next_cycle_at else None,
         "cycle_interval": CYCLE_INTERVAL,
-        "watchlist": _engine.watchlist,
-        "scan": _engine.scanner.last_result.to_dict() if _engine.scanner.last_result else None,
-        "voo": _engine.voo_monitor.last_status.to_dict() if _engine.voo_monitor.last_status else None,
+        "watchlist": eng.watchlist,
+        "scan": eng.scanner.last_result.to_dict() if eng.scanner.last_result else None,
+        "voo": eng.voo_monitor.last_status.to_dict() if eng.voo_monitor.last_status else None,
         "notifications": {
-            "ntfy": bool(config.ntfy_topic),
-            "pushover": bool(config.pushover_token and config.pushover_user),
+            "ntfy": bool(eng.config.ntfy_topic),
+            "pushover": bool(eng.config.pushover_token and eng.config.pushover_user),
         },
-        "mtf_enabled": config.use_multi_timeframe,
+        "mtf_enabled": eng.config.use_multi_timeframe,
         "sector_exposure": sector_exposure,
-        "max_per_sector": config.max_positions_per_sector,
-        "earnings_enabled": config.use_earnings_protection,
+        "max_per_sector": eng.config.max_positions_per_sector,
+        "earnings_enabled": eng.config.use_earnings_protection,
         "earnings_warnings": earnings_warnings,
-        "trailing_stop_enabled": config.use_trailing_stop,
-        "confirmation_enabled": config.use_confirmation,
-        "pending_confirmation": list(_engine.pending_confirmations.keys()),
+        "trailing_stop_enabled": eng.config.use_trailing_stop,
+        "confirmation_enabled": eng.config.use_confirmation,
+        "pending_confirmation": list(eng.pending_confirmations.keys()),
         "extended_hours": ext_hours,
-        "mean_reversion_enabled": config.use_mean_reversion,
-        "correlation_filter_enabled": config.use_correlation_filter,
-        "adaptive_sizing_enabled": config.use_adaptive_sizing,
-        "regime": _engine.current_regime.to_dict() if _engine.current_regime else None,
-        "ml_status": _engine.ml_status,
+        "mean_reversion_enabled": eng.config.use_mean_reversion,
+        "correlation_filter_enabled": eng.config.use_correlation_filter,
+        "adaptive_sizing_enabled": eng.config.use_adaptive_sizing,
+        "regime": eng.current_regime.to_dict() if eng.current_regime else None,
+        "ml_status": eng.ml_status,
         "public_url": _public_url,
         "personal_watchlist": _personal_watchlist,
+        "alpaca_connected": eng.config.use_alpaca,
     }
 
 
 def _trade_stats() -> dict:
     """Compute win/loss stats from the in-memory trade history."""
-    sells = [t for t in _engine.portfolio.trades if t.action == "SELL" and t.pnl is not None]
+    sells = [t for t in _get_engine().portfolio.trades if t.action == "SELL" and t.pnl is not None]
     if not sells:
         return {"sell_trades": 0, "win_rate": None, "avg_gain": None, "avg_loss": None,
                 "best_trade": None, "worst_trade": None, "total_realized_pnl": 0.0}
@@ -1275,7 +1364,8 @@ def api_state():
         return jsonify(cached)
     try:
         try:
-            signals, prices, ind_map = _engine.get_signals()
+            eng = _get_engine()
+            signals, prices, ind_map = eng.get_signals()
             _last_state = _build_state(signals, prices, ind_map)
         except Exception as e:
             _last_state = _build_state(error=str(e))
@@ -1289,7 +1379,7 @@ def api_cycle():
     global _last_state
     with _lock:
         try:
-            _engine.run_cycle()
+            _get_engine().run_cycle()
             _last_state = _build_state(error=None)
             return jsonify({"ok": True, "state": _last_state})
         except Exception as e:
@@ -1300,7 +1390,7 @@ def api_cycle():
 @app.route("/api/voo", methods=["POST"])
 def api_voo():
     try:
-        status = _engine.voo_monitor.check(force=True)
+        status = _get_engine().voo_monitor.check(force=True)
         return jsonify({"ok": True, "voo": status.to_dict() if status else None})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -1331,11 +1421,12 @@ def api_pnl():
 @app.route("/api/heatmap")
 def api_heatmap():
     """Return daily price-change data for all watchlist symbols (uses fetcher cache)."""
-    watchlist = _engine.watchlist
+    eng = _get_engine()
+    watchlist = eng.watchlist
     if not watchlist:
         return jsonify({"ok": True, "items": []})
     try:
-        market_data = _engine.fetcher.fetch_many(watchlist, force_refresh=False)
+        market_data = eng.fetcher.fetch_many(watchlist, force_refresh=False)
         items = []
         for sym in watchlist:
             df = market_data.get(sym)
@@ -1365,8 +1456,9 @@ def api_rescan():
     global _last_state
     with _lock:
         try:
-            _engine.refresh_watchlist()
-            signals, prices, ind_map = _engine.get_signals()
+            eng = _get_engine()
+            eng.refresh_watchlist()
+            signals, prices, ind_map = eng.get_signals()
             _last_state = _build_state(signals, prices, ind_map)
             return jsonify({"ok": True, "state": _last_state})
         except Exception as e:
@@ -1375,12 +1467,13 @@ def api_rescan():
 
 @app.route("/api/stats")
 def api_stats():
+    eng = _get_engine()
     prices = {}
     try:
-        _, prices, _ = _engine.get_signals()
+        _, prices, _ = eng.get_signals()
     except Exception:
         pass
-    portfolio = _engine.portfolio
+    portfolio = eng.portfolio
     summary   = portfolio.get_summary(prices) if prices else {"total_value": portfolio.cash}
 
     all_trades = [
@@ -1426,15 +1519,15 @@ def api_stats():
     return jsonify({
         "trade_stats":      _trade_stats(),
         "equity_snapshots": _equity_snapshots,
-        "initial_capital":  config.initial_capital,
+        "initial_capital":  eng.config.initial_capital,
         "current_value":    round(summary["total_value"], 2),
         "trades":           all_trades,
         "period_pnl":       {"daily": daily_pnl, "weekly": weekly_pnl, "monthly": monthly_pnl},
         "risk_metrics":     _compute_risk_metrics(),
         "notifications": {
-            "ntfy_enabled":      bool(config.ntfy_topic),
-            "ntfy_topic":        config.ntfy_topic,
-            "pushover_enabled":  bool(config.pushover_token and config.pushover_user),
+            "ntfy_enabled":      bool(eng.config.ntfy_topic),
+            "ntfy_topic":        eng.config.ntfy_topic,
+            "pushover_enabled":  bool(eng.config.pushover_token and eng.config.pushover_user),
         },
     })
 
@@ -1550,8 +1643,9 @@ def api_chart(symbol):
 @app.route("/api/journal")
 def api_journal():
     try:
-        entries = list(reversed(_engine.journal.read_recent(200)))
-        return jsonify({"ok": True, "entries": entries, "stats": _engine.journal.stats()})
+        eng = _get_engine()
+        entries = list(reversed(eng.journal.read_recent(200)))
+        return jsonify({"ok": True, "entries": entries, "stats": eng.journal.stats()})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1559,7 +1653,7 @@ def api_journal():
 @app.route("/api/leaderboard")
 def api_leaderboard():
     try:
-        entries = _engine.journal.read_all()
+        entries = _get_engine().journal.read_all()
         sells = [e for e in entries if e.get("action") == "SELL" and e.get("pnl_pct") is not None]
         buys  = [e for e in entries if e.get("action") == "BUY"]
 
@@ -1636,8 +1730,8 @@ def api_settings():
         return jsonify({
             "ok": True,
             "risk_profile": _current_profile,
-            "email_notifications": _engine.emailer.active,
-            "email_configured": _engine.emailer.is_configured,
+            "email_notifications": _get_engine().emailer.active,
+            "email_configured": _get_engine().emailer.is_configured,
             "profiles": {
                 k: {"label": v["label"], "tagline": v["tagline"], "color": v["color"], "overrides": v["overrides"]}
                 for k, v in RISK_PROFILES.items()
@@ -1654,23 +1748,48 @@ def api_settings():
     # Email notifications toggle
     if "email_notifications" in data:
         enabled = bool(data["email_notifications"])
-        if enabled and not _engine.emailer.is_configured:
+        if enabled and not _get_engine().emailer.is_configured:
             return jsonify({"ok": False, "error": "Email not configured — set EMAIL_HOST, EMAIL_USER, EMAIL_PASSWORD, NOTIFY_EMAIL environment variables."}), 400
-        _engine.emailer.active = enabled
+        _get_engine().emailer.active = enabled
         saved["email_notifications"] = enabled
     _save_user_settings(saved)
     return jsonify({
         "ok": True,
         "risk_profile": _current_profile,
-        "email_notifications": _engine.emailer.active,
+        "email_notifications": _get_engine().emailer.active,
     })
+
+
+@app.route("/api/alpaca-keys", methods=["POST"])
+def api_alpaca_keys():
+    """Save per-user Alpaca credentials (encrypted at rest)."""
+    if not _AUTH_ENABLED:
+        return jsonify({"ok": False, "error": "Auth not enabled"}), 400
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"ok": False, "error": "Not logged in"}), 401
+    data = request.get_json(silent=True) or {}
+    api_key    = (data.get("api_key") or "").strip()
+    secret_key = (data.get("secret_key") or "").strip()
+    paper      = bool(data.get("paper", True))
+    if not api_key or not secret_key:
+        return jsonify({"ok": False, "error": "api_key and secret_key are required"}), 400
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({"ok": False, "error": "User not found"}), 404
+    user.alpaca_api_key_enc    = _encrypt_key(api_key)
+    user.alpaca_secret_key_enc = _encrypt_key(secret_key)
+    user.alpaca_paper          = paper
+    db.session.commit()
+    _invalidate_user_engine(user_id)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/news")
 def api_news():
     """Return recent headlines for watchlist symbols (15-min cache, ≤8 symbols)."""
     import yfinance as yf
-    watchlist = (_engine.watchlist or [])[:8]
+    watchlist = (_get_engine().watchlist or [])[:8]
     if not watchlist:
         return jsonify({"ok": True, "items": []})
 
@@ -1789,7 +1908,7 @@ def api_watchlist_get():
     items = []
     # Use engine's fetcher cache (no extra network calls)
     try:
-        market_data = _engine.fetcher.fetch_many(_personal_watchlist, force_refresh=False)
+        market_data = _get_engine().fetcher.fetch_many(_personal_watchlist, force_refresh=False)
     except Exception:
         market_data = {}
     # Last computed signals for signal/rsi columns
@@ -2342,6 +2461,9 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
 
 <main>
   <div class="error-banner" id="err-banner"></div>
+  <div id="no-keys-banner" style="display:none;background:#1c1508;border:1px solid #92400e;border-radius:8px;padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+    <span style="font-size:13px;color:#fbbf24">&#9888; Connect your Alpaca API keys in <a href="/settings" style="color:#fbbf24;text-decoration:underline">Settings</a> to start trading.</span>
+  </div>
 
   <!-- ══ Stock Search & Favorites — always first, impossible to miss ══ -->
   <div class="panel grid1" id="search-panel" style="border:1px solid #0ea5e9;margin-bottom:14px">
@@ -2518,6 +2640,10 @@ const cls = n => n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu';
 
 function applyState(s) {
   const p = s.portfolio;
+
+  // no-keys banner
+  const noKeysBanner = document.getElementById('no-keys-banner');
+  if (noKeysBanner) noKeysBanner.style.display = (s.alpaca_connected === false) ? 'flex' : 'none';
 
   // mode badge
   const badge = document.getElementById('mode-badge');
@@ -4056,6 +4182,18 @@ td.diff-dn{color:#f87171}
 .email-unconfigured{font-size:12px;color:#f59e0b;margin-top:8px;padding:8px 12px;
                      background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);
                      border-radius:6px;display:inline-flex;align-items:center;gap:6px}
+/* Alpaca key form */
+.alpaca-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px;margin-bottom:16px}
+.alpaca-row{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
+.alpaca-label{font-size:12px;color:var(--text2);font-weight:600}
+.alpaca-input{background:#07090f;border:1px solid var(--border2);border-radius:8px;padding:10px 14px;
+              color:var(--text);font-size:13px;font-family:monospace;width:100%;outline:none}
+.alpaca-input:focus{border-color:var(--accent)}
+.alpaca-mode{display:flex;gap:12px;margin-bottom:16px}
+.alpaca-mode label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text2);cursor:pointer}
+.alpaca-status{font-size:12px;margin-top:12px;padding:8px 12px;border-radius:6px;display:none}
+.alpaca-status.ok{background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.25);color:#34d399}
+.alpaca-status.err{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#f87171}
 /* Toggle switch */
 .toggle-wrap{display:flex;align-items:center;gap:10px;flex-shrink:0}
 .toggle-label{font-size:12px;color:var(--text2);min-width:36px;text-align:right}
@@ -4111,6 +4249,29 @@ td.diff-dn{color:#f87171}
       <tbody id="detail-body">
       </tbody>
     </table>
+  </div>
+
+  <!-- Alpaca API Keys -->
+  <div class="section-title">Alpaca API Connection</div>
+  <div class="section-sub">Enter your Alpaca API credentials to enable live or paper trading. Keys are encrypted and stored per account.</div>
+  <div class="alpaca-card">
+    <div class="alpaca-row">
+      <span class="alpaca-label">API Key</span>
+      <input class="alpaca-input" id="alpaca-api-key" type="password" placeholder="PK…" autocomplete="off" spellcheck="false"/>
+    </div>
+    <div class="alpaca-row">
+      <span class="alpaca-label">Secret Key</span>
+      <input class="alpaca-input" id="alpaca-secret-key" type="password" placeholder="secret…" autocomplete="off" spellcheck="false"/>
+    </div>
+    <div class="alpaca-mode">
+      <label><input type="radio" name="alpaca-mode" value="paper" {% if alpaca_paper %}checked{% endif %}/> Paper Trading</label>
+      <label><input type="radio" name="alpaca-mode" value="live"  {% if not alpaca_paper %}checked{% endif %}/> Live Trading</label>
+    </div>
+    <button class="btn-save" onclick="saveAlpacaKeys()">Save Keys</button>
+    {% if alpaca_connected %}
+    <span style="font-size:12px;color:#10b981;margin-left:14px">&#10003; Connected ({{ "Paper" if alpaca_paper else "Live" }})</span>
+    {% endif %}
+    <div class="alpaca-status" id="alpaca-status"></div>
   </div>
 
   <!-- Email Notifications -->
@@ -4263,6 +4424,41 @@ async function toggleEmail(enabled) {
 
 renderCards();
 renderDetail();
+
+async function saveAlpacaKeys() {
+  const apiKey    = document.getElementById('alpaca-api-key').value.trim();
+  const secretKey = document.getElementById('alpaca-secret-key').value.trim();
+  const modeEl    = document.querySelector('input[name="alpaca-mode"]:checked');
+  const paper     = modeEl ? modeEl.value === 'paper' : true;
+  const status    = document.getElementById('alpaca-status');
+  if (!apiKey || !secretKey) {
+    status.textContent = 'Both API Key and Secret Key are required.';
+    status.className = 'alpaca-status err';
+    status.style.display = 'block';
+    return;
+  }
+  try {
+    const res  = await fetch('/api/alpaca-keys', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({api_key: apiKey, secret_key: secretKey, paper: paper}),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      status.textContent = '✓ Keys saved. Your trading engine will use these credentials.';
+      status.className = 'alpaca-status ok';
+      document.getElementById('alpaca-api-key').value = '';
+      document.getElementById('alpaca-secret-key').value = '';
+    } else {
+      status.textContent = 'Error: ' + (data.error || 'unknown error');
+      status.className = 'alpaca-status err';
+    }
+  } catch(e) {
+    status.textContent = 'Network error: ' + e;
+    status.className = 'alpaca-status err';
+  }
+  status.style.display = 'block';
+}
 </script>
 </body>
 </html>"""
@@ -5259,13 +5455,25 @@ def settings_page():
         k: {"label": v["label"], "tagline": v["tagline"], "color": v["color"], "overrides": v["overrides"]}
         for k, v in RISK_PROFILES.items()
     })
+    eng = _get_engine()
+    alpaca_connected = False
+    alpaca_paper     = True
+    if _AUTH_ENABLED:
+        user_id = session.get("user_id")
+        if user_id:
+            _u = db.session.get(User, user_id)
+            if _u and _u.alpaca_api_key_enc:
+                alpaca_connected = True
+                alpaca_paper     = bool(_u.alpaca_paper)
     resp = make_response(render_template_string(
         SETTINGS_HTML,
         profiles_json=profiles_json,
         current_profile=_current_profile,
-        email_configured=_engine.emailer.is_configured,
-        email_active=_engine.emailer.active,
-        notify_email=_engine.emailer.notify_email,
+        email_configured=eng.emailer.is_configured,
+        email_active=eng.emailer.active,
+        notify_email=eng.emailer.notify_email,
+        alpaca_connected=alpaca_connected,
+        alpaca_paper=alpaca_paper,
     ))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp

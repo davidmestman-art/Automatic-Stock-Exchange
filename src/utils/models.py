@@ -17,6 +17,10 @@ class User(db.Model):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+    # Alpaca API credentials (Fernet-encrypted at rest)
+    alpaca_api_key_enc    = db.Column(db.Text, nullable=False, default="")
+    alpaca_secret_key_enc = db.Column(db.Text, nullable=False, default="")
+    alpaca_paper          = db.Column(db.Boolean, nullable=False, default=True)
 
     def __repr__(self) -> str:
         return f"<User id={self.id} username={self.username!r}>"
