@@ -21,10 +21,12 @@ from flask import (
     request, session, url_for,
 )
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from config import config
 from src.data.extended_hours import ExtendedHoursMonitor
 from src.trading.engine import TradingEngine
+from src.utils.models import User, db
 from src.utils.sectors import get_sector, positions_by_sector
 
 CYCLE_INTERVAL = 60  # seconds between automatic trading cycles
@@ -42,115 +44,328 @@ app = Flask(__name__)
 # X-Forwarded-Proto/Host correctly — required for secure session cookies.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
+# ── Database ──────────────────────────────────────────────────────────────────
+_DB_PATH = Path(__file__).resolve().parent / "users.db"
+app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{_DB_PATH}"
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+db.init_app(app)
+
+with app.app_context():
+    db.create_all()
+
 # ── Public landing page ───────────────────────────────────────────────────────
 _LANDING_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>NYSE Trading Engine</title>
+<title>NYSE Trading Engine — Algorithmic Trading for Everyone</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
-nav{display:flex;align-items:center;justify-content:space-between;padding:18px 40px;
-    border-bottom:1px solid #1e293b;position:sticky;top:0;background:#0f172aee;
-    backdrop-filter:blur(8px);z-index:10}
-.nav-logo{font-size:16px;font-weight:700;color:#38bdf8;letter-spacing:-.3px}
-.btn-cta{background:#0ea5e9;color:#fff;border:none;border-radius:7px;padding:9px 22px;
-         font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
-.btn-cta:hover{opacity:.88}
-.hero{text-align:center;padding:96px 24px 72px}
-.hero-badge{display:inline-block;background:#0c1e35;border:1px solid #0ea5e920;
-            border-radius:99px;padding:4px 14px;font-size:11px;font-weight:600;
-            color:#38bdf8;letter-spacing:.5px;margin-bottom:24px;text-transform:uppercase}
-.hero h1{font-size:clamp(38px,6vw,68px);font-weight:800;letter-spacing:-2px;line-height:1.08;
-         margin-bottom:20px;background:linear-gradient(135deg,#e2e8f0 30%,#38bdf8);
-         -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-.hero-tag{font-size:clamp(15px,2.2vw,20px);color:#94a3b8;max-width:540px;margin:0 auto 44px;line-height:1.65}
-.btn-primary{background:#0ea5e9;color:#fff;border:none;border-radius:8px;padding:14px 34px;
-             font-size:15px;font-weight:700;text-decoration:none;display:inline-block}
-.btn-primary:hover{opacity:.88}
-.strip{display:flex;justify-content:center;gap:56px;padding:32px 24px;
-       border-top:1px solid #1e293b;border-bottom:1px solid #1e293b;flex-wrap:wrap}
-.strip-item{text-align:center}
-.strip-val{font-size:22px;font-weight:700;color:#38bdf8}
-.strip-lbl{font-size:12px;color:#64748b;margin-top:3px}
-.features{max-width:1060px;margin:0 auto;padding:80px 24px}
-.features h2{text-align:center;font-size:clamp(22px,4vw,34px);font-weight:700;
-             letter-spacing:-.5px;margin-bottom:8px}
-.features-sub{text-align:center;color:#64748b;font-size:15px;margin-bottom:50px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px}
-.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:24px;transition:border-color .2s}
-.card:hover{border-color:#0ea5e9}
-.card-icon{font-size:26px;margin-bottom:12px}
-.card-title{font-size:15px;font-weight:700;color:#e2e8f0;margin-bottom:7px}
-.card-desc{font-size:13px;color:#64748b;line-height:1.6}
-footer{text-align:center;padding:30px 24px;border-top:1px solid #1e293b;color:#475569;font-size:12px}
-@media(max-width:600px){nav{padding:14px 18px}.strip{gap:24px}}
+:root{
+  --bg:#07090f;--surface:#0d1220;--surface2:#121a2e;
+  --border:#1a2540;--border2:#223060;
+  --accent:#2563eb;--accent2:#3b82f6;
+  --green:#10b981;--green2:#34d399;
+  --text:#eaf0fb;--text2:#8898b8;--text3:#4a5a78;
+}
+body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+/* Nav */
+nav{position:sticky;top:0;z-index:50;display:flex;align-items:center;justify-content:space-between;
+    padding:0 48px;height:64px;background:rgba(8,12,20,.92);
+    border-bottom:1px solid rgba(30,45,69,.7);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+.nav-brand{display:flex;align-items:center;gap:10px}
+.nav-dot{width:9px;height:9px;background:var(--accent2);border-radius:50%;box-shadow:0 0 12px var(--accent2);flex-shrink:0}
+.nav-name{font-size:16px;font-weight:700;color:#f1f5f9;letter-spacing:-.4px}
+.nav-actions{display:flex;align-items:center;gap:10px}
+.btn-outline{padding:8px 20px;border-radius:7px;border:1px solid var(--border);background:transparent;
+             color:var(--text2);font-size:13px;font-weight:600;text-decoration:none;
+             display:inline-block;transition:all .15s}
+.btn-outline:hover{border-color:var(--accent2);color:var(--text)}
+.btn-solid{padding:8px 22px;border-radius:7px;background:var(--accent);color:#fff;font-size:13px;
+           font-weight:700;text-decoration:none;display:inline-block;transition:all .15s;
+           box-shadow:0 0 20px rgba(37,99,235,.3)}
+.btn-solid:hover{background:var(--accent2);box-shadow:0 0 28px rgba(59,130,246,.45)}
+/* Hero */
+.hero{position:relative;padding:120px 48px 100px;text-align:center;overflow:hidden}
+.hero::before{content:'';position:absolute;inset:0;pointer-events:none;
+  background:radial-gradient(ellipse 80% 50% at 50% -10%,rgba(37,99,235,.18) 0%,transparent 70%),
+             radial-gradient(ellipse 40% 30% at 80% 80%,rgba(16,185,129,.06) 0%,transparent 60%)}
+.hero-eyebrow{display:inline-flex;align-items:center;gap:7px;padding:5px 14px;border-radius:99px;
+              background:rgba(37,99,235,.12);border:1px solid rgba(37,99,235,.25);
+              font-size:12px;font-weight:600;color:var(--accent2);letter-spacing:.5px;
+              text-transform:uppercase;margin-bottom:28px}
+.eyebrow-dot{width:6px;height:6px;background:var(--accent2);border-radius:50%;box-shadow:0 0 8px var(--accent2)}
+.hero h1{font-size:clamp(42px,6vw,72px);font-weight:800;letter-spacing:-2.5px;line-height:1.06;
+         margin-bottom:24px;color:#f8fafc}
+.grad{background:linear-gradient(135deg,#60a5fa 0%,#a78bfa 50%,#34d399 100%);
+      -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero-sub{font-size:clamp(16px,2vw,20px);color:var(--text2);max-width:580px;margin:0 auto 48px;line-height:1.65}
+.hero-cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:56px}
+.btn-hero-p{padding:14px 36px;border-radius:8px;background:var(--accent);color:#fff;
+            font-size:16px;font-weight:700;letter-spacing:-.2px;text-decoration:none;
+            display:inline-block;box-shadow:0 0 40px rgba(37,99,235,.45);transition:all .2s}
+.btn-hero-p:hover{background:var(--accent2);box-shadow:0 0 60px rgba(59,130,246,.55);transform:translateY(-1px)}
+.btn-hero-s{padding:13px 32px;border-radius:8px;background:transparent;color:var(--text);
+            font-size:16px;font-weight:600;text-decoration:none;display:inline-block;
+            border:1px solid var(--border);transition:all .2s}
+.btn-hero-s:hover{border-color:var(--accent2);background:rgba(37,99,235,.06);transform:translateY(-1px)}
+.hero-chips{display:flex;justify-content:center;gap:16px;flex-wrap:wrap}
+.chip{display:flex;align-items:center;gap:7px;padding:8px 16px;border-radius:8px;
+      background:rgba(15,22,41,.7);border:1px solid var(--border);
+      font-size:13px;font-weight:600;color:var(--text2);backdrop-filter:blur(8px)}
+.chip .val{color:var(--text);font-size:14px}
+/* Features */
+.section{padding:80px 48px;max-width:1200px;margin:0 auto}
+.eyebrow{font-size:12px;font-weight:700;color:var(--accent2);text-transform:uppercase;
+         letter-spacing:.7px;text-align:center;margin-bottom:12px}
+.sec-title{font-size:clamp(28px,4vw,40px);font-weight:800;letter-spacing:-1px;text-align:center;
+           margin-bottom:10px;color:#f1f5f9}
+.sec-sub{text-align:center;color:var(--text2);font-size:16px;max-width:520px;margin:0 auto 52px}
+/* Stats bar below hero CTA */
+.stats-bar{display:inline-flex;align-items:center;gap:0;border:1px solid var(--border);
+           border-radius:12px;overflow:hidden;background:rgba(13,18,32,.7);
+           backdrop-filter:blur(12px);margin-top:20px}
+.stat-item{display:flex;flex-direction:column;align-items:center;padding:14px 28px;gap:2px}
+.stat-val{font-size:18px;font-weight:800;color:#f1f5f9;letter-spacing:-.5px;line-height:1}
+.stat-sep{font-size:11px;color:var(--text3);font-weight:500;text-transform:uppercase;letter-spacing:.5px;margin-top:3px}
+.stat-divider{width:1px;height:40px;background:var(--border);flex-shrink:0}
+/* Feature grid — 2×2 */
+.section-wrap{border-top:1px solid var(--border)}
+.feat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}
+.feat-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:28px;
+           transition:all .25s;position:relative;overflow:hidden}
+.feat-card::after{content:'';position:absolute;top:0;left:0;right:0;height:1px;
+                  background:linear-gradient(90deg,transparent,rgba(59,130,246,.4),transparent);
+                  opacity:0;transition:opacity .25s}
+.feat-card:hover{border-color:rgba(59,130,246,.35);transform:translateY(-3px);box-shadow:0 16px 48px rgba(0,0,0,.5)}
+.feat-card:hover::after{opacity:1}
+.feat-icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;
+           justify-content:center;font-size:24px;margin-bottom:18px}
+.fi-blue{background:rgba(37,99,235,.15);border:1px solid rgba(37,99,235,.2)}
+.fi-green{background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.18)}
+.fi-purple{background:rgba(139,92,246,.12);border:1px solid rgba(139,92,246,.18)}
+.fi-cyan{background:rgba(6,182,212,.1);border:1px solid rgba(6,182,212,.15)}
+.fi-amber{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.15)}
+.fi-rose{background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.15)}
+.feat-title{font-size:17px;font-weight:700;color:#f1f5f9;margin-bottom:10px;letter-spacing:-.3px}
+.feat-desc{font-size:14px;color:var(--text2);line-height:1.65}
+/* How it works */
+.hiw{padding:80px 48px;background:linear-gradient(180deg,var(--bg) 0%,var(--surface) 30%,var(--surface) 70%,var(--bg) 100%);
+     border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.hiw-inner{max-width:1000px;margin:0 auto}
+.hiw-steps{display:grid;grid-template-columns:repeat(3,1fr);gap:48px;position:relative;margin-top:48px}
+.hiw-steps::before{content:'';position:absolute;top:27px;left:calc(16.666% + 16px);
+                   right:calc(16.666% + 16px);height:1px;
+                   background:linear-gradient(90deg,var(--border),var(--accent2),var(--border));z-index:0}
+.hiw-step{text-align:center;position:relative;z-index:1}
+.hiw-num{width:56px;height:56px;border-radius:50%;background:var(--bg);border:2px solid var(--accent2);
+         display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;
+         color:var(--accent2);margin:0 auto 20px;box-shadow:0 0 28px rgba(59,130,246,.2)}
+.hiw-title{font-size:17px;font-weight:700;color:#f1f5f9;margin-bottom:8px;letter-spacing:-.3px}
+.hiw-desc{font-size:14px;color:var(--text2);line-height:1.65}
+/* Stats */
+.proof{padding:80px 48px;max-width:1200px;margin:0 auto}
+.proof-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.proof-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+            padding:28px;text-align:center;transition:border-color .2s}
+.proof-card:hover{border-color:var(--border2)}
+.proof-val{font-size:36px;font-weight:800;letter-spacing:-1.5px;margin-bottom:6px;line-height:1}
+.pv-blue{color:var(--accent2)}.pv-green{color:#34d399}.pv-purple{color:#a78bfa}.pv-amber{color:#fbbf24}
+.proof-lbl{font-size:13px;color:var(--text2);font-weight:500;line-height:1.4}
+/* Footer */
+footer{border-top:1px solid var(--border);padding:32px 48px;display:flex;align-items:center;
+       justify-content:space-between;flex-wrap:wrap;gap:16px}
+.footer-brand{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;color:#f1f5f9}
+.footer-dot{width:7px;height:7px;background:var(--accent2);border-radius:50%;flex-shrink:0}
+.footer-links{display:flex;gap:24px}
+.footer-link{font-size:13px;color:var(--text3);transition:color .15s}
+.footer-link:hover{color:var(--text2)}
+.footer-note{font-size:12px;color:var(--text3);max-width:360px;text-align:right}
+/* Responsive */
+@media(max-width:900px){
+  nav{padding:0 24px}
+  .hero{padding:80px 24px 64px}
+  .section,.proof{padding:60px 24px}
+  .hiw{padding:60px 24px}
+  .feat-grid{grid-template-columns:1fr 1fr}
+  .proof-grid{grid-template-columns:1fr 1fr}
+  .hiw-steps{grid-template-columns:1fr;gap:28px}
+  .hiw-steps::before{display:none}
+  footer{padding:24px}
+  .footer-note{text-align:left}
+}
+@media(max-width:600px){
+  nav{padding:0 16px;height:56px}
+  .nav-name{font-size:14px}
+  .hero{padding:60px 16px 48px}
+  .section,.proof{padding:48px 16px}
+  .hiw{padding:48px 16px}
+  .feat-grid{grid-template-columns:1fr}
+  .proof-grid{grid-template-columns:1fr 1fr}
+  .stats-bar{flex-wrap:wrap;border-radius:10px}
+  .stat-item{padding:10px 18px}
+  .stat-divider{display:none}
+  .stat-val{font-size:16px}
+  footer{padding:20px 16px;flex-direction:column;align-items:flex-start}
+  .footer-links,.footer-note{display:none}
+}
 </style>
 </head>
 <body>
+
+<!-- ── Nav ─────────────────────────────────────────────────────────────── -->
 <nav>
-  <div class="nav-logo">NYSE Trading Engine</div>
-  {% if logged_in %}
-  <a href="/dashboard" class="btn-cta">Open Dashboard</a>
-  {% else %}
-  <a href="/login" class="btn-cta">Log In</a>
-  {% endif %}
+  <div class="nav-brand">
+    <div class="nav-dot"></div>
+    <span class="nav-name">NYSE Trading Engine</span>
+  </div>
+  <div class="nav-actions">
+    {% if logged_in %}
+    <a href="/dashboard" class="btn-solid">Open Dashboard &rarr;</a>
+    {% else %}
+    <a href="/register" class="btn-outline">Sign Up Free</a>
+    <a href="/login" class="btn-solid">Log In</a>
+    {% endif %}
+  </div>
 </nav>
+
+<!-- ── Hero ─────────────────────────────────────────────────────────────── -->
 <section class="hero">
-  <div class="hero-badge">Algorithmic Trading</div>
-  <h1>NYSE Trading Engine</h1>
-  <p class="hero-tag">Algorithmic paper trading powered by real-time market analysis</p>
-  {% if logged_in %}
-  <a href="/dashboard" class="btn-primary">Go to Dashboard &rarr;</a>
-  {% else %}
-  <a href="/login" class="btn-primary">Get Started &rarr;</a>
-  {% endif %}
+  <div class="hero-eyebrow">
+    <span class="eyebrow-dot"></span>
+    Paper Trading · No Risk · Real Signals
+  </div>
+  <h1>Algorithmic Trading<br><span class="grad">for Everyone</span></h1>
+  <p class="hero-sub">Professional-grade trading signals. Zero coding required.<br>Start paper trading in 5 minutes.</p>
+  <div class="hero-cta">
+    {% if logged_in %}
+    <a href="/dashboard" class="btn-hero-p">Open Dashboard &rarr;</a>
+    {% else %}
+    <a href="/login" class="btn-hero-p">Start Paper Trading Free &rarr;</a>
+    <a href="#how-it-works" class="btn-hero-s">See how it works</a>
+    {% endif %}
+    <a href="/leaderboard" class="btn-hero-s" style="border-color:rgba(16,185,129,.4);color:#6ee7b7">&#127942; See Our Track Record</a>
+  </div>
+
+  <!-- Stats bar -->
+  <div class="stats-bar">
+    <div class="stat-item">
+      <span class="stat-val">10+</span>
+      <span class="stat-sep">Indicators</span>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat-item">
+      <span class="stat-val">Real-Time</span>
+      <span class="stat-sep">Market Data</span>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat-item">
+      <span class="stat-val">S&amp;P 500</span>
+      <span class="stat-sep">Universe</span>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat-item">
+      <span class="stat-val">$0</span>
+      <span class="stat-sep">to Start</span>
+    </div>
+  </div>
 </section>
-<div class="strip">
-  <div class="strip-item"><div class="strip-val">10+</div><div class="strip-lbl">Technical Indicators</div></div>
-  <div class="strip-item"><div class="strip-val">S&amp;P 500</div><div class="strip-lbl">Universe</div></div>
-  <div class="strip-item"><div class="strip-val">Real-Time</div><div class="strip-lbl">Signal Analysis</div></div>
-  <div class="strip-item"><div class="strip-val">Paper</div><div class="strip-lbl">Risk-Free Trading</div></div>
-</div>
-<div class="features">
-  <h2>Everything you need</h2>
-  <p class="features-sub">A complete algorithmic trading platform built for clarity and control</p>
-  <div class="grid">
-    <div class="card">
-      <div class="card-icon">📡</div>
-      <div class="card-title">Real-Time Signal Analysis</div>
-      <div class="card-desc">RSI, MACD, EMA, Bollinger Bands, momentum, and mean-reversion signals scored and blended continuously.</div>
-    </div>
-    <div class="card">
-      <div class="card-icon">🧠</div>
-      <div class="card-title">Multi-Indicator Scoring</div>
-      <div class="card-desc">Composite engine weighs 8 signal types across multiple timeframes, filtered by live market regime.</div>
-    </div>
-    <div class="card">
-      <div class="card-icon">🏦</div>
-      <div class="card-title">Alpaca Paper Trading</div>
-      <div class="card-desc">Routes orders through Alpaca's paper API — test strategies with real market data, zero real money.</div>
-    </div>
-    <div class="card">
-      <div class="card-icon">📈</div>
-      <div class="card-title">Live Portfolio Tracking</div>
-      <div class="card-desc">Real-time P&amp;L, equity curve, open positions, trailing stops, and sector exposure in one view.</div>
-    </div>
-    <div class="card">
-      <div class="card-icon">🤖</div>
-      <div class="card-title">ML Signal Ranking</div>
-      <div class="card-desc">Gradient Boosting classifier re-trains on trade outcomes to improve signal selection over time.</div>
-    </div>
-    <div class="card">
-      <div class="card-icon">🛡️</div>
-      <div class="card-title">Built-In Risk Management</div>
-      <div class="card-desc">Trailing stops, daily loss limits, correlation filters, earnings protection, and adaptive sizing included.</div>
+
+<!-- ── Features ──────────────────────────────────────────────────────────── -->
+<div id="features" class="section-wrap">
+  <div class="section">
+    <div class="eyebrow">What you get</div>
+    <h2 class="sec-title">Everything in one dashboard</h2>
+    <p class="sec-sub">Professional-grade tools with zero setup. Connect Alpaca, run the engine, watch it trade.</p>
+    <div class="feat-grid">
+      <div class="feat-card">
+        <div class="feat-icon fi-blue">📡</div>
+        <div class="feat-title">Real-Time Signal Analysis</div>
+        <div class="feat-desc">RSI, MACD, EMA, Bollinger Bands, momentum, and mean-reversion signals — scored, weighted, and blended into a single composite score every minute.</div>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon fi-purple">🧠</div>
+        <div class="feat-title">Multi-Indicator Scoring</div>
+        <div class="feat-desc">Eight independent signal types across three timeframes. A Gradient Boosting ML model re-ranks candidates based on your own trading history.</div>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon fi-green">🏦</div>
+        <div class="feat-title">Alpaca Paper Trading</div>
+        <div class="feat-desc">Orders route directly through Alpaca's paper trading API — real market prices, real order logic, zero real money at risk. Flip to live when you're ready.</div>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon fi-amber">📈</div>
+        <div class="feat-title">Live Portfolio Tracking</div>
+        <div class="feat-desc">Equity curve, open positions, unrealized P&amp;L, trailing stops, sector exposure, and a full trade journal updated in real time.</div>
+      </div>
     </div>
   </div>
 </div>
-<footer>NYSE Trading Engine &mdash; algorithmic paper trading for everyone</footer>
+
+<!-- ── How it works ───────────────────────────────────────────────────────── -->
+<div id="how-it-works" class="hiw">
+  <div class="hiw-inner">
+    <div class="eyebrow">How it works</div>
+    <h2 class="sec-title">Up and running in three steps</h2>
+    <div class="hiw-steps">
+      <div class="hiw-step">
+        <div class="hiw-num">1</div>
+        <div class="hiw-title">Connect &amp; Configure</div>
+        <div class="hiw-desc">Add your free Alpaca paper-trading API keys to <code style="background:rgba(59,130,246,.12);padding:1px 5px;border-radius:4px;font-size:12px">.env</code>. No broker account, no real money required. The engine starts in simulation mode if you skip this step.</div>
+      </div>
+      <div class="hiw-step">
+        <div class="hiw-num">2</div>
+        <div class="hiw-title">Scan &amp; Score</div>
+        <div class="hiw-desc">Click <strong style="color:#e8edf5">Run Cycle</strong>. The engine scans the S&amp;P 500, scores every ticker across 8 signal types, and selects the 8–10 highest-conviction, non-correlated setups.</div>
+      </div>
+      <div class="hiw-step">
+        <div class="hiw-num">3</div>
+        <div class="hiw-title">Trade &amp; Relax</div>
+        <div class="hiw-desc">Orders are placed automatically with adaptive position sizing. Trailing stops, take-profit targets, and a daily loss limit protect your paper portfolio around the clock.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Stats bar section ──────────────────────────────────────────────────── -->
+<div class="proof">
+  <div class="proof-grid">
+    <div class="proof-card">
+      <div class="proof-val pv-blue">10+</div>
+      <div class="proof-lbl">Technical indicators tracked per ticker</div>
+    </div>
+    <div class="proof-card">
+      <div class="proof-val pv-green">Real-Time</div>
+      <div class="proof-lbl">Market data via yFinance &amp; Alpaca</div>
+    </div>
+    <div class="proof-card">
+      <div class="proof-val pv-purple">S&amp;P 500</div>
+      <div class="proof-lbl">Universe scanned each session</div>
+    </div>
+    <div class="proof-card">
+      <div class="proof-val pv-amber">$0</div>
+      <div class="proof-lbl">Real money needed to get started</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Footer ─────────────────────────────────────────────────────────────── -->
+<footer>
+  <div class="footer-brand">
+    <div class="footer-dot"></div>
+    NYSE Trading Engine
+  </div>
+  <div class="footer-links">
+    <a href="/dashboard" class="footer-link">Dashboard</a>
+    <a href="/login" class="footer-link">Login</a>
+    <a href="/register" class="footer-link">Sign Up</a>
+    <a href="/leaderboard" class="footer-link">Leaderboard</a>
+    <a href="/stats" class="footer-link">Stats</a>
+  </div>
+  <div class="footer-note">For research and education only. Not financial advice. Past simulated performance does not guarantee future results.</div>
+</footer>
 </body>
 </html>"""
 
@@ -196,6 +411,73 @@ input::placeholder{color:#475569}
            placeholder="Enter password" required/>
     <button class="btn" type="submit">Sign In</button>
   </form>
+  <p style="text-align:center;margin-top:20px;font-size:13px;color:#475569">
+    Don't have an account?
+    <a href="/register" style="color:#38bdf8;font-weight:600">Sign up free</a>
+  </p>
+</div>
+</body>
+</html>"""
+
+# ── Registration page template ─────────────────────────────────────────────────
+_REGISTER_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Sign Up — NYSE Trading Engine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;
+     min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#1e293b;border:1px solid #334155;border-radius:14px;
+      padding:40px 36px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+.logo{font-size:18px;font-weight:700;color:#38bdf8;margin-bottom:4px;text-align:center}
+.sub{font-size:12px;color:#475569;text-align:center;margin-bottom:28px}
+label{display:block;font-size:11px;color:#64748b;text-transform:uppercase;
+      letter-spacing:.5px;margin-bottom:5px}
+input{width:100%;background:#0f172a;border:1px solid #334155;border-radius:7px;
+      padding:10px 13px;color:#e2e8f0;font-size:14px;margin-bottom:16px;outline:none}
+input:focus{border-color:#0ea5e9}
+input::placeholder{color:#475569}
+.btn{width:100%;background:#0ea5e9;color:#fff;border:none;border-radius:7px;
+     padding:11px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
+.btn:hover{opacity:.88}
+.error{background:#7f1d1d;color:#fca5a5;border-radius:7px;padding:9px 12px;
+       font-size:13px;margin-bottom:16px;text-align:center}
+.field-error{font-size:11px;color:#f87171;margin-top:-12px;margin-bottom:12px}
+.hint{font-size:11px;color:#475569;margin-top:-12px;margin-bottom:14px}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">NYSE Trading Engine</div>
+  <div class="sub">Create a free account to get started</div>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="post" novalidate>
+    <label>Username</label>
+    <input name="username" type="text" autocomplete="username"
+           placeholder="Choose a username" value="{{ username or '' }}"
+           autofocus required minlength="3" maxlength="40"/>
+    {% if errors.username %}<div class="field-error">{{ errors.username }}</div>{% endif %}
+    <label>Email</label>
+    <input name="email" type="email" autocomplete="email"
+           placeholder="you@example.com" value="{{ email or '' }}" required/>
+    {% if errors.email %}<div class="field-error">{{ errors.email }}</div>{% endif %}
+    <label>Password</label>
+    <input name="password" type="password" autocomplete="new-password"
+           placeholder="At least 8 characters" required minlength="8"/>
+    {% if errors.password %}<div class="field-error">{{ errors.password }}</div>{% endif %}
+    <label>Confirm Password</label>
+    <input name="confirm" type="password" autocomplete="new-password"
+           placeholder="Repeat your password" required/>
+    {% if errors.confirm %}<div class="field-error">{{ errors.confirm }}</div>{% endif %}
+    <button class="btn" type="submit">Create Account</button>
+  </form>
+  <p style="text-align:center;margin-top:20px;font-size:13px;color:#475569">
+    Already have an account?
+    <a href="/login" style="color:#38bdf8;font-weight:600">Sign in</a>
+  </p>
 </div>
 </body>
 </html>"""
@@ -222,7 +504,8 @@ logging.info(
 )
 
 # Routes exempt from auth — public pages and static assets
-_PUBLIC_ENDPOINTS = {"login", "logout", "home", "pwa_manifest", "pwa_icon", "service_worker"}
+_PUBLIC_ENDPOINTS = {"login", "logout", "register", "home", "pwa_manifest", "pwa_icon",
+                     "service_worker", "leaderboard_page", "api_leaderboard"}
 
 
 @app.before_request
@@ -254,22 +537,56 @@ def _require_login():
     logging.info("[AUTH] allowed — logged in")
 
 
+def _ensure_admin_in_db() -> None:
+    """Create the admin account in the DB from env vars if it doesn't exist yet."""
+    if not (_DASH_USER and _DASH_PASS):
+        return
+    with app.app_context():
+        if not User.query.filter_by(username=_DASH_USER).first():
+            admin = User(
+                username=_DASH_USER,
+                email=f"{_DASH_USER}@admin.local",
+                password_hash=generate_password_hash(_DASH_PASS),
+            )
+            db.session.add(admin)
+            db.session.commit()
+            logging.info("[AUTH] Admin account created in DB: %r", _DASH_USER)
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = None
     if request.method == "POST":
-        user = request.form.get("username", "")
-        pw   = request.form.get("password", "")
-        user_ok = secrets.compare_digest(user, _DASH_USER)
-        pass_ok = secrets.compare_digest(pw,   _DASH_PASS)
-        if user_ok and pass_ok:
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+
+        # ── Check env-var admin credentials first ─────────────────────────────
+        is_env_admin = (
+            _DASH_USER and _DASH_PASS
+            and secrets.compare_digest(username, _DASH_USER)
+            and secrets.compare_digest(password, _DASH_PASS)
+        )
+        if is_env_admin:
+            _ensure_admin_in_db()
+
+        # ── Look up user in database ──────────────────────────────────────────
+        db_user = User.query.filter_by(username=username).first()
+        authenticated = is_env_admin or (
+            db_user is not None and check_password_hash(db_user.password_hash, password)
+        )
+
+        if authenticated:
             session.permanent = True
             session["logged_in"] = True
             next_url = request.args.get("next", "/dashboard")
             if not next_url.startswith("/"):
                 next_url = "/dashboard"
+            logging.info("[AUTH] Login OK: %r", username)
             return redirect(next_url)
+
         error = "Invalid username or password."
+        logging.info("[AUTH] Login FAILED: %r", username)
+
     return render_template_string(_LOGIN_HTML, error=error, auth=_AUTH_ENABLED)
 
 
@@ -277,6 +594,56 @@ def login():
 def logout():
     session.clear()
     return redirect("/")
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "GET":
+        return render_template_string(_REGISTER_HTML, errors={}, username="", email="")
+
+    username = request.form.get("username", "").strip()
+    email    = request.form.get("email", "").strip().lower()
+    password = request.form.get("password", "")
+    confirm  = request.form.get("confirm", "")
+
+    errors: dict = {}
+
+    if len(username) < 3:
+        errors["username"] = "Username must be at least 3 characters."
+    elif len(username) > 40:
+        errors["username"] = "Username must be 40 characters or fewer."
+    elif not username.replace("_", "").replace("-", "").isalnum():
+        errors["username"] = "Username may only contain letters, numbers, hyphens, and underscores."
+
+    if not email or "@" not in email:
+        errors["email"] = "Enter a valid email address."
+
+    if len(password) < 8:
+        errors["password"] = "Password must be at least 8 characters."
+
+    if password != confirm:
+        errors["confirm"] = "Passwords do not match."
+
+    if not errors:
+        with app.app_context():
+            if User.query.filter_by(username=username).first():
+                errors["username"] = "That username is already taken."
+            elif User.query.filter_by(email=email).first():
+                errors["email"] = "An account with that email already exists."
+
+    if errors:
+        return render_template_string(_REGISTER_HTML, errors=errors,
+                                      username=username, email=email)
+
+    user = User(
+        username=username,
+        email=email,
+        password_hash=generate_password_hash(password),
+    )
+    db.session.add(user)
+    db.session.commit()
+    logging.info("[REGISTER] New user: %r (%s)", username, email)
+    return redirect("/login")
 
 
 _lock = threading.Lock()
@@ -287,6 +654,99 @@ _next_cycle_at: Optional[datetime] = None
 _equity_snapshots: list = []          # [{ts, value}] — portfolio value over time
 _last_snapshot_ts: Optional[datetime] = None
 _ext_hours = ExtendedHoursMonitor(cache_ttl_seconds=120)
+
+# ── Risk profiles / settings ──────────────────────────────────────────────────
+_SETTINGS_PATH = Path(__file__).resolve().parent / "user_settings.json"
+
+RISK_PROFILES = {
+    "conservative": {
+        "label": "Conservative",
+        "tagline": "Lower risk, smaller positions, only strong signals",
+        "color": "#10b981",
+        "overrides": {
+            "max_position_pct": 0.05,
+            "min_position_pct": 0.02,
+            "max_open_positions": 5,
+            "stop_loss_pct": 0.03,
+            "take_profit_pct": 0.10,
+            "trailing_stop_pct": 0.03,
+            "daily_loss_limit_pct": 0.02,
+            "buy_threshold": 0.35,
+            "sell_threshold": -0.35,
+        },
+    },
+    "moderate": {
+        "label": "Moderate",
+        "tagline": "Balanced defaults — current behaviour",
+        "color": "#3b82f6",
+        "overrides": {
+            "max_position_pct": 0.10,
+            "min_position_pct": 0.03,
+            "max_open_positions": 8,
+            "stop_loss_pct": 0.05,
+            "take_profit_pct": 0.15,
+            "trailing_stop_pct": 0.05,
+            "daily_loss_limit_pct": 0.03,
+            "buy_threshold": 0.20,
+            "sell_threshold": -0.20,
+        },
+    },
+    "aggressive": {
+        "label": "Aggressive",
+        "tagline": "Larger positions, wider stops, acts on weaker signals",
+        "color": "#f59e0b",
+        "overrides": {
+            "max_position_pct": 0.18,
+            "min_position_pct": 0.05,
+            "max_open_positions": 12,
+            "stop_loss_pct": 0.08,
+            "take_profit_pct": 0.25,
+            "trailing_stop_pct": 0.08,
+            "daily_loss_limit_pct": 0.05,
+            "buy_threshold": 0.10,
+            "sell_threshold": -0.10,
+        },
+    },
+}
+_current_profile: str = "moderate"
+
+
+def _load_user_settings() -> dict:
+    if _SETTINGS_PATH.exists():
+        try:
+            return json.loads(_SETTINGS_PATH.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_user_settings(data: dict) -> None:
+    try:
+        _SETTINGS_PATH.write_text(json.dumps(data, indent=2))
+    except Exception as e:
+        log.warning(f"Failed to save user settings: {e}")
+
+
+def _apply_risk_profile(name: str) -> bool:
+    global _current_profile
+    profile = RISK_PROFILES.get(name)
+    if not profile:
+        return False
+    for key, val in profile["overrides"].items():
+        if hasattr(_engine.config, key):
+            setattr(_engine.config, key, val)
+    _current_profile = name
+    log.info(f"[SETTINGS] Risk profile applied: {name}")
+    return True
+
+
+# Apply saved profile at startup
+_saved = _load_user_settings()
+if _saved.get("risk_profile") in RISK_PROFILES:
+    _apply_risk_profile(_saved["risk_profile"])
+else:
+    _current_profile = "moderate"
+_engine.emailer.active = bool(_saved.get("email_notifications", False))
 
 # ── News feed cache ───────────────────────────────────────────────────────────
 _news_cache: dict = {}       # {symbol: {"items": [...], "fetched_at": datetime}}
@@ -506,7 +966,15 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "volume_ratio": vol_ratio,
                 "est_size_pct": est_size_pct,
                 "corr_blocked": corr_blocked.get(sym),
-                "reasons": sig.reasons[:3],
+                "reasons": sig.reasons,
+                "macd_hist":      round(ind.macd_hist, 4)      if ind and ind.macd_hist      is not None else None,
+                "macd_hist_prev": round(ind.macd_hist_prev, 4) if ind and ind.macd_hist_prev is not None else None,
+                "ema_fast":       round(ind.ema_fast, 2)       if ind and ind.ema_fast       else None,
+                "ema_slow":       round(ind.ema_slow, 2)       if ind and ind.ema_slow       else None,
+                "bb_upper":       round(ind.bb_upper, 2)       if ind and ind.bb_upper       else None,
+                "bb_lower":       round(ind.bb_lower, 2)       if ind and ind.bb_lower       else None,
+                "roc_10":         round(ind.roc_10, 4)         if ind and getattr(ind, "roc_10",    None) is not None else None,
+                "stoch_rsi":      round(ind.stoch_rsi, 1)      if ind and getattr(ind, "stoch_rsi", None) is not None else None,
                 "tf_1d":  round(iscores["1d"],  3) if "1d"  in iscores else None,
                 "tf_1h":  round(iscores["1h"],  3) if "1h"  in iscores else None,
                 "tf_15m": round(iscores["15m"], 3) if "15m" in iscores else None,
@@ -1088,6 +1556,116 @@ def api_journal():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/leaderboard")
+def api_leaderboard():
+    try:
+        entries = _engine.journal.read_all()
+        sells = [e for e in entries if e.get("action") == "SELL" and e.get("pnl_pct") is not None]
+        buys  = [e for e in entries if e.get("action") == "BUY"]
+
+        if not sells:
+            return jsonify({"ok": True, "stats": {"total_trades": 0}, "trades": [], "chart": []})
+
+        pnl_pcts = [e["pnl_pct"] for e in sells]
+        winners  = [p for p in pnl_pcts if p > 0]
+
+        # Build buy-timestamp index for holding period
+        buys_by_sym: dict = {}
+        for b in buys:
+            buys_by_sym.setdefault(b["symbol"], []).append(b["timestamp"])
+
+        def _hold_days(sell_entry):
+            sym = sell_entry["symbol"]
+            sell_ts = sell_entry["timestamp"]
+            prior = [ts for ts in buys_by_sym.get(sym, []) if ts <= sell_ts]
+            if not prior:
+                return None
+            buy_dt  = datetime.fromisoformat(max(prior))
+            sell_dt = datetime.fromisoformat(sell_ts)
+            return max(0, (sell_dt - buy_dt).days)
+
+        hold_days_list = [d for d in (_hold_days(s) for s in sells) if d is not None]
+        avg_hold = round(sum(hold_days_list) / len(hold_days_list), 0) if hold_days_list else None
+
+        best_idx  = pnl_pcts.index(max(pnl_pcts))
+        worst_idx = pnl_pcts.index(min(pnl_pcts))
+
+        stats = {
+            "total_trades":    len(sells),
+            "winners":         len(winners),
+            "win_rate":        round(len(winners) / len(sells) * 100, 1),
+            "total_return_pct": round(sum(pnl_pcts) * 100, 2),
+            "best_trade_pct":  round(max(pnl_pcts) * 100, 2),
+            "best_symbol":     sells[best_idx]["symbol"],
+            "worst_trade_pct": round(min(pnl_pcts) * 100, 2),
+            "worst_symbol":    sells[worst_idx]["symbol"],
+            "avg_hold_days":   int(avg_hold) if avg_hold is not None else None,
+        }
+
+        # Cumulative returns chart points
+        chart, cumulative = [], 0.0
+        for e in sells:
+            cumulative += e["pnl_pct"] * 100
+            chart.append({"ts": e["timestamp"][:10], "value": round(cumulative, 2)})
+
+        # Last 20 trades table
+        last20 = list(reversed(sells[-20:]))
+        trades = []
+        for e in last20:
+            exit_px  = e["price"]
+            pp       = e["pnl_pct"]
+            entry_px = round(exit_px / (1 + pp), 2) if pp != -1 else None
+            trades.append({
+                "date":        e["timestamp"][:10],
+                "symbol":      e["symbol"],
+                "exit_price":  round(exit_px, 2),
+                "entry_price": entry_px,
+                "pnl_pct":     round(pp * 100, 2),
+                "hold_days":   _hold_days(e),
+            })
+
+        return jsonify({"ok": True, "stats": stats, "trades": trades, "chart": chart})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/settings", methods=["GET", "POST"])
+def api_settings():
+    global _current_profile
+    if request.method == "GET":
+        return jsonify({
+            "ok": True,
+            "risk_profile": _current_profile,
+            "email_notifications": _engine.emailer.active,
+            "email_configured": _engine.emailer.is_configured,
+            "profiles": {
+                k: {"label": v["label"], "tagline": v["tagline"], "color": v["color"], "overrides": v["overrides"]}
+                for k, v in RISK_PROFILES.items()
+            },
+        })
+    data = request.get_json(silent=True) or {}
+    saved = _load_user_settings()
+    # Risk profile update
+    name = data.get("risk_profile", "")
+    if name:
+        if not _apply_risk_profile(name):
+            return jsonify({"ok": False, "error": f"Unknown profile: {name}"}), 400
+        saved["risk_profile"] = name
+    # Email notifications toggle
+    if "email_notifications" in data:
+        enabled = bool(data["email_notifications"])
+        if enabled and not _engine.emailer.is_configured:
+            return jsonify({"ok": False, "error": "Email not configured — set EMAIL_HOST, EMAIL_USER, EMAIL_PASSWORD, NOTIFY_EMAIL environment variables."}), 400
+        _engine.emailer.active = enabled
+        saved["email_notifications"] = enabled
+    _save_user_settings(saved)
+    return jsonify({
+        "ok": True,
+        "risk_profile": _current_profile,
+        "email_notifications": _engine.emailer.active,
+    })
+
+
 @app.route("/api/news")
 def api_news():
     """Return recent headlines for watchlist symbols (15-min cache, ≤8 symbols)."""
@@ -1644,6 +2222,53 @@ body.light .news-sym{background:#dbeafe;color:#1d4ed8}
 body.light .news-title{color:#1e293b}
 body.light .news-title:hover{color:#1d4ed8}
 body.light .news-meta{color:#94a3b8}
+
+/* ── Explain Trade modal ─────────────────────────────────────────────────── */
+.explain-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);
+               z-index:300;padding:20px;align-items:center;justify-content:center}
+.explain-modal.active{display:flex}
+.explain-box{width:100%;max-width:560px;background:#0f1629;border-radius:14px;
+             border:1px solid #1e2d45;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.7)}
+.explain-hdr{padding:16px 20px;display:flex;align-items:center;justify-content:space-between;
+             border-bottom:1px solid #1e2d45;background:#141d2e;gap:10px}
+.explain-sym{font-weight:800;font-size:20px;color:#f1f5f9;letter-spacing:-.5px}
+.explain-close{background:none;border:1px solid #1e2d45;color:#8898b8;padding:5px 12px;
+               border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;
+               min-height:unset;transition:border-color .15s}
+.explain-close:hover{border-color:#3b82f6;color:#e2e8f0}
+.explain-body{padding:20px;max-height:70vh;overflow-y:auto}
+.explain-score{font-size:13px;color:#8898b8;margin-bottom:16px;padding-bottom:14px;
+               border-bottom:1px solid #1e2d45}
+.explain-score strong{color:#f1f5f9;font-size:18px;font-weight:800}
+.explain-item{display:flex;gap:12px;margin-bottom:14px;align-items:flex-start}
+.explain-item:last-child{margin-bottom:0}
+.explain-icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;
+              justify-content:center;font-size:15px;flex-shrink:0;margin-top:1px}
+.ei-bull{background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.2)}
+.ei-bear{background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.2)}
+.ei-neu{background:rgba(100,116,139,.15);border:1px solid rgba(100,116,139,.2)}
+.explain-text{flex:1}
+.explain-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+               margin-bottom:3px}
+.el-bull{color:#34d399}.el-bear{color:#f87171}.el-neu{color:#94a3b8}
+.explain-detail{font-size:13px;color:#c8d4e8;line-height:1.55}
+.explain-val{font-weight:700;color:#f1f5f9}
+.explain-reasons{margin-top:16px;padding-top:14px;border-top:1px solid #1e2d45}
+.explain-reasons-title{font-size:11px;font-weight:700;text-transform:uppercase;
+                        letter-spacing:.5px;color:#4d6380;margin-bottom:8px}
+.explain-reason{font-size:12px;color:#8898b8;padding:5px 0;border-bottom:1px solid rgba(30,45,69,.5);
+                line-height:1.45}
+.explain-reason:last-child{border-bottom:none}
+body.light .explain-box{background:#fff;border-color:#e2e8f0}
+body.light .explain-hdr{background:#f8fafc;border-bottom-color:#e2e8f0}
+body.light .explain-sym{color:#0f172a}
+body.light .explain-score{border-bottom-color:#e2e8f0;color:#475569}
+body.light .explain-score strong{color:#1e293b}
+body.light .explain-detail{color:#374151}
+body.light .explain-val{color:#0f172a}
+body.light .explain-reasons{border-top-color:#e2e8f0}
+body.light .explain-reason{color:#64748b;border-bottom-color:#f1f5f9}
+body.light .explain-close{border-color:#e2e8f0;color:#64748b}
 </style>
 </head>
 <body>
@@ -1659,6 +2284,20 @@ body.light .news-meta{color:#94a3b8}
     <div class="chart-body">
       <div id="chart-plotly" style="height:540px"></div>
     </div>
+  </div>
+</div>
+
+<!-- Explain Trade modal -->
+<div class="explain-modal" id="explain-modal" onclick="if(event.target===this)closeExplain()">
+  <div class="explain-box">
+    <div class="explain-hdr">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="explain-sym" id="explain-sym">—</span>
+        <span class="pill" id="explain-pill">—</span>
+      </div>
+      <button class="explain-close" onclick="closeExplain()">✕ Close</button>
+    </div>
+    <div class="explain-body" id="explain-body"></div>
   </div>
 </div>
 
@@ -1695,6 +2334,8 @@ body.light .news-meta{color:#94a3b8}
     <button class="btn-rescan" id="btn-rescan" onclick="rescan()">Re-scan</button>
     <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
     <button class="btn-refresh" onclick="window.location='/stats'" style="background:#1e3a5f;color:#93c5fd">Stats</button>
+    <button class="btn-refresh" onclick="window.location='/journal'" style="background:#1a3020;color:#6ee7b7;border:1px solid #14532d">Journal</button>
+    <button class="btn-refresh" onclick="window.location='/settings'" style="background:#1c1a30;color:#c4b5fd;border:1px solid #4c1d95">Settings</button>
     {% if auth %}<a href="/logout" style="padding:7px 14px;border-radius:6px;background:#7f1d1d;color:#fca5a5;font-size:12px;font-weight:600;text-decoration:none;border:1px solid #991b1b;white-space:nowrap">Logout</a>{% endif %}
   </div>
 </header>
@@ -1819,9 +2460,9 @@ body.light .news-meta{color:#94a3b8}
     </div>
     <div class="tbl-wrap"><table>
       <thead><tr>
-        <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="z-col">Z-Score</th><th class="vol-col">Volume</th>
+        <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="z-col">Z-Score</th><th class="vol-col">Volume</th><th></th>
       </tr></thead>
-      <tbody id="sig-body"><tr><td colspan="8" class="empty">No data yet — click Refresh</td></tr></tbody>
+      <tbody id="sig-body"><tr><td colspan="9" class="empty">No data yet — click Refresh</td></tr></tbody>
     </table></div>
   </div>
 
@@ -2012,7 +2653,7 @@ function applyState(s) {
   document.getElementById('sig-count').textContent = s.signals.length;
   const sb = document.getElementById('sig-body');
   if (!s.signals.length) {
-    sb.innerHTML = '<tr><td colspan="8" class="empty">No signals — click Refresh</td></tr>';
+    sb.innerHTML = '<tr><td colspan="9" class="empty">No signals — click Refresh</td></tr>';
   } else {
     sb.innerHTML = s.signals.map(r => {
       const barPct = Math.round(Math.abs(r.score) * 100);
@@ -2082,6 +2723,7 @@ function applyState(s) {
         <td>${r.rsi != null ? fmt(r.rsi, 1) : '—'}</td>
         <td class="z-col" style="color:${zCol};${zBold}">${zStr}</td>
         <td class="vol-col" style="color:${vrCol};${vrBold}">${vrStr}</td>
+        <td><button onclick="explainSignal('${r.symbol}')" style="padding:4px 10px;font-size:11px;font-weight:600;background:rgba(59,130,246,.12);color:#93c5fd;border:1px solid rgba(59,130,246,.25);border-radius:5px;cursor:pointer;white-space:nowrap;min-height:unset" title="Explain this signal in plain English">Explain</button></td>
       </tr>`;
     }).join('');
   }
@@ -2524,6 +3166,219 @@ function closeChart() {
   if (window.Plotly) Plotly.purge('chart-plotly');
 }
 
+// ── Explain Trade modal ───────────────────────────────────────────────────────
+function explainSignal(sym) {
+  const s = window._state;
+  if (!s) return;
+  const r = (s.signals || []).find(x => x.symbol === sym);
+  if (!r) return;
+
+  // helpers
+  const fmtN = (v, d=1) => v == null ? null : Number(v).toFixed(d);
+  const pct   = v => v == null ? null : (v * 100).toFixed(1) + '%';
+
+  const items = [];
+
+  // ── RSI ──────────────────────────────────────────────────────────────────
+  if (r.rsi != null) {
+    const v = r.rsi;
+    let tone, label, detail;
+    if (v < 30) {
+      tone = 'bull'; label = 'Oversold (Bullish)';
+      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — below 30 signals oversold territory. The stock may be undervalued and due for a bounce.`;
+    } else if (v < 45) {
+      tone = 'bull'; label = 'Mildly Oversold';
+      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — below 45, leaning oversold. Selling pressure is easing.`;
+    } else if (v < 55) {
+      tone = 'neu'; label = 'Neutral';
+      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — in the neutral zone, no strong directional bias.`;
+    } else if (v < 70) {
+      tone = 'bear'; label = 'Mildly Overbought';
+      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — above 55, leaning overbought. Buying momentum is strong but watch for a pullback.`;
+    } else {
+      tone = 'bear'; label = 'Overbought (Bearish)';
+      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — above 70 signals overbought territory. The stock may be due for a correction.`;
+    }
+    items.push({icon: tone === 'bull' ? '📊' : tone === 'bear' ? '📊' : '📊', tone, label, detail});
+  }
+
+  // ── MACD ──────────────────────────────────────────────────────────────────
+  if (r.macd_hist != null) {
+    const h = r.macd_hist, hp = r.macd_hist_prev;
+    let tone, label, detail;
+    const crossed = hp != null && ((h > 0 && hp <= 0) || (h < 0 && hp >= 0));
+    if (h > 0 && crossed) {
+      tone = 'bull'; label = 'MACD Bullish Crossover';
+      detail = `MACD histogram just crossed above zero — a fresh bullish signal indicating momentum is turning upward.`;
+    } else if (h > 0 && hp != null && h > hp) {
+      tone = 'bull'; label = 'MACD Bullish & Strengthening';
+      detail = `MACD histogram is <span class="explain-val">positive and rising</span> — bullish momentum is building.`;
+    } else if (h > 0) {
+      tone = 'bull'; label = 'MACD Bullish (Fading)';
+      detail = `MACD histogram is positive but <span class="explain-val">declining</span> — bullish momentum exists but may be weakening.`;
+    } else if (h < 0 && crossed) {
+      tone = 'bear'; label = 'MACD Bearish Crossover';
+      detail = `MACD histogram just crossed below zero — a fresh bearish signal indicating momentum is turning downward.`;
+    } else if (h < 0 && hp != null && h < hp) {
+      tone = 'bear'; label = 'MACD Bearish & Strengthening';
+      detail = `MACD histogram is <span class="explain-val">negative and falling</span> — bearish momentum is building.`;
+    } else {
+      tone = 'bear'; label = 'MACD Bearish (Recovering)';
+      detail = `MACD histogram is negative but <span class="explain-val">recovering</span> — bearish momentum may be easing.`;
+    }
+    items.push({icon: '📈', tone, label, detail});
+  }
+
+  // ── EMA Trend ──────────────────────────────────────────────────────────────
+  if (r.ema_fast != null && r.ema_slow != null) {
+    const ef = r.ema_fast, es = r.ema_slow;
+    const spread = ((ef - es) / es * 100).toFixed(2);
+    const tone = ef > es ? 'bull' : 'bear';
+    const label = ef > es ? 'EMA Uptrend' : 'EMA Downtrend';
+    const detail = ef > es
+      ? `Fast EMA (<span class="explain-val">$${fmtN(ef,2)}</span>) is above slow EMA (<span class="explain-val">$${fmtN(es,2)}</span>) — the stock is in a short-term <strong>uptrend</strong> (spread ${spread}%).`
+      : `Fast EMA (<span class="explain-val">$${fmtN(ef,2)}</span>) is below slow EMA (<span class="explain-val">$${fmtN(es,2)}</span>) — the stock is in a short-term <strong>downtrend</strong> (spread ${spread}%).`;
+    items.push({icon: '📉', tone, label, detail});
+  }
+
+  // ── Bollinger Bands ────────────────────────────────────────────────────────
+  if (r.bb_upper != null && r.bb_lower != null && r.price) {
+    const p = r.price, bu = r.bb_upper, bl = r.bb_lower;
+    let tone, label, detail;
+    if (p < bl) {
+      tone = 'bull'; label = 'Below Lower Bollinger Band';
+      detail = `Price <span class="explain-val">$${fmtN(p,2)}</span> is below the lower band (<span class="explain-val">$${fmtN(bl,2)}</span>) — statistically oversold. Mean-reversion setups often appear here.`;
+    } else if (p > bu) {
+      tone = 'bear'; label = 'Above Upper Bollinger Band';
+      detail = `Price <span class="explain-val">$${fmtN(p,2)}</span> is above the upper band (<span class="explain-val">$${fmtN(bu,2)}</span>) — statistically overbought. The stock is extended above its normal range.`;
+    } else {
+      const pos = Math.round((p - bl) / (bu - bl) * 100);
+      tone = 'neu'; label = 'Within Bollinger Bands';
+      detail = `Price is within the bands at <span class="explain-val">${pos}%</span> of the range (lower <span class="explain-val">$${fmtN(bl,2)}</span> → upper <span class="explain-val">$${fmtN(bu,2)}</span>). Normal trading range.`;
+    }
+    items.push({icon: '〰️', tone, label, detail});
+  }
+
+  // ── Z-score ────────────────────────────────────────────────────────────────
+  if (r.z_score != null) {
+    const z = r.z_score;
+    let tone, label, detail;
+    if (z <= -2) {
+      tone = 'bull'; label = 'Deeply Oversold (Z-Score)';
+      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is more than 2 standard deviations below its 20-day mean. Strong mean-reversion candidate.`;
+    } else if (z <= -1) {
+      tone = 'bull'; label = 'Below Average (Z-Score)';
+      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is below its recent average, a mild mean-reversion opportunity.`;
+    } else if (z < 1) {
+      tone = 'neu'; label = 'Near Average (Z-Score)';
+      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is close to its 20-day average. No strong mean-reversion signal.`;
+    } else if (z < 2) {
+      tone = 'bear'; label = 'Above Average (Z-Score)';
+      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is above its recent average. Mild overextension.`;
+    } else {
+      tone = 'bear'; label = 'Significantly Extended (Z-Score)';
+      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is more than 2 standard deviations above its 20-day mean. May be overextended.`;
+    }
+    items.push({icon: '📐', tone, label, detail});
+  }
+
+  // ── Momentum (ROC) ─────────────────────────────────────────────────────────
+  if (r.roc_10 != null) {
+    const roc = r.roc_10;
+    let tone, label, detail;
+    if (roc > 0.08) {
+      tone = 'bull'; label = 'Strong Upward Momentum';
+      detail = `Price is up <span class="explain-val">${pct(roc)}</span> over the last 10 days — strong bullish momentum.`;
+    } else if (roc > 0.02) {
+      tone = 'bull'; label = 'Mild Upward Momentum';
+      detail = `Price is up <span class="explain-val">${pct(roc)}</span> over the last 10 days — positive but modest momentum.`;
+    } else if (roc > -0.02) {
+      tone = 'neu'; label = 'Flat Momentum';
+      detail = `Price has moved <span class="explain-val">${pct(roc)}</span> over the last 10 days — essentially flat, no directional momentum.`;
+    } else if (roc > -0.08) {
+      tone = 'bear'; label = 'Mild Downward Momentum';
+      detail = `Price is down <span class="explain-val">${pct(roc)}</span> over the last 10 days — moderate selling pressure.`;
+    } else {
+      tone = 'bear'; label = 'Strong Downward Momentum';
+      detail = `Price is down <span class="explain-val">${pct(roc)}</span> over the last 10 days — heavy selling pressure.`;
+    }
+    items.push({icon: '🚀', tone, label, detail});
+  }
+
+  // ── StochRSI ───────────────────────────────────────────────────────────────
+  if (r.stoch_rsi != null) {
+    const sr = r.stoch_rsi;
+    let tone, label, detail;
+    if (sr < 20) {
+      tone = 'bull'; label = 'StochRSI Oversold';
+      detail = `StochRSI is <span class="explain-val">${fmtN(sr)}</span> — deeply oversold momentum reading. Historically a precursor to short-term bounces.`;
+    } else if (sr > 80) {
+      tone = 'bear'; label = 'StochRSI Overbought';
+      detail = `StochRSI is <span class="explain-val">${fmtN(sr)}</span> — deeply overbought momentum reading. Pullbacks are more common at these levels.`;
+    } else {
+      tone = 'neu'; label = 'StochRSI Neutral';
+      detail = `StochRSI is <span class="explain-val">${fmtN(sr)}</span> — in the neutral 20–80 range, no extreme momentum signal.`;
+    }
+    items.push({icon: '⚡', tone, label, detail});
+  }
+
+  // ── Volume ─────────────────────────────────────────────────────────────────
+  if (r.volume_ratio != null) {
+    const vr = r.volume_ratio;
+    let tone, label, detail;
+    if (vr >= 3) {
+      tone = 'bull'; label = 'Exceptional Volume';
+      detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> its average volume — unusually high activity often signals institutional interest or a major catalyst.`;
+    } else if (vr >= 2) {
+      tone = 'bull'; label = 'High Volume';
+      detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> its average volume — elevated participation lends conviction to the current move.`;
+    } else if (vr >= 1.2) {
+      tone = 'neu'; label = 'Above-Average Volume';
+      detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> its average volume — slightly elevated, adds modest confirmation.`;
+    } else {
+      tone = 'neu'; label = 'Normal Volume';
+      detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> average — normal volume. The signal lacks volume confirmation.`;
+    }
+    items.push({icon: '📦', tone, label, detail});
+  }
+
+  // ── Build HTML ─────────────────────────────────────────────────────────────
+  const scoreOut10 = (Math.abs(r.score) * 10).toFixed(1);
+  const scoreHtml = `<div class="explain-score">
+    Overall composite score: <strong>${r.score >= 0 ? '+' : ''}${r.score} / ±1.0</strong>
+    &nbsp;·&nbsp; Confidence: <strong>${Math.round(r.confidence * 100)}%</strong>
+    ${r.ml_mult != null ? `&nbsp;·&nbsp; ML rank multiplier: <strong>${r.ml_mult.toFixed(2)}×</strong>` : ''}
+  </div>`;
+
+  const itemsHtml = items.map(it => `
+    <div class="explain-item">
+      <div class="explain-icon ei-${it.tone}">${it.icon}</div>
+      <div class="explain-text">
+        <div class="explain-label el-${it.tone}">${it.label}</div>
+        <div class="explain-detail">${it.detail}</div>
+      </div>
+    </div>`).join('');
+
+  const reasonsHtml = r.reasons && r.reasons.length
+    ? `<div class="explain-reasons">
+        <div class="explain-reasons-title">Algorithm signal reasons</div>
+        ${r.reasons.map(re => `<div class="explain-reason">· ${re}</div>`).join('')}
+       </div>`
+    : '';
+
+  // Update modal
+  document.getElementById('explain-sym').textContent = sym;
+  const pill = document.getElementById('explain-pill');
+  pill.className = `pill pill-${r.action}`;
+  pill.textContent = r.action + ' SIGNAL';
+  document.getElementById('explain-body').innerHTML = scoreHtml + itemsHtml + reasonsHtml;
+  document.getElementById('explain-modal').classList.add('active');
+}
+
+function closeExplain() {
+  document.getElementById('explain-modal').classList.remove('active');
+}
+
 // ── Stock search & personal watchlist ────────────────────────────────────────
 async function searchStock() {
   const input = document.getElementById('search-input');
@@ -2817,6 +3672,875 @@ function renderChart(d) {
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
+</script>
+</body>
+</html>"""
+
+
+LEADERBOARD_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Performance Leaderboard — NYSE Trading Engine</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#07090f;--surface:#0d1220;--surface2:#121a2e;
+  --border:#1a2540;--border2:#223060;
+  --accent:#2563eb;--accent2:#3b82f6;
+  --green:#10b981;--green2:#34d399;
+  --red:#ef4444;--red2:#f87171;
+  --amber:#f59e0b;
+  --text:#eaf0fb;--text2:#8898b8;--text3:#4a5a78;
+}
+body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;
+     -webkit-font-smoothing:antialiased;min-height:100vh}
+a{color:inherit;text-decoration:none}
+/* Nav */
+nav{display:flex;align-items:center;justify-content:space-between;padding:0 40px;height:60px;
+    background:rgba(7,9,15,.96);border-bottom:1px solid var(--border);
+    position:sticky;top:0;z-index:20;backdrop-filter:blur(16px)}
+.nav-brand{display:flex;align-items:center;gap:10px}
+.nav-dot{width:8px;height:8px;background:var(--accent2);border-radius:50%;box-shadow:0 0 10px var(--accent2)}
+.nav-name{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
+.nav-right{display:flex;align-items:center;gap:10px}
+.btn-nav{padding:7px 18px;border-radius:7px;background:var(--accent);color:#fff;
+         font-size:13px;font-weight:700;text-decoration:none;transition:all .15s}
+.btn-nav:hover{background:var(--accent2)}
+.btn-nav-ghost{padding:7px 16px;border-radius:7px;border:1px solid var(--border);
+               color:var(--text2);font-size:13px;font-weight:600;text-decoration:none;transition:all .15s}
+.btn-nav-ghost:hover{border-color:var(--accent2);color:var(--text)}
+/* Page layout */
+.page{max-width:1100px;margin:0 auto;padding:48px 24px 80px}
+/* Header */
+.lb-header{text-align:center;margin-bottom:52px}
+.lb-eyebrow{display:inline-flex;align-items:center;gap:7px;padding:5px 14px;border-radius:99px;
+            background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.25);
+            font-size:11px;font-weight:700;color:var(--green2);letter-spacing:.6px;
+            text-transform:uppercase;margin-bottom:20px}
+.lb-eyebrow-dot{width:6px;height:6px;background:var(--green2);border-radius:50%;
+                box-shadow:0 0 6px var(--green2)}
+.lb-title{font-size:clamp(28px,4vw,42px);font-weight:800;letter-spacing:-1.5px;margin-bottom:10px}
+.lb-sub{font-size:15px;color:var(--text2);max-width:480px;margin:0 auto}
+/* Stats grid */
+.stats-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:40px}
+@media(max-width:640px){.stats-grid{grid-template-columns:repeat(2,1fr)}}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:22px 20px}
+.sc-label{font-size:11px;font-weight:700;color:var(--text3);letter-spacing:.5px;
+          text-transform:uppercase;margin-bottom:8px}
+.sc-value{font-size:28px;font-weight:800;letter-spacing:-1px;line-height:1}
+.sc-sub{font-size:12px;color:var(--text2);margin-top:4px}
+.sc-pos{color:var(--green2)}
+.sc-neg{color:var(--red2)}
+.sc-neu{color:var(--text)}
+.sc-blue{color:var(--accent2)}
+/* Chart */
+.chart-wrap{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+            padding:24px;margin-bottom:40px}
+.chart-title{font-size:14px;font-weight:700;color:var(--text2);margin-bottom:20px;
+             letter-spacing:.3px;text-transform:uppercase;font-size:11px}
+.chart-canvas-wrap{position:relative;height:240px}
+.chart-empty{display:flex;align-items:center;justify-content:center;height:180px;
+             color:var(--text3);font-size:14px}
+/* Trades table */
+.trades-wrap{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+             overflow:hidden;margin-bottom:32px}
+.trades-hdr{padding:16px 20px;font-size:11px;font-weight:700;color:var(--text2);
+            background:var(--surface2);border-bottom:1px solid var(--border);
+            letter-spacing:.5px;text-transform:uppercase}
+table{width:100%;border-collapse:collapse}
+th{padding:11px 16px;font-size:11px;font-weight:700;color:var(--text3);
+   text-align:left;border-bottom:1px solid var(--border);letter-spacing:.4px;text-transform:uppercase}
+td{padding:12px 16px;font-size:13px;border-bottom:1px solid rgba(26,37,64,.45);color:var(--text2)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(18,26,46,.6)}
+.badge{display:inline-block;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.4px}
+.badge-buy{background:rgba(16,185,129,.15);color:var(--green2);border:1px solid rgba(16,185,129,.3)}
+.badge-sell{background:rgba(239,68,68,.12);color:var(--red2);border:1px solid rgba(239,68,68,.25)}
+.pnl-pos{color:var(--green2);font-weight:700}
+.pnl-neg{color:var(--red2);font-weight:700}
+.sym{color:var(--text);font-weight:700}
+.empty-row td{text-align:center;color:var(--text3);padding:32px;border-bottom:none}
+/* Disclaimer */
+.disclaimer{background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.2);
+            border-radius:10px;padding:16px 20px;font-size:12px;color:#92693b;
+            line-height:1.6;text-align:center}
+.disc-icon{font-size:16px;margin-right:6px}
+/* Loading */
+.loading{text-align:center;padding:60px 0;color:var(--text3);font-size:14px}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-brand">
+    <div class="nav-dot"></div>
+    <span class="nav-name">NYSE Trading Engine</span>
+  </div>
+  <div class="nav-right">
+    <a href="/" class="btn-nav-ghost">Home</a>
+    <a href="/login" class="btn-nav">Dashboard &rarr;</a>
+  </div>
+</nav>
+
+<div class="page">
+  <div class="lb-header">
+    <div class="lb-eyebrow"><span class="lb-eyebrow-dot"></span>Live Track Record</div>
+    <div class="lb-title">Performance Leaderboard</div>
+    <div class="lb-sub">Real-time results from the paper trading engine. Updated after every completed trade.</div>
+  </div>
+
+  <div id="loading" class="loading">Loading performance data…</div>
+
+  <div id="content" style="display:none">
+    <!-- Stats -->
+    <div class="stats-grid" id="stats-grid"></div>
+
+    <!-- Chart -->
+    <div class="chart-wrap">
+      <div class="chart-title">Cumulative Returns Over Time (%)</div>
+      <div class="chart-canvas-wrap" id="chart-wrap">
+        <canvas id="perf-chart"></canvas>
+      </div>
+    </div>
+
+    <!-- Trades table -->
+    <div class="trades-wrap">
+      <div class="trades-hdr">Last 20 Completed Trades</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Ticker</th>
+            <th>Action</th>
+            <th>Entry Price</th>
+            <th>Exit Price</th>
+            <th>Hold (days)</th>
+            <th>P&amp;L %</th>
+          </tr>
+        </thead>
+        <tbody id="trades-body"></tbody>
+      </table>
+    </div>
+
+    <!-- Disclaimer -->
+    <div class="disclaimer">
+      <span class="disc-icon">&#9888;</span>
+      <strong>Past performance does not guarantee future results.</strong>
+      This is a paper trading account for demonstration purposes only. All trades are simulated using real market prices but no real money is at risk. Not financial advice.
+    </div>
+  </div>
+</div>
+
+<script>
+function fmt(v, dec=2) {
+  if (v == null) return "—";
+  const s = v > 0 ? "+" : "";
+  return s + v.toFixed(dec) + "%";
+}
+function fmtDays(d) {
+  if (d == null) return "—";
+  if (d === 0) return "< 1d";
+  return d + "d";
+}
+function fmtPrice(v) {
+  if (v == null) return "—";
+  return "$" + v.toFixed(2);
+}
+function fmtDate(s) {
+  if (!s) return "—";
+  return s.slice(0, 10);
+}
+
+async function load() {
+  try {
+    const res  = await fetch("/api/leaderboard");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error);
+    render(data);
+  } catch(e) {
+    document.getElementById("loading").textContent = "Unable to load data: " + e.message;
+  }
+}
+
+function render({ stats, trades, chart }) {
+  document.getElementById("loading").style.display = "none";
+  document.getElementById("content").style.display = "block";
+  renderStats(stats);
+  renderChart(chart);
+  renderTrades(trades);
+}
+
+function renderStats(s) {
+  const hasTrades = s.total_trades > 0;
+  const totalRetClass = !hasTrades ? "sc-neu" : s.total_return_pct >= 0 ? "sc-pos" : "sc-neg";
+  const cards = [
+    { label:"Total Return", value: hasTrades ? fmt(s.total_return_pct) : "—", cls: totalRetClass, sub: "Cumulative trade returns" },
+    { label:"Win Rate",     value: hasTrades ? s.win_rate + "%" : "—", cls: "sc-blue", sub: `${s.winners || 0} wins / ${s.total_trades} trades` },
+    { label:"Total Trades", value: s.total_trades, cls: "sc-neu", sub: "Completed buy-sell cycles" },
+    { label:"Best Trade",   value: hasTrades ? fmt(s.best_trade_pct) : "—", cls: "sc-pos", sub: s.best_symbol || "" },
+    { label:"Worst Trade",  value: hasTrades ? fmt(s.worst_trade_pct) : "—", cls: "sc-neg", sub: s.worst_symbol || "" },
+    { label:"Avg Hold",     value: hasTrades && s.avg_hold_days != null ? fmtDays(s.avg_hold_days) : "—", cls: "sc-neu", sub: "Average days per trade" },
+  ];
+  document.getElementById("stats-grid").innerHTML = cards.map(c =>
+    `<div class="stat-card">
+      <div class="sc-label">${c.label}</div>
+      <div class="sc-value ${c.cls}">${c.value}</div>
+      <div class="sc-sub">${c.sub}</div>
+    </div>`
+  ).join("");
+}
+
+function renderChart(pts) {
+  if (!pts || pts.length === 0) {
+    document.getElementById("chart-wrap").innerHTML =
+      '<div class="chart-empty">No completed trades yet — chart will appear here.</div>';
+    return;
+  }
+  const labels = pts.map(p => p.ts);
+  const values = pts.map(p => p.value);
+  const color  = values[values.length - 1] >= 0 ? "#10b981" : "#ef4444";
+  new Chart(document.getElementById("perf-chart"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        borderColor: color,
+        borderWidth: 2,
+        pointRadius: pts.length < 40 ? 3 : 0,
+        pointHoverRadius: 5,
+        pointBackgroundColor: color,
+        fill: true,
+        backgroundColor: (ctx) => {
+          const g = ctx.chart.ctx.createLinearGradient(0, 0, 0, ctx.chart.height);
+          g.addColorStop(0, color + "26");
+          g.addColorStop(1, color + "04");
+          return g;
+        },
+        tension: 0.3,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => (ctx.parsed.y >= 0 ? "+" : "") + ctx.parsed.y.toFixed(2) + "%",
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color: "#4a5a78", maxTicksLimit: 8, font: { size: 11 } }, grid: { color: "#1a254010" } },
+        y: {
+          ticks: { color: "#4a5a78", font: { size: 11 }, callback: v => v + "%" },
+          grid: { color: "#1a2540" },
+        },
+      },
+    },
+  });
+}
+
+function renderTrades(trades) {
+  const tbody = document.getElementById("trades-body");
+  if (!trades || trades.length === 0) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No completed trades yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.map(t => {
+    const pnlClass = t.pnl_pct >= 0 ? "pnl-pos" : "pnl-neg";
+    const sign = t.pnl_pct >= 0 ? "+" : "";
+    return `<tr>
+      <td>${fmtDate(t.date)}</td>
+      <td class="sym">${t.symbol}</td>
+      <td><span class="badge badge-sell">SELL</span></td>
+      <td>${fmtPrice(t.entry_price)}</td>
+      <td>${fmtPrice(t.exit_price)}</td>
+      <td>${fmtDays(t.hold_days)}</td>
+      <td class="${pnlClass}">${sign}${t.pnl_pct.toFixed(2)}%</td>
+    </tr>`;
+  }).join("");
+}
+
+load();
+</script>
+</body>
+</html>"""
+
+
+SETTINGS_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Settings — NYSE Trading Engine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#07090f;--surface:#0d1220;--surface2:#121a2e;
+  --border:#1a2540;--border2:#223060;
+  --accent:#2563eb;--accent2:#3b82f6;
+  --green:#10b981;--amber:#f59e0b;
+  --text:#eaf0fb;--text2:#8898b8;--text3:#4a5a78;
+}
+body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;
+     -webkit-font-smoothing:antialiased;min-height:100vh}
+a{color:inherit;text-decoration:none}
+/* Nav */
+nav{display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:56px;
+    background:rgba(13,18,32,.98);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
+.nav-left{display:flex;align-items:center;gap:18px}
+.nav-logo{font-size:14px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
+.nav-dot{width:7px;height:7px;background:var(--accent2);border-radius:50%;box-shadow:0 0 8px var(--accent2)}
+.nav-link{font-size:13px;color:var(--text2);padding:5px 10px;border-radius:6px;transition:all .15s}
+.nav-link:hover{background:var(--surface2);color:var(--text)}
+.nav-link.active{background:var(--surface2);color:var(--text)}
+.btn-logout{padding:6px 14px;border-radius:6px;background:#7f1d1d;color:#fca5a5;font-size:12px;
+            font-weight:600;border:1px solid #991b1b}
+/* Page */
+.page{max-width:860px;margin:0 auto;padding:48px 24px}
+.page-title{font-size:26px;font-weight:700;letter-spacing:-.5px;margin-bottom:6px}
+.page-sub{font-size:14px;color:var(--text2);margin-bottom:40px}
+/* Profile cards */
+.profiles{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:40px}
+@media(max-width:640px){.profiles{grid-template-columns:1fr}}
+.profile-card{background:var(--surface);border:2px solid var(--border);border-radius:14px;
+              padding:26px 24px;cursor:pointer;transition:all .2s;position:relative;user-select:none}
+.profile-card:hover{border-color:var(--border2);background:var(--surface2);transform:translateY(-2px)}
+.profile-card.selected{border-color:var(--card-color,var(--accent));
+                        box-shadow:0 0 0 1px var(--card-color,var(--accent)),
+                                   0 0 24px color-mix(in srgb,var(--card-color,var(--accent)) 20%,transparent)}
+.profile-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+              font-size:22px;margin-bottom:18px;background:color-mix(in srgb,var(--card-color,var(--accent)) 15%,transparent)}
+.profile-name{font-size:17px;font-weight:700;margin-bottom:6px;color:var(--text)}
+.profile-tagline{font-size:12px;color:var(--text2);margin-bottom:18px;line-height:1.5}
+.profile-params{display:flex;flex-direction:column;gap:7px}
+.param-row{display:flex;justify-content:space-between;align-items:center;font-size:12px}
+.param-label{color:var(--text3)}
+.param-val{color:var(--text2);font-weight:600}
+.selected-badge{position:absolute;top:14px;right:14px;background:var(--card-color,var(--accent));
+                color:#fff;font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;
+                letter-spacing:.5px;display:none}
+.profile-card.selected .selected-badge{display:block}
+/* Save button */
+.save-row{display:flex;align-items:center;gap:14px;margin-bottom:40px}
+.btn-save{padding:11px 32px;background:var(--accent);color:#fff;border:none;border-radius:8px;
+          font-size:14px;font-weight:700;cursor:pointer;transition:all .15s}
+.btn-save:hover{background:var(--accent2)}
+.btn-save:disabled{opacity:.5;cursor:default}
+.save-msg{font-size:13px;color:var(--green);display:none}
+/* Detail table */
+.detail-wrap{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.detail-hdr{padding:14px 20px;font-size:13px;font-weight:700;color:var(--text2);
+            background:var(--surface2);border-bottom:1px solid var(--border);letter-spacing:.4px}
+.detail-table{width:100%;border-collapse:collapse}
+.detail-table th,.detail-table td{padding:11px 20px;font-size:13px;text-align:left}
+.detail-table th{color:var(--text3);font-weight:600;border-bottom:1px solid var(--border)}
+.detail-table td{border-bottom:1px solid rgba(26,37,64,.5)}
+.detail-table tr:last-child td{border-bottom:none}
+.detail-table td:last-child{text-align:right;font-weight:600;color:var(--text)}
+td.diff-up{color:#6ee7b7}
+td.diff-dn{color:#f87171}
+/* Email section */
+.section-title{font-size:18px;font-weight:700;margin:40px 0 6px;letter-spacing:-.3px}
+.section-sub{font-size:13px;color:var(--text2);margin-bottom:20px}
+.email-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px;
+            display:flex;align-items:center;justify-content:space-between;gap:16px}
+.email-info{flex:1}
+.email-title{font-size:15px;font-weight:700;margin-bottom:4px}
+.email-desc{font-size:12px;color:var(--text2);line-height:1.5}
+.email-unconfigured{font-size:12px;color:#f59e0b;margin-top:8px;padding:8px 12px;
+                     background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);
+                     border-radius:6px;display:inline-flex;align-items:center;gap:6px}
+/* Toggle switch */
+.toggle-wrap{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.toggle-label{font-size:12px;color:var(--text2);min-width:36px;text-align:right}
+.toggle{position:relative;width:48px;height:26px;flex-shrink:0}
+.toggle input{opacity:0;width:0;height:0;position:absolute}
+.toggle-slider{position:absolute;inset:0;background:#1a2540;border-radius:26px;
+               cursor:pointer;transition:background .2s}
+.toggle-slider:before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;
+                       background:#4a5a78;border-radius:50%;transition:all .2s}
+.toggle input:checked ~ .toggle-slider{background:#10b981}
+.toggle input:checked ~ .toggle-slider:before{transform:translateX(22px);background:#fff}
+.toggle input:disabled ~ .toggle-slider{opacity:.4;cursor:not-allowed}
+</style>
+</head>
+<body>
+<nav>
+  <div class="nav-left">
+    <div class="nav-dot"></div>
+    <span class="nav-logo">NYSE Engine</span>
+    <a href="/dashboard" class="nav-link">Dashboard</a>
+    <a href="/journal" class="nav-link">Journal</a>
+    <a href="/settings" class="nav-link active">Settings</a>
+  </div>
+  <div>
+    <a href="/logout" class="btn-logout">Logout</a>
+  </div>
+</nav>
+
+<div class="page">
+  <div class="page-title">Settings</div>
+  <div class="page-sub">Choose your risk profile. Changes apply immediately to the live trading engine.</div>
+
+  <div class="profiles" id="profiles">
+    <!-- Rendered by JS -->
+  </div>
+
+  <div class="save-row">
+    <button class="btn-save" id="btn-save" onclick="saveProfile()">Save Profile</button>
+    <span class="save-msg" id="save-msg">&#10003; Saved successfully</span>
+  </div>
+
+  <div class="detail-wrap">
+    <div class="detail-hdr">PROFILE COMPARISON</div>
+    <table class="detail-table">
+      <thead>
+        <tr>
+          <th>Parameter</th>
+          <th>Conservative</th>
+          <th>Moderate</th>
+          <th>Aggressive</th>
+        </tr>
+      </thead>
+      <tbody id="detail-body">
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Email Notifications -->
+  <div class="section-title">Notifications</div>
+  <div class="section-sub">Get an email whenever a trade is executed with the ticker, action, price, score, and a plain-English explanation.</div>
+  <div class="email-card" id="email-card">
+    <div class="email-info">
+      <div class="email-title">Email Notifications</div>
+      <div class="email-desc">Sends a trade alert to <strong id="notify-addr">{{ notify_email or "NOTIFY_EMAIL" }}</strong> when a BUY or SELL is executed.</div>
+      {% if not email_configured %}
+      <div class="email-unconfigured">
+        &#9888; Add <code>EMAIL_HOST</code>, <code>EMAIL_PORT</code>, <code>EMAIL_USER</code>, <code>EMAIL_PASSWORD</code>, and <code>NOTIFY_EMAIL</code> environment variables to enable notifications.
+      </div>
+      {% endif %}
+    </div>
+    <div class="toggle-wrap">
+      <span class="toggle-label" id="email-state-label">{{ "ON" if email_active else "OFF" }}</span>
+      <label class="toggle">
+        <input type="checkbox" id="email-toggle"
+               {% if email_active %}checked{% endif %}
+               {% if not email_configured %}disabled{% endif %}
+               onchange="toggleEmail(this.checked)">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+  </div>
+</div>
+
+<script>
+const PROFILES = {{ profiles_json }};
+let selected = "{{ current_profile }}";
+
+const PARAM_LABELS = {
+  max_position_pct:    "Max position size",
+  min_position_pct:    "Min position size",
+  max_open_positions:  "Max open positions",
+  stop_loss_pct:       "Stop-loss",
+  take_profit_pct:     "Take-profit",
+  trailing_stop_pct:   "Trailing stop",
+  daily_loss_limit_pct:"Daily loss limit",
+  buy_threshold:       "Buy threshold (score)",
+  sell_threshold:      "Sell threshold (score)",
+};
+
+const ICONS = { conservative: "🛡️", moderate: "⚖️", aggressive: "🚀" };
+
+function pct(v) {
+  if (typeof v === "number" && Math.abs(v) < 10) return (v * 100).toFixed(0) + "%";
+  return v;
+}
+
+function renderCards() {
+  const container = document.getElementById("profiles");
+  container.innerHTML = "";
+  for (const [key, prof] of Object.entries(PROFILES)) {
+    const card = document.createElement("div");
+    card.className = "profile-card" + (key === selected ? " selected" : "");
+    card.style.setProperty("--card-color", prof.color);
+    const overrides = prof.overrides;
+    card.innerHTML = `
+      <span class="selected-badge">ACTIVE</span>
+      <div class="profile-icon">${ICONS[key] || "📊"}</div>
+      <div class="profile-name">${prof.label}</div>
+      <div class="profile-tagline">${prof.tagline}</div>
+      <div class="profile-params">
+        <div class="param-row"><span class="param-label">Max position</span><span class="param-val">${pct(overrides.max_position_pct)}</span></div>
+        <div class="param-row"><span class="param-label">Stop-loss</span><span class="param-val">${pct(overrides.stop_loss_pct)}</span></div>
+        <div class="param-row"><span class="param-label">Take-profit</span><span class="param-val">${pct(overrides.take_profit_pct)}</span></div>
+        <div class="param-row"><span class="param-label">Buy threshold</span><span class="param-val">${overrides.buy_threshold}</span></div>
+        <div class="param-row"><span class="param-label">Max positions</span><span class="param-val">${overrides.max_open_positions}</span></div>
+      </div>`;
+    card.onclick = () => selectProfile(key);
+    container.appendChild(card);
+  }
+}
+
+function renderDetail() {
+  const tbody = document.getElementById("detail-body");
+  const keys = Object.keys(PARAM_LABELS);
+  const vals = { conservative: PROFILES.conservative.overrides, moderate: PROFILES.moderate.overrides, aggressive: PROFILES.aggressive.overrides };
+  tbody.innerHTML = keys.map(k => {
+    const c = vals.conservative[k], m = vals.moderate[k], a = vals.aggressive[k];
+    return `<tr>
+      <td>${PARAM_LABELS[k]}</td>
+      <td class="diff-up">${pct(c)}</td>
+      <td>${pct(m)}</td>
+      <td class="diff-dn">${pct(a)}</td>
+    </tr>`;
+  }).join("");
+}
+
+function selectProfile(key) {
+  selected = key;
+  renderCards();
+  document.getElementById("save-msg").style.display = "none";
+}
+
+async function saveProfile() {
+  const btn = document.getElementById("btn-save");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ risk_profile: selected }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      const msg = document.getElementById("save-msg");
+      msg.style.display = "inline";
+      setTimeout(() => { msg.style.display = "none"; }, 3000);
+    } else {
+      alert("Save failed: " + (data.error || "unknown error"));
+    }
+  } catch(e) {
+    alert("Network error: " + e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Save Profile";
+  }
+}
+
+async function toggleEmail(enabled) {
+  const toggle = document.getElementById("email-toggle");
+  const label  = document.getElementById("email-state-label");
+  toggle.disabled = true;
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email_notifications: enabled }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      label.textContent = enabled ? "ON" : "OFF";
+    } else {
+      toggle.checked = !enabled;
+      label.textContent = !enabled ? "ON" : "OFF";
+      alert(data.error || "Failed to save setting");
+    }
+  } catch(e) {
+    toggle.checked = !enabled;
+    label.textContent = !enabled ? "ON" : "OFF";
+    alert("Network error: " + e);
+  } finally {
+    toggle.disabled = false;
+  }
+}
+
+renderCards();
+renderDetail();
+</script>
+</body>
+</html>"""
+
+
+JOURNAL_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Trade Journal — NYSE Trading Engine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#07090f;--surface:#0d1220;--surface2:#121a2e;
+  --border:#1a2540;--border2:#223060;
+  --accent:#2563eb;--accent2:#3b82f6;
+  --green:#10b981;--green2:#34d399;
+  --red:#ef4444;--red2:#f87171;
+  --text:#eaf0fb;--text2:#8898b8;--text3:#4a5a78;
+}
+body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;
+     font-size:14px;min-height:100vh;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+/* ── Header ── */
+header{background:rgba(7,9,15,.95);border-bottom:1px solid var(--border);
+       padding:0 24px;height:56px;display:flex;align-items:center;gap:14px;
+       position:sticky;top:0;z-index:10;backdrop-filter:blur(12px)}
+.logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px;display:flex;align-items:center;gap:7px}
+.logo::before{content:'';display:inline-block;width:7px;height:7px;background:var(--accent2);
+              border-radius:50%;box-shadow:0 0 8px var(--accent2)}
+.hdr-right{margin-left:auto;display:flex;align-items:center;gap:8px}
+.btn-back{background:var(--surface2);color:var(--text2);border:1px solid var(--border);
+          border-radius:6px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer}
+.btn-back:hover{border-color:var(--accent2);color:var(--text)}
+/* ── Layout ── */
+main{padding:24px;max-width:1400px;margin:0 auto}
+/* ── Stat cards ── */
+.stat-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px}
+.sc{background:var(--surface);border-radius:10px;padding:16px 18px;border:1px solid var(--border);
+    box-shadow:0 2px 8px rgba(0,0,0,.3)}
+.sc-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px;font-weight:500}
+.sc-val{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.5px}
+.sc-sub{font-size:11px;color:var(--text3);margin-top:3px}
+.pos{color:var(--green2)}.neg{color:var(--red2)}.neu{color:var(--text)}
+/* ── Panel ── */
+.panel{background:var(--surface);border-radius:12px;border:1px solid var(--border);
+       overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+.panel-hdr{padding:13px 18px;display:flex;align-items:center;justify-content:space-between;
+           border-bottom:1px solid var(--border);background:var(--surface2);flex-wrap:wrap;gap:8px}
+.panel-title{font-weight:700;font-size:12px;color:var(--text2);text-transform:uppercase;
+             letter-spacing:.6px;display:flex;align-items:center;gap:8px}
+.count-badge{background:var(--surface);color:var(--text3);border:1px solid var(--border);
+             border-radius:99px;padding:1px 9px;font-size:11px}
+.filter-wrap{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.filter-btn{padding:4px 12px;border-radius:99px;border:1px solid var(--border);background:none;
+            color:var(--text3);font-size:11px;font-weight:600;cursor:pointer}
+.filter-btn.active{background:var(--surface2);color:var(--text);border-color:var(--border2)}
+.filter-btn:hover{border-color:var(--accent2);color:var(--text)}
+/* ── Table ── */
+.tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;min-width:700px}
+th{padding:10px 14px;text-align:left;font-size:10px;color:var(--text3);text-transform:uppercase;
+   letter-spacing:.6px;border-bottom:1px solid var(--border);white-space:nowrap;font-weight:700;
+   background:var(--surface2)}
+td{padding:11px 14px;border-bottom:1px solid rgba(26,37,64,.6);font-variant-numeric:tabular-nums;
+   font-size:13px;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(18,26,46,.8)}
+/* ── Pills ── */
+.pill{display:inline-block;padding:3px 9px;border-radius:4px;font-weight:700;font-size:11px;letter-spacing:.3px}
+.pill-BUY{background:rgba(16,185,129,.15);color:var(--green2);border:1px solid rgba(16,185,129,.2)}
+.pill-SELL{background:rgba(239,68,68,.15);color:var(--red2);border:1px solid rgba(239,68,68,.2)}
+/* ── Score chip ── */
+.score-chip{display:inline-block;padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px;
+            font-variant-numeric:tabular-nums}
+/* ── Reason cell ── */
+.reason-cell{max-width:280px;white-space:normal;line-height:1.4;color:var(--text2)}
+/* ── P&L cell ── */
+.pnl-pos{color:var(--green2);font-weight:700}
+.pnl-neg{color:var(--red2);font-weight:700}
+/* ── Empty state ── */
+.empty{padding:48px;text-align:center;color:var(--text3)}
+.empty-icon{font-size:36px;margin-bottom:12px;opacity:.5}
+.empty-msg{font-size:15px;font-weight:600;color:var(--text2);margin-bottom:6px}
+.empty-sub{font-size:13px;color:var(--text3)}
+/* ── RSI mini badge ── */
+.rsi-badge{font-size:11px;color:var(--text3);margin-left:4px}
+/* ── Loading ── */
+.loading{padding:40px;text-align:center;color:var(--text3);font-size:13px}
+/* ── Responsive ── */
+@media(max-width:900px){main{padding:16px}}
+@media(max-width:600px){
+  header{padding:0 14px}
+  main{padding:10px 12px}
+  .stat-row{grid-template-columns:1fr 1fr}
+  .sc{padding:12px}
+  .sc-val{font-size:18px}
+  td,th{padding:8px 10px;font-size:12px}
+  .reason-cell{max-width:160px}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Trade Journal</div>
+  <div class="hdr-right">
+    <button class="btn-back" onclick="window.location='/stats'">Stats</button>
+    <button class="btn-back" onclick="window.location='/dashboard'">← Dashboard</button>
+  </div>
+</header>
+
+<main>
+  <!-- ── Summary stats ── -->
+  <div class="stat-row" id="stat-row">
+    <div class="sc"><div class="sc-label">Total Trades</div><div class="sc-val neu" id="s-total">—</div></div>
+    <div class="sc"><div class="sc-label">Win Rate</div><div class="sc-val" id="s-winrate">—</div><div class="sc-sub">on closed positions</div></div>
+    <div class="sc"><div class="sc-label">Avg Gain</div><div class="sc-val pos" id="s-gain">—</div></div>
+    <div class="sc"><div class="sc-label">Avg Loss</div><div class="sc-val neg" id="s-loss">—</div></div>
+    <div class="sc"><div class="sc-label">Total Realized P&amp;L</div><div class="sc-val" id="s-pnl">—</div></div>
+    <div class="sc"><div class="sc-label">Best Trade</div><div class="sc-val pos" id="s-best">—</div></div>
+    <div class="sc"><div class="sc-label">Worst Trade</div><div class="sc-val neg" id="s-worst">—</div></div>
+  </div>
+
+  <!-- ── Journal table ── -->
+  <div class="panel">
+    <div class="panel-hdr">
+      <div class="panel-title">
+        All Trades
+        <span class="count-badge" id="tbl-count">0</span>
+      </div>
+      <div class="filter-wrap">
+        <button class="filter-btn active" onclick="setFilter('ALL',this)">All</button>
+        <button class="filter-btn" onclick="setFilter('BUY',this)">BUY</button>
+        <button class="filter-btn" onclick="setFilter('SELL',this)">SELL</button>
+      </div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Date &amp; Time</th>
+            <th>Ticker</th>
+            <th>Action</th>
+            <th>Qty</th>
+            <th>Price</th>
+            <th>Score</th>
+            <th>RSI</th>
+            <th>P&amp;L</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody id="jrn-body">
+          <tr><td colspan="9" class="loading">Loading journal…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+let _allEntries = [];
+let _filter = 'ALL';
+
+function fmt$(v, dec=2) {
+  if (v == null) return '—';
+  return '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits:dec, maximumFractionDigits:dec});
+}
+function fmtNum(v, dec=2) {
+  if (v == null) return '—';
+  return Number(v).toFixed(dec);
+}
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const date = d.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'});
+  const time = d.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', hour12:true});
+  return `<span style="color:#eaf0fb;font-weight:600">${date}</span><br>
+          <span style="color:#4a5a78;font-size:11px">${time}</span>`;
+}
+
+function setFilter(f, btn) {
+  _filter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTable();
+}
+
+function renderTable() {
+  const rows = _filter === 'ALL' ? _allEntries
+             : _allEntries.filter(e => e.action === _filter);
+  document.getElementById('tbl-count').textContent = rows.length;
+  const tbody = document.getElementById('jrn-body');
+  if (!rows.length) {
+    const msg = _filter === 'ALL' ? 'No trades logged yet — run a cycle to start trading'
+              : `No ${_filter} trades in the journal`;
+    tbody.innerHTML = `<tr><td colspan="9">
+      <div class="empty">
+        <div class="empty-icon">📋</div>
+        <div class="empty-msg">No trades yet</div>
+        <div class="empty-sub">${msg}</div>
+      </div>
+    </td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(e => {
+    const ind   = e.indicators || {};
+    const score = ind.score != null ? ind.score : null;
+    const rsi   = ind.rsi   != null ? ind.rsi   : null;
+    const isBuy = e.action === 'BUY';
+
+    // Score chip colour
+    const scoreCol = score == null ? '#4a5a78'
+                   : score >= 0.3 ? '#34d399' : score <= -0.3 ? '#f87171' : '#8898b8';
+    const scoreStr = score != null ? `${score >= 0 ? '+' : ''}${fmtNum(score, 3)}` : '—';
+
+    // RSI colour hint
+    const rsiCol = rsi == null ? '#4a5a78'
+                 : rsi < 30 ? '#34d399' : rsi > 70 ? '#f87171' : '#8898b8';
+
+    // P&L
+    let pnlHtml = '<span style="color:#4a5a78">—</span>';
+    if (e.pnl != null) {
+      const sign = e.pnl >= 0 ? '+' : '';
+      const cls  = e.pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+      const pct  = e.pnl_pct != null ? ` (${sign}${(e.pnl_pct*100).toFixed(2)}%)` : '';
+      pnlHtml = `<span class="${cls}">${sign}${fmt$(e.pnl)}${pct}</span>`;
+    }
+
+    // Reason — truncate long strings with title tooltip
+    const reason = e.reason || '—';
+    const reasonDisplay = reason.length > 60 ? reason.slice(0, 58) + '…' : reason;
+
+    return `<tr>
+      <td>${fmtDate(e.timestamp)}</td>
+      <td><span style="font-weight:700;color:#f1f5f9;font-size:14px;letter-spacing:-.3px">${e.symbol}</span></td>
+      <td><span class="pill pill-${e.action}">${e.action}</span></td>
+      <td style="font-weight:600">${e.shares != null ? fmtNum(e.shares, 0) : '—'}</td>
+      <td style="font-weight:600">${fmt$(e.price)}</td>
+      <td><span class="score-chip" style="color:${scoreCol};background:${scoreCol}22;border:1px solid ${scoreCol}33">${scoreStr}</span></td>
+      <td style="color:${rsiCol}">${rsi != null ? fmtNum(rsi, 1) : '—'}</td>
+      <td>${pnlHtml}</td>
+      <td class="reason-cell" title="${reason.replace(/"/g,'&quot;')}">${reasonDisplay}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderStats(stats) {
+  const dollar = v => v == null ? '—' : (v >= 0 ? '+' : '') + '$' + Math.abs(v).toFixed(2);
+  document.getElementById('s-total').textContent   = stats.total_trades ?? '—';
+  const wr = document.getElementById('s-winrate');
+  wr.textContent = stats.win_rate != null ? stats.win_rate + '%' : '—';
+  wr.className   = 'sc-val ' + (stats.win_rate >= 50 ? 'pos' : stats.win_rate < 50 ? 'neg' : 'neu');
+  document.getElementById('s-gain').textContent    = stats.avg_gain != null ? '+$' + stats.avg_gain.toFixed(2) : '—';
+  document.getElementById('s-loss').textContent    = stats.avg_loss != null ? '$' + stats.avg_loss.toFixed(2) : '—';
+  const pnlEl = document.getElementById('s-pnl');
+  pnlEl.textContent = dollar(stats.total_pnl);
+  pnlEl.className   = 'sc-val ' + (stats.total_pnl > 0 ? 'pos' : stats.total_pnl < 0 ? 'neg' : 'neu');
+  document.getElementById('s-best').textContent    = stats.best_trade  != null ? '+$' + stats.best_trade.toFixed(2) : '—';
+  document.getElementById('s-worst').textContent   = stats.worst_trade != null ? '$' + stats.worst_trade.toFixed(2) : '—';
+}
+
+async function loadJournal() {
+  try {
+    const res  = await fetch('/api/journal');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'API error');
+    // most recent first
+    _allEntries = (data.entries || []).slice().reverse();
+    renderTable();
+    if (data.stats) renderStats(data.stats);
+  } catch (err) {
+    document.getElementById('jrn-body').innerHTML =
+      `<tr><td colspan="9" class="loading" style="color:#f87171">Failed to load: ${err.message}</td></tr>`;
+  }
+}
+
+loadJournal();
 </script>
 </body>
 </html>"""
@@ -3506,9 +5230,45 @@ if ('serviceWorker' in navigator) {
 </html>"""
 
 
+@app.route("/leaderboard")
+def leaderboard_page():
+    resp = make_response(render_template_string(LEADERBOARD_HTML))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return resp
+
+
 @app.route("/stats")
 def stats_page():
     return render_template_string(STATS_HTML)
+
+
+@app.route("/journal")
+def journal_page():
+    if _AUTH_ENABLED and not session.get("logged_in"):
+        return redirect("/login?next=/journal")
+    resp = make_response(render_template_string(JOURNAL_HTML))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return resp
+
+
+@app.route("/settings")
+def settings_page():
+    if _AUTH_ENABLED and not session.get("logged_in"):
+        return redirect("/login?next=/settings")
+    profiles_json = json.dumps({
+        k: {"label": v["label"], "tagline": v["tagline"], "color": v["color"], "overrides": v["overrides"]}
+        for k, v in RISK_PROFILES.items()
+    })
+    resp = make_response(render_template_string(
+        SETTINGS_HTML,
+        profiles_json=profiles_json,
+        current_profile=_current_profile,
+        email_configured=_engine.emailer.is_configured,
+        email_active=_engine.emailer.active,
+        notify_email=_engine.emailer.notify_email,
+    ))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return resp
 
 
 @app.route("/")

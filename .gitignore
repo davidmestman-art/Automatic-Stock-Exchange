@@ -3,3 +3,11 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+# Runtime data — never commit
+users.db
+*.db
+trade_journal.jsonl
+journals/
+user_settings.json
+backtest_report.json
+personal_watchlist.json
