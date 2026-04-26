@@ -50,6 +50,8 @@ class Backtester:
         for symbol in symbols:
             df = fetcher.fetch(symbol)
             if df is not None and not df.empty:
+                if df.index.tz is not None:
+                    df.index = df.index.tz_localize(None)
                 all_data[symbol] = df
 
         if not all_data:
