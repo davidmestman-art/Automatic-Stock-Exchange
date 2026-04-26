@@ -21,6 +21,7 @@ from flask import (
     request, session, url_for,
 )
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import generate_password_hash
 
 from config import config
 from src.data.extended_hours import ExtendedHoursMonitor
@@ -224,6 +225,7 @@ footer{border-top:1px solid var(--border);padding:32px 48px;display:flex;align-i
     {% if logged_in %}
     <a href="/dashboard" class="btn-solid">Open Dashboard &rarr;</a>
     {% else %}
+    <a href="/register" class="btn-outline">Sign Up Free</a>
     <a href="/login" class="btn-solid">Log In</a>
     {% endif %}
   </div>
@@ -358,6 +360,7 @@ footer{border-top:1px solid var(--border);padding:32px 48px;display:flex;align-i
   <div class="footer-links">
     <a href="/dashboard" class="footer-link">Dashboard</a>
     <a href="/login" class="footer-link">Login</a>
+    <a href="/register" class="footer-link">Sign Up</a>
     <a href="/leaderboard" class="footer-link">Leaderboard</a>
     <a href="/stats" class="footer-link">Stats</a>
   </div>
@@ -408,6 +411,73 @@ input::placeholder{color:#475569}
            placeholder="Enter password" required/>
     <button class="btn" type="submit">Sign In</button>
   </form>
+  <p style="text-align:center;margin-top:20px;font-size:13px;color:#475569">
+    Don't have an account?
+    <a href="/register" style="color:#38bdf8;font-weight:600">Sign up free</a>
+  </p>
+</div>
+</body>
+</html>"""
+
+# ── Registration page template ─────────────────────────────────────────────────
+_REGISTER_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Sign Up — NYSE Trading Engine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;
+     min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#1e293b;border:1px solid #334155;border-radius:14px;
+      padding:40px 36px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+.logo{font-size:18px;font-weight:700;color:#38bdf8;margin-bottom:4px;text-align:center}
+.sub{font-size:12px;color:#475569;text-align:center;margin-bottom:28px}
+label{display:block;font-size:11px;color:#64748b;text-transform:uppercase;
+      letter-spacing:.5px;margin-bottom:5px}
+input{width:100%;background:#0f172a;border:1px solid #334155;border-radius:7px;
+      padding:10px 13px;color:#e2e8f0;font-size:14px;margin-bottom:16px;outline:none}
+input:focus{border-color:#0ea5e9}
+input::placeholder{color:#475569}
+.btn{width:100%;background:#0ea5e9;color:#fff;border:none;border-radius:7px;
+     padding:11px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
+.btn:hover{opacity:.88}
+.error{background:#7f1d1d;color:#fca5a5;border-radius:7px;padding:9px 12px;
+       font-size:13px;margin-bottom:16px;text-align:center}
+.field-error{font-size:11px;color:#f87171;margin-top:-12px;margin-bottom:12px}
+.hint{font-size:11px;color:#475569;margin-top:-12px;margin-bottom:14px}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">NYSE Trading Engine</div>
+  <div class="sub">Create a free account to get started</div>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="post" novalidate>
+    <label>Username</label>
+    <input name="username" type="text" autocomplete="username"
+           placeholder="Choose a username" value="{{ username or '' }}"
+           autofocus required minlength="3" maxlength="40"/>
+    {% if errors.username %}<div class="field-error">{{ errors.username }}</div>{% endif %}
+    <label>Email</label>
+    <input name="email" type="email" autocomplete="email"
+           placeholder="you@example.com" value="{{ email or '' }}" required/>
+    {% if errors.email %}<div class="field-error">{{ errors.email }}</div>{% endif %}
+    <label>Password</label>
+    <input name="password" type="password" autocomplete="new-password"
+           placeholder="At least 8 characters" required minlength="8"/>
+    {% if errors.password %}<div class="field-error">{{ errors.password }}</div>{% endif %}
+    <label>Confirm Password</label>
+    <input name="confirm" type="password" autocomplete="new-password"
+           placeholder="Repeat your password" required/>
+    {% if errors.confirm %}<div class="field-error">{{ errors.confirm }}</div>{% endif %}
+    <button class="btn" type="submit">Create Account</button>
+  </form>
+  <p style="text-align:center;margin-top:20px;font-size:13px;color:#475569">
+    Already have an account?
+    <a href="/login" style="color:#38bdf8;font-weight:600">Sign in</a>
+  </p>
 </div>
 </body>
 </html>"""
@@ -434,8 +504,8 @@ logging.info(
 )
 
 # Routes exempt from auth — public pages and static assets
-_PUBLIC_ENDPOINTS = {"login", "logout", "home", "pwa_manifest", "pwa_icon", "service_worker",
-                     "leaderboard_page", "api_leaderboard"}
+_PUBLIC_ENDPOINTS = {"login", "logout", "register", "home", "pwa_manifest", "pwa_icon",
+                     "service_worker", "leaderboard_page", "api_leaderboard"}
 
 
 @app.before_request
@@ -490,6 +560,56 @@ def login():
 def logout():
     session.clear()
     return redirect("/")
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "GET":
+        return render_template_string(_REGISTER_HTML, errors={}, username="", email="")
+
+    username = request.form.get("username", "").strip()
+    email    = request.form.get("email", "").strip().lower()
+    password = request.form.get("password", "")
+    confirm  = request.form.get("confirm", "")
+
+    errors: dict = {}
+
+    if len(username) < 3:
+        errors["username"] = "Username must be at least 3 characters."
+    elif len(username) > 40:
+        errors["username"] = "Username must be 40 characters or fewer."
+    elif not username.replace("_", "").replace("-", "").isalnum():
+        errors["username"] = "Username may only contain letters, numbers, hyphens, and underscores."
+
+    if not email or "@" not in email:
+        errors["email"] = "Enter a valid email address."
+
+    if len(password) < 8:
+        errors["password"] = "Password must be at least 8 characters."
+
+    if password != confirm:
+        errors["confirm"] = "Passwords do not match."
+
+    if not errors:
+        with app.app_context():
+            if User.query.filter_by(username=username).first():
+                errors["username"] = "That username is already taken."
+            elif User.query.filter_by(email=email).first():
+                errors["email"] = "An account with that email already exists."
+
+    if errors:
+        return render_template_string(_REGISTER_HTML, errors=errors,
+                                      username=username, email=email)
+
+    user = User(
+        username=username,
+        email=email,
+        password_hash=generate_password_hash(password),
+    )
+    db.session.add(user)
+    db.session.commit()
+    logging.info("[REGISTER] New user: %r (%s)", username, email)
+    return redirect("/login")
 
 
 _lock = threading.Lock()
