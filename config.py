@@ -114,6 +114,9 @@ class TradingConfig:
     regime_size_mult_bear: float = 0.35
     regime_bear_min_score_mult: float = 1.8   # BEAR: only trade if score > threshold × mult
 
+    # ── Momentum signals ──────────────────────────────────────────────────────
+    use_momentum_signals: bool = True   # ROC + StochRSI component in signal scoring
+
     # ── ML signal ranking ─────────────────────────────────────────────────────
     use_ml_ranking: bool = True
     ml_min_samples: int = 20

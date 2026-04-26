@@ -34,6 +34,11 @@ class IndicatorValues:
     atr: Optional[float] = None            # 14-day ATR in dollars
     atr_pct: Optional[float] = None        # ATR as fraction of close price
 
+    # Momentum
+    roc_10: Optional[float] = None         # 10-day rate of change
+    roc_20: Optional[float] = None         # 20-day rate of change
+    stoch_rsi: Optional[float] = None      # Stochastic RSI [0, 100]
+
 
 class TechnicalIndicators:
     def __init__(
@@ -69,7 +74,9 @@ class TechnicalIndicators:
         vals.volume = float(volume.iloc[-1])
         vals.avg_volume = float(volume.rolling(20).mean().iloc[-1])
 
-        vals.rsi = self._rsi(close)
+        rsi_ser = self._rsi_series(close)
+        vals.rsi = float(rsi_ser.iloc[-1])
+        vals.stoch_rsi = self._stoch_rsi(rsi_ser)
 
         macd_line, signal_line, histogram = self._macd(close)
         vals.macd_line = float(macd_line.iloc[-1])
@@ -107,17 +114,29 @@ class TechnicalIndicators:
         vals.atr = float(atr_ser.iloc[-1])
         vals.atr_pct = float(vals.atr / vals.close) if vals.close else None
 
+        if len(close) > 11:
+            vals.roc_10 = float(close.iloc[-1] / close.iloc[-11] - 1)
+        if len(close) > 21:
+            vals.roc_20 = float(close.iloc[-1] / close.iloc[-21] - 1)
+
         return vals
 
-    def _rsi(self, close: pd.Series) -> float:
+    def _rsi_series(self, close: pd.Series) -> pd.Series:
         delta = close.diff()
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
         avg_gain = gain.ewm(com=self.rsi_period - 1, min_periods=self.rsi_period).mean()
         avg_loss = loss.ewm(com=self.rsi_period - 1, min_periods=self.rsi_period).mean()
         rs = avg_gain / avg_loss.replace(0, np.nan)
-        rsi = 100 - (100 / (1 + rs))
-        return float(rsi.iloc[-1])
+        return 100 - (100 / (1 + rs))
+
+    def _stoch_rsi(self, rsi_ser: pd.Series, period: int = 14) -> Optional[float]:
+        lo = rsi_ser.rolling(period).min()
+        hi = rsi_ser.rolling(period).max()
+        rng = (hi - lo).replace(0, np.nan)
+        stoch = (rsi_ser - lo) / rng * 100
+        val = stoch.iloc[-1]
+        return float(val) if not np.isnan(val) else None
 
     def _macd(self, close: pd.Series):
         ema_fast = close.ewm(span=self.macd_fast, adjust=False).mean()
