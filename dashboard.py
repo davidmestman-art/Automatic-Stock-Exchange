@@ -25,6 +25,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from config import config
 from src.data.extended_hours import ExtendedHoursMonitor
 from src.trading.engine import TradingEngine
+from src.utils.models import User, db
 from src.utils.sectors import get_sector, positions_by_sector
 
 CYCLE_INTERVAL = 60  # seconds between automatic trading cycles
@@ -41,6 +42,15 @@ app = Flask(__name__)
 # Tell Flask it's behind Railway's HTTPS reverse proxy so it reads
 # X-Forwarded-Proto/Host correctly — required for secure session cookies.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+# ── Database ──────────────────────────────────────────────────────────────────
+_DB_PATH = Path(__file__).resolve().parent / "users.db"
+app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{_DB_PATH}"
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+db.init_app(app)
+
+with app.app_context():
+    db.create_all()
 
 # ── Public landing page ───────────────────────────────────────────────────────
 _LANDING_HTML = """<!doctype html>
