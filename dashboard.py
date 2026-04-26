@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from flask import (
-    Flask, jsonify, redirect, render_template_string,
+    Flask, jsonify, make_response, redirect, render_template_string,
     request, session, url_for,
 )
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -28,6 +28,14 @@ from src.trading.engine import TradingEngine
 from src.utils.sectors import get_sector, positions_by_sector
 
 CYCLE_INTERVAL = 60  # seconds between automatic trading cycles
+
+# Configure logging at module level so it works under gunicorn too
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    stream=__import__("sys").stdout,
+    force=True,
+)
 
 app = Flask(__name__)
 # Tell Flask it's behind Railway's HTTPS reverse proxy so it reads
@@ -206,17 +214,44 @@ app.permanent_session_lifetime = timedelta(days=30)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
+logging.info(
+    "[AUTH] enabled=%s user=%r secret_key_set=%s",
+    _AUTH_ENABLED,
+    _DASH_USER or "(not set)",
+    bool(os.getenv("DASH_SECRET_KEY")),
+)
+
+# Routes exempt from auth — public pages and static assets
+_PUBLIC_ENDPOINTS = {"login", "logout", "home", "pwa_manifest", "pwa_icon", "service_worker"}
+
 
 @app.before_request
 def _require_login():
+    endpoint = request.endpoint or ""
+    path = request.path
+    logged_in = bool(session.get("logged_in"))
+
+    logging.info(
+        "[REQ] %s %s | endpoint=%s logged_in=%s auth_enabled=%s",
+        request.method, path, endpoint, logged_in, _AUTH_ENABLED,
+    )
+
     if not _AUTH_ENABLED:
+        logging.info("[AUTH] skipped — auth not enabled")
         return
-    if request.endpoint in ("login", "logout", "home"):
+
+    if endpoint in _PUBLIC_ENDPOINTS:
+        logging.info("[AUTH] allowed — public endpoint")
         return
-    if not session.get("logged_in"):
-        if request.path.startswith("/api/"):
+
+    if not logged_in:
+        if path.startswith("/api/"):
+            logging.info("[AUTH] → 401 JSON (api, not logged in)")
             return jsonify({"ok": False, "error": "Not authenticated"}), 401
-        return redirect(f"/login?next={request.path}")
+        logging.info("[AUTH] → redirect /login (not logged in)")
+        return redirect(f"/login?next={path}")
+
+    logging.info("[AUTH] allowed — logged in")
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -1258,21 +1293,26 @@ def pwa_icon(size):
 @app.route("/sw.js")
 def service_worker():
     from flask import Response
+    # nyse-v2: removed HTML caching — pages must always come from the network so
+    # auth redirects work correctly. Old 'nyse-v1' cache is deleted on activate.
     js = """
-const CACHE = 'nyse-v1';
-self.addEventListener('install', e =>
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(['/'])))
-);
+const CACHE = 'nyse-v2';
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', e => {
+  e.waitUntil(
+    caches.keys().then(keys =>
+      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+    ).then(() => self.clients.claim())
+  );
+});
 self.addEventListener('fetch', e => {
-  // Always use network for API calls; cache-first for the shell
+  // Network-only for HTML pages so auth redirects always work
+  if (e.request.mode === 'navigate') return;
+  // Network with offline fallback for API calls
   if (e.request.url.includes('/api/')) {
-    e.respondWith(fetch(e.request).catch(() => new Response('{}', {headers:{'Content-Type':'application/json'}})));
-  } else {
-    e.respondWith(
-      caches.match(e.request).then(r => r || fetch(e.request).then(res => {
-        return caches.open(CACHE).then(c => { c.put(e.request, res.clone()); return res; });
-      }))
-    );
+    e.respondWith(fetch(e.request).catch(() =>
+      new Response('{}', {headers: {'Content-Type': 'application/json'}})
+    ));
   }
 });
 """.strip()
@@ -3473,16 +3513,24 @@ def stats_page():
 
 @app.route("/")
 def home():
-    return render_template_string(
+    resp = make_response(render_template_string(
         _LANDING_HTML,
         auth=_AUTH_ENABLED,
         logged_in=bool(session.get("logged_in")) if _AUTH_ENABLED else True,
-    )
+    ))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return resp
 
 
 @app.route("/dashboard")
 def index():
-    return render_template_string(HTML, auth=_AUTH_ENABLED)
+    # Belt-and-suspenders: guard even if before_request is bypassed
+    if _AUTH_ENABLED and not session.get("logged_in"):
+        logging.warning("[AUTH] /dashboard hit without session — redirecting to login")
+        return redirect("/login?next=/dashboard")
+    resp = make_response(render_template_string(HTML, auth=_AUTH_ENABLED))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return resp
 
 
 if __name__ == "__main__":
