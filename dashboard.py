@@ -579,6 +579,7 @@ if _saved.get("risk_profile") in RISK_PROFILES:
     _apply_risk_profile(_saved["risk_profile"])
 else:
     _current_profile = "moderate"
+_engine.emailer.active = bool(_saved.get("email_notifications", False))
 
 # ── News feed cache ───────────────────────────────────────────────────────────
 _news_cache: dict = {}       # {symbol: {"items": [...], "fetched_at": datetime}}
@@ -1392,18 +1393,37 @@ def api_journal():
 def api_settings():
     global _current_profile
     if request.method == "GET":
-        return jsonify({"ok": True, "risk_profile": _current_profile, "profiles": {
-            k: {"label": v["label"], "tagline": v["tagline"], "color": v["color"], "overrides": v["overrides"]}
-            for k, v in RISK_PROFILES.items()
-        }})
+        return jsonify({
+            "ok": True,
+            "risk_profile": _current_profile,
+            "email_notifications": _engine.emailer.active,
+            "email_configured": _engine.emailer.is_configured,
+            "profiles": {
+                k: {"label": v["label"], "tagline": v["tagline"], "color": v["color"], "overrides": v["overrides"]}
+                for k, v in RISK_PROFILES.items()
+            },
+        })
     data = request.get_json(silent=True) or {}
-    name = data.get("risk_profile", "")
-    if not _apply_risk_profile(name):
-        return jsonify({"ok": False, "error": f"Unknown profile: {name}"}), 400
     saved = _load_user_settings()
-    saved["risk_profile"] = name
+    # Risk profile update
+    name = data.get("risk_profile", "")
+    if name:
+        if not _apply_risk_profile(name):
+            return jsonify({"ok": False, "error": f"Unknown profile: {name}"}), 400
+        saved["risk_profile"] = name
+    # Email notifications toggle
+    if "email_notifications" in data:
+        enabled = bool(data["email_notifications"])
+        if enabled and not _engine.emailer.is_configured:
+            return jsonify({"ok": False, "error": "Email not configured — set EMAIL_HOST, EMAIL_USER, EMAIL_PASSWORD, NOTIFY_EMAIL environment variables."}), 400
+        _engine.emailer.active = enabled
+        saved["email_notifications"] = enabled
     _save_user_settings(saved)
-    return jsonify({"ok": True, "risk_profile": name})
+    return jsonify({
+        "ok": True,
+        "risk_profile": _current_profile,
+        "email_notifications": _engine.emailer.active,
+    })
 
 
 @app.route("/api/news")
@@ -3490,6 +3510,29 @@ nav{display:flex;align-items:center;justify-content:space-between;padding:0 32px
 .detail-table td:last-child{text-align:right;font-weight:600;color:var(--text)}
 td.diff-up{color:#6ee7b7}
 td.diff-dn{color:#f87171}
+/* Email section */
+.section-title{font-size:18px;font-weight:700;margin:40px 0 6px;letter-spacing:-.3px}
+.section-sub{font-size:13px;color:var(--text2);margin-bottom:20px}
+.email-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px;
+            display:flex;align-items:center;justify-content:space-between;gap:16px}
+.email-info{flex:1}
+.email-title{font-size:15px;font-weight:700;margin-bottom:4px}
+.email-desc{font-size:12px;color:var(--text2);line-height:1.5}
+.email-unconfigured{font-size:12px;color:#f59e0b;margin-top:8px;padding:8px 12px;
+                     background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);
+                     border-radius:6px;display:inline-flex;align-items:center;gap:6px}
+/* Toggle switch */
+.toggle-wrap{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.toggle-label{font-size:12px;color:var(--text2);min-width:36px;text-align:right}
+.toggle{position:relative;width:48px;height:26px;flex-shrink:0}
+.toggle input{opacity:0;width:0;height:0;position:absolute}
+.toggle-slider{position:absolute;inset:0;background:#1a2540;border-radius:26px;
+               cursor:pointer;transition:background .2s}
+.toggle-slider:before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;
+                       background:#4a5a78;border-radius:50%;transition:all .2s}
+.toggle input:checked ~ .toggle-slider{background:#10b981}
+.toggle input:checked ~ .toggle-slider:before{transform:translateX(22px);background:#fff}
+.toggle input:disabled ~ .toggle-slider{opacity:.4;cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -3533,6 +3576,31 @@ td.diff-dn{color:#f87171}
       <tbody id="detail-body">
       </tbody>
     </table>
+  </div>
+
+  <!-- Email Notifications -->
+  <div class="section-title">Notifications</div>
+  <div class="section-sub">Get an email whenever a trade is executed with the ticker, action, price, score, and a plain-English explanation.</div>
+  <div class="email-card" id="email-card">
+    <div class="email-info">
+      <div class="email-title">Email Notifications</div>
+      <div class="email-desc">Sends a trade alert to <strong id="notify-addr">{{ notify_email or "NOTIFY_EMAIL" }}</strong> when a BUY or SELL is executed.</div>
+      {% if not email_configured %}
+      <div class="email-unconfigured">
+        &#9888; Add <code>EMAIL_HOST</code>, <code>EMAIL_PORT</code>, <code>EMAIL_USER</code>, <code>EMAIL_PASSWORD</code>, and <code>NOTIFY_EMAIL</code> environment variables to enable notifications.
+      </div>
+      {% endif %}
+    </div>
+    <div class="toggle-wrap">
+      <span class="toggle-label" id="email-state-label">{{ "ON" if email_active else "OFF" }}</span>
+      <label class="toggle">
+        <input type="checkbox" id="email-toggle"
+               {% if email_active %}checked{% endif %}
+               {% if not email_configured %}disabled{% endif %}
+               onchange="toggleEmail(this.checked)">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
   </div>
 </div>
 
@@ -3628,6 +3696,33 @@ async function saveProfile() {
   } finally {
     btn.disabled = false;
     btn.textContent = "Save Profile";
+  }
+}
+
+async function toggleEmail(enabled) {
+  const toggle = document.getElementById("email-toggle");
+  const label  = document.getElementById("email-state-label");
+  toggle.disabled = true;
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email_notifications: enabled }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      label.textContent = enabled ? "ON" : "OFF";
+    } else {
+      toggle.checked = !enabled;
+      label.textContent = !enabled ? "ON" : "OFF";
+      alert(data.error || "Failed to save setting");
+    }
+  } catch(e) {
+    toggle.checked = !enabled;
+    label.textContent = !enabled ? "ON" : "OFF";
+    alert("Network error: " + e);
+  } finally {
+    toggle.disabled = false;
   }
 }
 
@@ -4626,6 +4721,9 @@ def settings_page():
         SETTINGS_HTML,
         profiles_json=profiles_json,
         current_profile=_current_profile,
+        email_configured=_engine.emailer.is_configured,
+        email_active=_engine.emailer.active,
+        notify_email=_engine.emailer.notify_email,
     ))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp

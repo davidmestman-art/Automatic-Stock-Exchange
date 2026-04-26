@@ -8,6 +8,7 @@ from ..data.scanner import StockScanner
 from ..data.voo_monitor import VOOMonitor
 from ..signals.analyzer import SignalAnalyzer, SignalResult
 from ..signals.indicators import TechnicalIndicators
+from ..utils.emailer import TradeEmailer
 from ..utils.journal import TradeJournal
 from ..utils.notifications import Notifier
 from ..utils.sectors import sector_position_count
@@ -91,6 +92,7 @@ class TradingEngine:
             pushover_user=config.pushover_user,
         )
         self.journal = TradeJournal()
+        self.emailer = TradeEmailer.from_env()
 
         # Multi-timeframe analyzer (created lazily if enabled)
         self._mtf_analyzer = None
@@ -315,6 +317,15 @@ class TradingEngine:
                             reason=", ".join(signal.reasons[:2]),
                             indicators=ind_snap,
                         )
+                        self.emailer.send_trade(
+                            action="BUY",
+                            symbol=symbol,
+                            shares=rc.max_shares,
+                            price=current_price,
+                            score=signal.score,
+                            reasons=signal.reasons,
+                            indicators=ind_snap,
+                        )
                 else:
                     logger.debug(f"  Risk rejected {symbol}: {rc.reason}")
 
@@ -328,6 +339,7 @@ class TradingEngine:
                 )
                 if pos:
                     pnl = (current_price - pos.entry_price) * pos.shares
+                    pnl_pct = (current_price - pos.entry_price) / pos.entry_price
                     self.notifier.trade_sell(
                         symbol, pos.shares, current_price, pnl,
                         f"Signal: {', '.join(signal.reasons[:2])}"
@@ -340,7 +352,18 @@ class TradingEngine:
                         reason=f"Signal: {', '.join(signal.reasons[:2])}",
                         indicators=ind_snap,
                         pnl=pnl,
-                        pnl_pct=(current_price - pos.entry_price) / pos.entry_price,
+                        pnl_pct=pnl_pct,
+                    )
+                    self.emailer.send_trade(
+                        action="SELL",
+                        symbol=symbol,
+                        shares=pos.shares,
+                        price=current_price,
+                        score=signal.score,
+                        reasons=signal.reasons,
+                        indicators=ind_snap,
+                        pnl=pnl,
+                        pnl_pct=pnl_pct,
                     )
 
         self._log_summary(prices)
@@ -578,7 +601,8 @@ class TradingEngine:
             pos = self.portfolio.positions.get(symbol)
             self.executor.execute_sell(symbol, price, reason, self.portfolio)
             if pos:
-                pnl = (price - pos.entry_price) * pos.shares
+                pnl     = (price - pos.entry_price) * pos.shares
+                pnl_pct = (price - pos.entry_price) / pos.entry_price
                 self.notifier.trade_sell(symbol, pos.shares, price, pnl, reason)
                 self.journal.log(
                     action="SELL",
@@ -587,7 +611,17 @@ class TradingEngine:
                     price=price,
                     reason=reason,
                     pnl=pnl,
-                    pnl_pct=(price - pos.entry_price) / pos.entry_price,
+                    pnl_pct=pnl_pct,
+                )
+                self.emailer.send_trade(
+                    action="SELL",
+                    symbol=symbol,
+                    shares=pos.shares,
+                    price=price,
+                    score=0.0,
+                    reasons=[reason],
+                    pnl=pnl,
+                    pnl_pct=pnl_pct,
                 )
 
     def _log_summary(self, prices: Dict[str, float]) -> None:
