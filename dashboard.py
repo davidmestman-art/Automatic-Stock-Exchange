@@ -8,6 +8,7 @@ Then open http://localhost:8080
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 import traceback
@@ -15,7 +16,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from flask import Flask, jsonify, render_template_string, request
+from flask import (
+    Flask, jsonify, redirect, render_template_string,
+    request, session, url_for,
+)
 
 from config import config
 from src.data.extended_hours import ExtendedHoursMonitor
@@ -25,6 +29,98 @@ from src.utils.sectors import get_sector, positions_by_sector
 CYCLE_INTERVAL = 60  # seconds between automatic trading cycles
 
 app = Flask(__name__)
+
+# ── Login page template ────────────────────────────────────────────────────────
+_LOGIN_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Login — NYSE Trading Engine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;
+     min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#1e293b;border:1px solid #334155;border-radius:14px;
+      padding:40px 36px;width:100%;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+.logo{font-size:18px;font-weight:700;color:#38bdf8;margin-bottom:4px;text-align:center}
+.sub{font-size:12px;color:#475569;text-align:center;margin-bottom:28px}
+label{display:block;font-size:11px;color:#64748b;text-transform:uppercase;
+      letter-spacing:.5px;margin-bottom:5px}
+input{width:100%;background:#0f172a;border:1px solid #334155;border-radius:7px;
+      padding:10px 13px;color:#e2e8f0;font-size:14px;margin-bottom:16px;outline:none}
+input:focus{border-color:#0ea5e9}
+input::placeholder{color:#475569}
+.btn{width:100%;background:#0ea5e9;color:#fff;border:none;border-radius:7px;
+     padding:11px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
+.btn:hover{opacity:.88}
+.error{background:#7f1d1d;color:#fca5a5;border-radius:7px;padding:9px 12px;
+       font-size:13px;margin-bottom:16px;text-align:center}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">NYSE Trading Engine</div>
+  <div class="sub">Sign in to access your dashboard</div>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="post">
+    <label>Username</label>
+    <input name="username" type="text" autocomplete="username"
+           placeholder="Enter username" autofocus required/>
+    <label>Password</label>
+    <input name="password" type="password" autocomplete="current-password"
+           placeholder="Enter password" required/>
+    <button class="btn" type="submit">Sign In</button>
+  </form>
+</div>
+</body>
+</html>"""
+
+# ── Authentication ─────────────────────────────────────────────────────────────
+# Set DASH_USERNAME and DASH_PASSWORD in .env to enable login protection.
+# Leave both blank (default) to run without authentication.
+_DASH_USER = os.getenv("DASH_USERNAME", "")
+_DASH_PASS = os.getenv("DASH_PASSWORD", "")
+_AUTH_ENABLED = bool(_DASH_USER and _DASH_PASS)
+
+# Secret key signs session cookies. Set DASH_SECRET_KEY in .env for persistence
+# across restarts; otherwise a random key is generated (sessions reset on restart).
+app.secret_key = os.getenv("DASH_SECRET_KEY") or secrets.token_hex(32)
+app.permanent_session_lifetime = timedelta(days=30)
+
+
+@app.before_request
+def _require_login():
+    if not _AUTH_ENABLED:
+        return
+    if request.endpoint in ("login", "logout"):
+        return
+    if not session.get("logged_in"):
+        return redirect(f"/login?next={request.path}")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        user = request.form.get("username", "")
+        pw   = request.form.get("password", "")
+        user_ok = secrets.compare_digest(user, _DASH_USER)
+        pass_ok = secrets.compare_digest(pw,   _DASH_PASS)
+        if user_ok and pass_ok:
+            session.permanent = True
+            session["logged_in"] = True
+            return redirect(request.args.get("next") or "/")
+        error = "Invalid username or password."
+    return render_template_string(_LOGIN_HTML, error=error, auth=_AUTH_ENABLED)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
+
+
 _lock = threading.Lock()
 _engine = TradingEngine(config)
 _last_state: dict = {}
@@ -1436,6 +1532,7 @@ body.light .news-meta{color:#94a3b8}
     <button class="btn-rescan" id="btn-rescan" onclick="rescan()">Re-scan</button>
     <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
     <button class="btn-refresh" onclick="window.location='/stats'" style="background:#1e3a5f;color:#93c5fd">Stats</button>
+    {% if auth %}<a href="/logout" style="padding:7px 14px;border-radius:6px;background:#1e293b;color:#64748b;font-size:12px;font-weight:600;text-decoration:none;border:1px solid #334155">Sign out</a>{% endif %}
   </div>
 </header>
 
@@ -3253,7 +3350,7 @@ def stats_page():
 
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    return render_template_string(HTML, auth=_AUTH_ENABLED)
 
 
 if __name__ == "__main__":
