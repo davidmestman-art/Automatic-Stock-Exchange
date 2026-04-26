@@ -21,7 +21,7 @@ from flask import (
     request, session, url_for,
 )
 from werkzeug.middleware.proxy_fix import ProxyFix
-from werkzeug.security import generate_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from config import config
 from src.data.extended_hours import ExtendedHoursMonitor
@@ -537,22 +537,56 @@ def _require_login():
     logging.info("[AUTH] allowed — logged in")
 
 
+def _ensure_admin_in_db() -> None:
+    """Create the admin account in the DB from env vars if it doesn't exist yet."""
+    if not (_DASH_USER and _DASH_PASS):
+        return
+    with app.app_context():
+        if not User.query.filter_by(username=_DASH_USER).first():
+            admin = User(
+                username=_DASH_USER,
+                email=f"{_DASH_USER}@admin.local",
+                password_hash=generate_password_hash(_DASH_PASS),
+            )
+            db.session.add(admin)
+            db.session.commit()
+            logging.info("[AUTH] Admin account created in DB: %r", _DASH_USER)
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = None
     if request.method == "POST":
-        user = request.form.get("username", "")
-        pw   = request.form.get("password", "")
-        user_ok = secrets.compare_digest(user, _DASH_USER)
-        pass_ok = secrets.compare_digest(pw,   _DASH_PASS)
-        if user_ok and pass_ok:
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+
+        # ── Check env-var admin credentials first ─────────────────────────────
+        is_env_admin = (
+            _DASH_USER and _DASH_PASS
+            and secrets.compare_digest(username, _DASH_USER)
+            and secrets.compare_digest(password, _DASH_PASS)
+        )
+        if is_env_admin:
+            _ensure_admin_in_db()
+
+        # ── Look up user in database ──────────────────────────────────────────
+        db_user = User.query.filter_by(username=username).first()
+        authenticated = is_env_admin or (
+            db_user is not None and check_password_hash(db_user.password_hash, password)
+        )
+
+        if authenticated:
             session.permanent = True
             session["logged_in"] = True
             next_url = request.args.get("next", "/dashboard")
             if not next_url.startswith("/"):
                 next_url = "/dashboard"
+            logging.info("[AUTH] Login OK: %r", username)
             return redirect(next_url)
+
         error = "Invalid username or password."
+        logging.info("[AUTH] Login FAILED: %r", username)
+
     return render_template_string(_LOGIN_HTML, error=error, auth=_AUTH_ENABLED)
 
 
