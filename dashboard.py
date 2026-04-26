@@ -905,9 +905,11 @@ def api_search(symbol):
                 buy_threshold=config.buy_threshold,
                 sell_threshold=config.sell_threshold,
             ).analyze(ind)
-            rsi    = round(ind.rsi, 1) if ind.rsi is not None else None
-            score  = round(sig.score, 3)
-            action = sig.action
+            rsi      = round(ind.rsi, 1) if ind.rsi is not None else None
+            roc_10   = round(ind.roc_10 * 100, 2) if getattr(ind, "roc_10", None) is not None else None
+            stoch_rsi = round(ind.stoch_rsi, 1) if getattr(ind, "stoch_rsi", None) is not None else None
+            score    = round(sig.score, 3)
+            action   = sig.action
 
         info = {}
         price = None
@@ -921,17 +923,19 @@ def api_search(symbol):
             price = float(df["Close"].iloc[-1])
 
         return jsonify({
-            "ok":       True,
-            "symbol":   symbol,
-            "name":     info.get("longName") or info.get("shortName") or symbol,
-            "price":    round(float(price), 2) if price else None,
-            "sector":   info.get("sector") or get_sector(symbol) or "—",
-            "pe_ratio": round(float(info["trailingPE"]), 1) if info.get("trailingPE") else None,
+            "ok":        True,
+            "symbol":    symbol,
+            "name":      info.get("longName") or info.get("shortName") or symbol,
+            "price":     round(float(price), 2) if price else None,
+            "sector":    info.get("sector") or get_sector(symbol) or "—",
+            "pe_ratio":  round(float(info["trailingPE"]), 1) if info.get("trailingPE") else None,
             "market_cap": info.get("marketCap"),
-            "rsi":      rsi,
-            "score":    score,
-            "action":   action,
-            "pinned":   symbol in _personal_watchlist,
+            "rsi":       rsi,
+            "roc_10":    roc_10,
+            "stoch_rsi": stoch_rsi,
+            "score":     score,
+            "action":    action,
+            "pinned":    symbol in _personal_watchlist,
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -1464,29 +1468,6 @@ body.light .news-meta{color:#94a3b8}
     </div>
   </div>
 
-  <!-- Stock search & personal watchlist -->
-  <div class="panel grid1">
-    <div class="panel-title">Stock Search
-      <span style="font-size:11px;color:#475569;font-weight:400;margin-left:8px">type any ticker to see price, RSI, signal, and fundamentals</span>
-    </div>
-    <div class="search-bar">
-      <input type="text" id="search-input" placeholder="e.g. AAPL, TSLA, SPY…" maxlength="6"
-             oninput="this.value=this.value.toUpperCase()"
-             onkeydown="if(event.key==='Enter')searchStock()"/>
-      <button class="btn-search" onclick="searchStock()">Search</button>
-    </div>
-    <div id="search-result" style="display:none"></div>
-  </div>
-
-  <!-- Pinned personal watchlist -->
-  <div class="panel grid1" id="pinned-panel" style="display:none">
-    <div class="panel-title">⭐ Pinned Watchlist
-      <span id="pin-count" style="background:#334155;color:#94a3b8;border-radius:99px;padding:1px 8px;font-size:11px">0</span>
-      <span style="font-size:11px;color:#475569;margin-left:8px">persists between restarts</span>
-    </div>
-    <div class="pin-grid" id="pin-grid"></div>
-  </div>
-
   <!-- VOO 200-week MA monitor -->
   <div class="voo-panel" id="voo-panel">
     <div class="voo-header">
@@ -1505,6 +1486,31 @@ body.light .news-meta{color:#94a3b8}
     <div class="sector-chart-wrap">
       <div id="sector-pie-plot" style="height:280px"></div>
     </div>
+  </div>
+
+  <!-- Stock search — sits right above the Watchlist for easy discovery -->
+  <div class="panel grid1" id="search-panel">
+    <div class="panel-title" style="justify-content:space-between;flex-wrap:wrap;gap:6px">
+      <span>Stock Search &amp; Favorites</span>
+      <span style="font-size:11px;color:#475569;font-weight:400">type any ticker · see price, RSI, momentum, signal · pin to favorites</span>
+    </div>
+    <div class="search-bar">
+      <input type="text" id="search-input" placeholder="e.g. AAPL, TSLA, SPY…" maxlength="6"
+             oninput="this.value=this.value.toUpperCase()"
+             onkeydown="if(event.key==='Enter')searchStock()" autocomplete="off" spellcheck="false"/>
+      <button class="btn-search" onclick="searchStock()">Search</button>
+    </div>
+    <div id="search-result" style="display:none"></div>
+  </div>
+
+  <!-- Pinned personal watchlist — shown when at least one ticker is pinned -->
+  <div class="panel grid1" id="pinned-panel" style="display:none">
+    <div class="panel-title">
+      ⭐ Pinned Favorites
+      <span id="pin-count" style="background:#334155;color:#94a3b8;border-radius:99px;padding:1px 8px;font-size:11px">0</span>
+      <span style="font-size:11px;color:#475569;margin-left:8px">saved between restarts · search any ticker above to add</span>
+    </div>
+    <div class="pin-grid" id="pin-grid"></div>
   </div>
 
   <!-- watchlist scan -->
@@ -2257,11 +2263,15 @@ function _fmtCap(n) {
 
 function showSearchResult(d) {
   const el = document.getElementById('search-result');
-  const scoreStr = d.score != null ? (d.score >= 0 ? '+' : '') + d.score.toFixed(3) : '—';
-  const scoreCol = d.score > 0 ? '#4ade80' : d.score < 0 ? '#f87171' : '#94a3b8';
-  const pinBtn   = d.pinned
+  const scoreStr  = d.score != null ? (d.score >= 0 ? '+' : '') + d.score.toFixed(3) : '—';
+  const scoreCol  = d.score > 0 ? '#4ade80' : d.score < 0 ? '#f87171' : '#94a3b8';
+  const rocStr    = d.roc_10 != null ? (d.roc_10 >= 0 ? '+' : '') + d.roc_10.toFixed(2) + '%' : '—';
+  const rocCol    = d.roc_10 == null ? '#94a3b8' : d.roc_10 >= 2 ? '#4ade80' : d.roc_10 <= -2 ? '#f87171' : '#e2e8f0';
+  const srsiStr   = d.stoch_rsi != null ? d.stoch_rsi.toFixed(0) : '—';
+  const srsiCol   = d.stoch_rsi == null ? '#94a3b8' : d.stoch_rsi < 20 ? '#4ade80' : d.stoch_rsi > 80 ? '#f87171' : '#e2e8f0';
+  const pinBtn    = d.pinned
     ? `<button class="btn-pin btn-pin-rem" onclick="unpinStock('${d.symbol}')">✕ Unpin</button>`
-    : `<button class="btn-pin btn-pin-add" onclick="pinStock('${d.symbol}')">⭐ Pin to Watchlist</button>`;
+    : `<button class="btn-pin btn-pin-add" onclick="pinStock('${d.symbol}')">⭐ Pin</button>`;
   el.innerHTML = `<div class="search-result">
     <div class="sr-header">
       <span class="sr-name">${d.symbol}</span>
@@ -2272,6 +2282,8 @@ function showSearchResult(d) {
     <div class="sr-stats">
       <div class="sr-stat"><div class="sr-stat-label">Price</div><div class="sr-stat-value">${d.price != null ? '$'+fmt(d.price) : '—'}</div></div>
       <div class="sr-stat"><div class="sr-stat-label">RSI</div><div class="sr-stat-value">${d.rsi != null ? d.rsi : '—'}</div></div>
+      <div class="sr-stat"><div class="sr-stat-label">Momentum (10d)</div><div class="sr-stat-value" style="color:${rocCol}">${rocStr}</div></div>
+      <div class="sr-stat"><div class="sr-stat-label">StochRSI</div><div class="sr-stat-value" style="color:${srsiCol}">${srsiStr}</div></div>
       <div class="sr-stat"><div class="sr-stat-label">Score</div><div class="sr-stat-value" style="color:${scoreCol}">${scoreStr}</div></div>
       <div class="sr-stat"><div class="sr-stat-label">Sector</div><div class="sr-stat-value" style="font-size:13px">${d.sector||'—'}</div></div>
       <div class="sr-stat"><div class="sr-stat-label">P/E</div><div class="sr-stat-value">${d.pe_ratio != null ? d.pe_ratio : '—'}</div></div>
@@ -2326,6 +2338,8 @@ async function loadPinnedWatchlist() {
                    ? (item.change_pct >= 0 ? '+' : '') + item.change_pct.toFixed(2) + '%'
                    : '—';
       const act = item.action && item.action !== '—' ? item.action : 'HOLD';
+      const scoreStr = item.score != null ? (item.score >= 0 ? '+' : '') + item.score.toFixed(3) : null;
+      const scoreCol = item.score == null ? '#94a3b8' : item.score > 0 ? '#4ade80' : '#f87171';
       return `<div class="pin-card">
         <button class="pin-remove" onclick="unpinStock('${item.symbol}')" title="Unpin">✕</button>
         <div class="pin-sym">${item.symbol}</div>
@@ -2333,6 +2347,7 @@ async function loadPinnedWatchlist() {
         <div class="pin-change" style="color:${chgCol}">${chgStr}</div>
         <div style="margin-top:5px"><span class="pill pill-${act}" style="font-size:10px">${act}</span></div>
         ${item.rsi != null ? '<div class="pin-rsi">RSI '+item.rsi+'</div>' : ''}
+        ${scoreStr ? '<div class="pin-rsi" style="color:'+scoreCol+'">Score '+scoreStr+'</div>' : ''}
       </div>`;
     }).join('');
   } catch(e) {}
