@@ -1442,6 +1442,32 @@ body.light .news-meta{color:#94a3b8}
 <main>
   <div class="error-banner" id="err-banner"></div>
 
+  <!-- ══ Stock Search & Favorites — always first, impossible to miss ══ -->
+  <div class="panel grid1" id="search-panel" style="border:1px solid #0ea5e9;margin-bottom:14px">
+    <div class="panel-title" style="justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom-color:#0ea5e9">
+      <span style="color:#38bdf8">🔍 Stock Search &amp; Favorites</span>
+      <span style="font-size:11px;color:#475569;font-weight:400">type any ticker · Enter to search · ⭐ pin to save</span>
+    </div>
+    <div class="search-bar">
+      <input type="text" id="search-input" placeholder="e.g. AAPL, TSLA, SPY, QQQ…" maxlength="6"
+             oninput="this.value=this.value.toUpperCase()"
+             onkeydown="if(event.key==='Enter')searchStock()" autocomplete="off" spellcheck="false"
+             style="font-size:15px;padding:10px 14px"/>
+      <button class="btn-search" onclick="searchStock()" style="padding:10px 24px;font-size:14px">Search</button>
+    </div>
+    <div id="search-result" style="display:none"></div>
+  </div>
+
+  <!-- Pinned personal watchlist — shown when at least one ticker is pinned -->
+  <div class="panel grid1" id="pinned-panel" style="display:none">
+    <div class="panel-title">
+      ⭐ Pinned Favorites
+      <span id="pin-count" style="background:#334155;color:#94a3b8;border-radius:99px;padding:1px 8px;font-size:11px">0</span>
+      <span style="font-size:11px;color:#475569;margin-left:8px">saved between restarts</span>
+    </div>
+    <div class="pin-grid" id="pin-grid"></div>
+  </div>
+
   <!-- stat cards -->
   <div class="cards">
     <div class="card">
@@ -1495,31 +1521,6 @@ body.light .news-meta{color:#94a3b8}
     <div class="sector-chart-wrap">
       <div id="sector-pie-plot" style="height:280px"></div>
     </div>
-  </div>
-
-  <!-- Stock search — sits right above the Watchlist for easy discovery -->
-  <div class="panel grid1" id="search-panel">
-    <div class="panel-title" style="justify-content:space-between;flex-wrap:wrap;gap:6px">
-      <span>Stock Search &amp; Favorites</span>
-      <span style="font-size:11px;color:#475569;font-weight:400">type any ticker · see price, RSI, momentum, signal · pin to favorites</span>
-    </div>
-    <div class="search-bar">
-      <input type="text" id="search-input" placeholder="e.g. AAPL, TSLA, SPY…" maxlength="6"
-             oninput="this.value=this.value.toUpperCase()"
-             onkeydown="if(event.key==='Enter')searchStock()" autocomplete="off" spellcheck="false"/>
-      <button class="btn-search" onclick="searchStock()">Search</button>
-    </div>
-    <div id="search-result" style="display:none"></div>
-  </div>
-
-  <!-- Pinned personal watchlist — shown when at least one ticker is pinned -->
-  <div class="panel grid1" id="pinned-panel" style="display:none">
-    <div class="panel-title">
-      ⭐ Pinned Favorites
-      <span id="pin-count" style="background:#334155;color:#94a3b8;border-radius:99px;padding:1px 8px;font-size:11px">0</span>
-      <span style="font-size:11px;color:#475569;margin-left:8px">saved between restarts · search any ticker above to add</span>
-    </div>
-    <div class="pin-grid" id="pin-grid"></div>
   </div>
 
   <!-- watchlist scan -->
