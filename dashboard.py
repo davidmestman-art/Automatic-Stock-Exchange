@@ -48,109 +48,309 @@ _LANDING_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>NYSE Trading Engine</title>
+<title>NYSE Trading Engine — Algorithmic Trading for Everyone</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
-nav{display:flex;align-items:center;justify-content:space-between;padding:18px 40px;
-    border-bottom:1px solid #1e293b;position:sticky;top:0;background:#0f172aee;
-    backdrop-filter:blur(8px);z-index:10}
-.nav-logo{font-size:16px;font-weight:700;color:#38bdf8;letter-spacing:-.3px}
-.btn-cta{background:#0ea5e9;color:#fff;border:none;border-radius:7px;padding:9px 22px;
-         font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
-.btn-cta:hover{opacity:.88}
-.hero{text-align:center;padding:96px 24px 72px}
-.hero-badge{display:inline-block;background:#0c1e35;border:1px solid #0ea5e920;
-            border-radius:99px;padding:4px 14px;font-size:11px;font-weight:600;
-            color:#38bdf8;letter-spacing:.5px;margin-bottom:24px;text-transform:uppercase}
-.hero h1{font-size:clamp(38px,6vw,68px);font-weight:800;letter-spacing:-2px;line-height:1.08;
-         margin-bottom:20px;background:linear-gradient(135deg,#e2e8f0 30%,#38bdf8);
-         -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-.hero-tag{font-size:clamp(15px,2.2vw,20px);color:#94a3b8;max-width:540px;margin:0 auto 44px;line-height:1.65}
-.btn-primary{background:#0ea5e9;color:#fff;border:none;border-radius:8px;padding:14px 34px;
-             font-size:15px;font-weight:700;text-decoration:none;display:inline-block}
-.btn-primary:hover{opacity:.88}
-.strip{display:flex;justify-content:center;gap:56px;padding:32px 24px;
-       border-top:1px solid #1e293b;border-bottom:1px solid #1e293b;flex-wrap:wrap}
-.strip-item{text-align:center}
-.strip-val{font-size:22px;font-weight:700;color:#38bdf8}
-.strip-lbl{font-size:12px;color:#64748b;margin-top:3px}
-.features{max-width:1060px;margin:0 auto;padding:80px 24px}
-.features h2{text-align:center;font-size:clamp(22px,4vw,34px);font-weight:700;
-             letter-spacing:-.5px;margin-bottom:8px}
-.features-sub{text-align:center;color:#64748b;font-size:15px;margin-bottom:50px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px}
-.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:24px;transition:border-color .2s}
-.card:hover{border-color:#0ea5e9}
-.card-icon{font-size:26px;margin-bottom:12px}
-.card-title{font-size:15px;font-weight:700;color:#e2e8f0;margin-bottom:7px}
-.card-desc{font-size:13px;color:#64748b;line-height:1.6}
-footer{text-align:center;padding:30px 24px;border-top:1px solid #1e293b;color:#475569;font-size:12px}
-@media(max-width:600px){nav{padding:14px 18px}.strip{gap:24px}}
+:root{
+  --bg:#07090f;--surface:#0d1220;--surface2:#121a2e;
+  --border:#1a2540;--border2:#223060;
+  --accent:#2563eb;--accent2:#3b82f6;
+  --green:#10b981;--green2:#34d399;
+  --text:#eaf0fb;--text2:#8898b8;--text3:#4a5a78;
+}
+body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+/* Nav */
+nav{position:sticky;top:0;z-index:50;display:flex;align-items:center;justify-content:space-between;
+    padding:0 48px;height:64px;background:rgba(8,12,20,.92);
+    border-bottom:1px solid rgba(30,45,69,.7);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+.nav-brand{display:flex;align-items:center;gap:10px}
+.nav-dot{width:9px;height:9px;background:var(--accent2);border-radius:50%;box-shadow:0 0 12px var(--accent2);flex-shrink:0}
+.nav-name{font-size:16px;font-weight:700;color:#f1f5f9;letter-spacing:-.4px}
+.nav-actions{display:flex;align-items:center;gap:10px}
+.btn-outline{padding:8px 20px;border-radius:7px;border:1px solid var(--border);background:transparent;
+             color:var(--text2);font-size:13px;font-weight:600;text-decoration:none;
+             display:inline-block;transition:all .15s}
+.btn-outline:hover{border-color:var(--accent2);color:var(--text)}
+.btn-solid{padding:8px 22px;border-radius:7px;background:var(--accent);color:#fff;font-size:13px;
+           font-weight:700;text-decoration:none;display:inline-block;transition:all .15s;
+           box-shadow:0 0 20px rgba(37,99,235,.3)}
+.btn-solid:hover{background:var(--accent2);box-shadow:0 0 28px rgba(59,130,246,.45)}
+/* Hero */
+.hero{position:relative;padding:120px 48px 100px;text-align:center;overflow:hidden}
+.hero::before{content:'';position:absolute;inset:0;pointer-events:none;
+  background:radial-gradient(ellipse 80% 50% at 50% -10%,rgba(37,99,235,.18) 0%,transparent 70%),
+             radial-gradient(ellipse 40% 30% at 80% 80%,rgba(16,185,129,.06) 0%,transparent 60%)}
+.hero-eyebrow{display:inline-flex;align-items:center;gap:7px;padding:5px 14px;border-radius:99px;
+              background:rgba(37,99,235,.12);border:1px solid rgba(37,99,235,.25);
+              font-size:12px;font-weight:600;color:var(--accent2);letter-spacing:.5px;
+              text-transform:uppercase;margin-bottom:28px}
+.eyebrow-dot{width:6px;height:6px;background:var(--accent2);border-radius:50%;box-shadow:0 0 8px var(--accent2)}
+.hero h1{font-size:clamp(42px,6vw,72px);font-weight:800;letter-spacing:-2.5px;line-height:1.06;
+         margin-bottom:24px;color:#f8fafc}
+.grad{background:linear-gradient(135deg,#60a5fa 0%,#a78bfa 50%,#34d399 100%);
+      -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero-sub{font-size:clamp(16px,2vw,20px);color:var(--text2);max-width:580px;margin:0 auto 48px;line-height:1.65}
+.hero-cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:56px}
+.btn-hero-p{padding:14px 36px;border-radius:8px;background:var(--accent);color:#fff;
+            font-size:16px;font-weight:700;letter-spacing:-.2px;text-decoration:none;
+            display:inline-block;box-shadow:0 0 40px rgba(37,99,235,.45);transition:all .2s}
+.btn-hero-p:hover{background:var(--accent2);box-shadow:0 0 60px rgba(59,130,246,.55);transform:translateY(-1px)}
+.btn-hero-s{padding:13px 32px;border-radius:8px;background:transparent;color:var(--text);
+            font-size:16px;font-weight:600;text-decoration:none;display:inline-block;
+            border:1px solid var(--border);transition:all .2s}
+.btn-hero-s:hover{border-color:var(--accent2);background:rgba(37,99,235,.06);transform:translateY(-1px)}
+.hero-chips{display:flex;justify-content:center;gap:16px;flex-wrap:wrap}
+.chip{display:flex;align-items:center;gap:7px;padding:8px 16px;border-radius:8px;
+      background:rgba(15,22,41,.7);border:1px solid var(--border);
+      font-size:13px;font-weight:600;color:var(--text2);backdrop-filter:blur(8px)}
+.chip .val{color:var(--text);font-size:14px}
+/* Features */
+.section{padding:80px 48px;max-width:1200px;margin:0 auto}
+.eyebrow{font-size:12px;font-weight:700;color:var(--accent2);text-transform:uppercase;
+         letter-spacing:.7px;text-align:center;margin-bottom:12px}
+.sec-title{font-size:clamp(28px,4vw,40px);font-weight:800;letter-spacing:-1px;text-align:center;
+           margin-bottom:10px;color:#f1f5f9}
+.sec-sub{text-align:center;color:var(--text2);font-size:16px;max-width:520px;margin:0 auto 52px}
+/* Stats bar below hero CTA */
+.stats-bar{display:inline-flex;align-items:center;gap:0;border:1px solid var(--border);
+           border-radius:12px;overflow:hidden;background:rgba(13,18,32,.7);
+           backdrop-filter:blur(12px);margin-top:20px}
+.stat-item{display:flex;flex-direction:column;align-items:center;padding:14px 28px;gap:2px}
+.stat-val{font-size:18px;font-weight:800;color:#f1f5f9;letter-spacing:-.5px;line-height:1}
+.stat-sep{font-size:11px;color:var(--text3);font-weight:500;text-transform:uppercase;letter-spacing:.5px;margin-top:3px}
+.stat-divider{width:1px;height:40px;background:var(--border);flex-shrink:0}
+/* Feature grid — 2×2 */
+.section-wrap{border-top:1px solid var(--border)}
+.feat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}
+.feat-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:28px;
+           transition:all .25s;position:relative;overflow:hidden}
+.feat-card::after{content:'';position:absolute;top:0;left:0;right:0;height:1px;
+                  background:linear-gradient(90deg,transparent,rgba(59,130,246,.4),transparent);
+                  opacity:0;transition:opacity .25s}
+.feat-card:hover{border-color:rgba(59,130,246,.35);transform:translateY(-3px);box-shadow:0 16px 48px rgba(0,0,0,.5)}
+.feat-card:hover::after{opacity:1}
+.feat-icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;
+           justify-content:center;font-size:24px;margin-bottom:18px}
+.fi-blue{background:rgba(37,99,235,.15);border:1px solid rgba(37,99,235,.2)}
+.fi-green{background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.18)}
+.fi-purple{background:rgba(139,92,246,.12);border:1px solid rgba(139,92,246,.18)}
+.fi-cyan{background:rgba(6,182,212,.1);border:1px solid rgba(6,182,212,.15)}
+.fi-amber{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.15)}
+.fi-rose{background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.15)}
+.feat-title{font-size:17px;font-weight:700;color:#f1f5f9;margin-bottom:10px;letter-spacing:-.3px}
+.feat-desc{font-size:14px;color:var(--text2);line-height:1.65}
+/* How it works */
+.hiw{padding:80px 48px;background:linear-gradient(180deg,var(--bg) 0%,var(--surface) 30%,var(--surface) 70%,var(--bg) 100%);
+     border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.hiw-inner{max-width:1000px;margin:0 auto}
+.hiw-steps{display:grid;grid-template-columns:repeat(3,1fr);gap:48px;position:relative;margin-top:48px}
+.hiw-steps::before{content:'';position:absolute;top:27px;left:calc(16.666% + 16px);
+                   right:calc(16.666% + 16px);height:1px;
+                   background:linear-gradient(90deg,var(--border),var(--accent2),var(--border));z-index:0}
+.hiw-step{text-align:center;position:relative;z-index:1}
+.hiw-num{width:56px;height:56px;border-radius:50%;background:var(--bg);border:2px solid var(--accent2);
+         display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;
+         color:var(--accent2);margin:0 auto 20px;box-shadow:0 0 28px rgba(59,130,246,.2)}
+.hiw-title{font-size:17px;font-weight:700;color:#f1f5f9;margin-bottom:8px;letter-spacing:-.3px}
+.hiw-desc{font-size:14px;color:var(--text2);line-height:1.65}
+/* Stats */
+.proof{padding:80px 48px;max-width:1200px;margin:0 auto}
+.proof-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.proof-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+            padding:28px;text-align:center;transition:border-color .2s}
+.proof-card:hover{border-color:var(--border2)}
+.proof-val{font-size:36px;font-weight:800;letter-spacing:-1.5px;margin-bottom:6px;line-height:1}
+.pv-blue{color:var(--accent2)}.pv-green{color:#34d399}.pv-purple{color:#a78bfa}.pv-amber{color:#fbbf24}
+.proof-lbl{font-size:13px;color:var(--text2);font-weight:500;line-height:1.4}
+/* Footer */
+footer{border-top:1px solid var(--border);padding:32px 48px;display:flex;align-items:center;
+       justify-content:space-between;flex-wrap:wrap;gap:16px}
+.footer-brand{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;color:#f1f5f9}
+.footer-dot{width:7px;height:7px;background:var(--accent2);border-radius:50%;flex-shrink:0}
+.footer-links{display:flex;gap:24px}
+.footer-link{font-size:13px;color:var(--text3);transition:color .15s}
+.footer-link:hover{color:var(--text2)}
+.footer-note{font-size:12px;color:var(--text3);max-width:360px;text-align:right}
+/* Responsive */
+@media(max-width:900px){
+  nav{padding:0 24px}
+  .hero{padding:80px 24px 64px}
+  .section,.proof{padding:60px 24px}
+  .hiw{padding:60px 24px}
+  .feat-grid{grid-template-columns:1fr 1fr}
+  .proof-grid{grid-template-columns:1fr 1fr}
+  .hiw-steps{grid-template-columns:1fr;gap:28px}
+  .hiw-steps::before{display:none}
+  footer{padding:24px}
+  .footer-note{text-align:left}
+}
+@media(max-width:600px){
+  nav{padding:0 16px;height:56px}
+  .nav-name{font-size:14px}
+  .hero{padding:60px 16px 48px}
+  .section,.proof{padding:48px 16px}
+  .hiw{padding:48px 16px}
+  .feat-grid{grid-template-columns:1fr}
+  .proof-grid{grid-template-columns:1fr 1fr}
+  .stats-bar{flex-wrap:wrap;border-radius:10px}
+  .stat-item{padding:10px 18px}
+  .stat-divider{display:none}
+  .stat-val{font-size:16px}
+  footer{padding:20px 16px;flex-direction:column;align-items:flex-start}
+  .footer-links,.footer-note{display:none}
+}
 </style>
 </head>
 <body>
+
+<!-- ── Nav ─────────────────────────────────────────────────────────────── -->
 <nav>
-  <div class="nav-logo">NYSE Trading Engine</div>
-  {% if logged_in %}
-  <a href="/dashboard" class="btn-cta">Open Dashboard</a>
-  {% else %}
-  <a href="/login" class="btn-cta">Log In</a>
-  {% endif %}
+  <div class="nav-brand">
+    <div class="nav-dot"></div>
+    <span class="nav-name">NYSE Trading Engine</span>
+  </div>
+  <div class="nav-actions">
+    {% if logged_in %}
+    <a href="/dashboard" class="btn-solid">Open Dashboard &rarr;</a>
+    {% else %}
+    <a href="/login" class="btn-solid">Log In</a>
+    {% endif %}
+  </div>
 </nav>
+
+<!-- ── Hero ─────────────────────────────────────────────────────────────── -->
 <section class="hero">
-  <div class="hero-badge">Algorithmic Trading</div>
-  <h1>NYSE Trading Engine</h1>
-  <p class="hero-tag">Algorithmic paper trading powered by real-time market analysis</p>
-  {% if logged_in %}
-  <a href="/dashboard" class="btn-primary">Go to Dashboard &rarr;</a>
-  {% else %}
-  <a href="/login" class="btn-primary">Get Started &rarr;</a>
-  {% endif %}
+  <div class="hero-eyebrow">
+    <span class="eyebrow-dot"></span>
+    Paper Trading · No Risk · Real Signals
+  </div>
+  <h1>Algorithmic Trading<br><span class="grad">for Everyone</span></h1>
+  <p class="hero-sub">Professional-grade trading signals. Zero coding required.<br>Start paper trading in 5 minutes.</p>
+  <div class="hero-cta">
+    {% if logged_in %}
+    <a href="/dashboard" class="btn-hero-p">Open Dashboard &rarr;</a>
+    {% else %}
+    <a href="/login" class="btn-hero-p">Start Paper Trading Free &rarr;</a>
+    <a href="#how-it-works" class="btn-hero-s">See how it works</a>
+    {% endif %}
+  </div>
+
+  <!-- Stats bar -->
+  <div class="stats-bar">
+    <div class="stat-item">
+      <span class="stat-val">10+</span>
+      <span class="stat-sep">Indicators</span>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat-item">
+      <span class="stat-val">Real-Time</span>
+      <span class="stat-sep">Market Data</span>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat-item">
+      <span class="stat-val">S&amp;P 500</span>
+      <span class="stat-sep">Universe</span>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat-item">
+      <span class="stat-val">$0</span>
+      <span class="stat-sep">to Start</span>
+    </div>
+  </div>
 </section>
-<div class="strip">
-  <div class="strip-item"><div class="strip-val">10+</div><div class="strip-lbl">Technical Indicators</div></div>
-  <div class="strip-item"><div class="strip-val">S&amp;P 500</div><div class="strip-lbl">Universe</div></div>
-  <div class="strip-item"><div class="strip-val">Real-Time</div><div class="strip-lbl">Signal Analysis</div></div>
-  <div class="strip-item"><div class="strip-val">Paper</div><div class="strip-lbl">Risk-Free Trading</div></div>
-</div>
-<div class="features">
-  <h2>Everything you need</h2>
-  <p class="features-sub">A complete algorithmic trading platform built for clarity and control</p>
-  <div class="grid">
-    <div class="card">
-      <div class="card-icon">📡</div>
-      <div class="card-title">Real-Time Signal Analysis</div>
-      <div class="card-desc">RSI, MACD, EMA, Bollinger Bands, momentum, and mean-reversion signals scored and blended continuously.</div>
-    </div>
-    <div class="card">
-      <div class="card-icon">🧠</div>
-      <div class="card-title">Multi-Indicator Scoring</div>
-      <div class="card-desc">Composite engine weighs 8 signal types across multiple timeframes, filtered by live market regime.</div>
-    </div>
-    <div class="card">
-      <div class="card-icon">🏦</div>
-      <div class="card-title">Alpaca Paper Trading</div>
-      <div class="card-desc">Routes orders through Alpaca's paper API — test strategies with real market data, zero real money.</div>
-    </div>
-    <div class="card">
-      <div class="card-icon">📈</div>
-      <div class="card-title">Live Portfolio Tracking</div>
-      <div class="card-desc">Real-time P&amp;L, equity curve, open positions, trailing stops, and sector exposure in one view.</div>
-    </div>
-    <div class="card">
-      <div class="card-icon">🤖</div>
-      <div class="card-title">ML Signal Ranking</div>
-      <div class="card-desc">Gradient Boosting classifier re-trains on trade outcomes to improve signal selection over time.</div>
-    </div>
-    <div class="card">
-      <div class="card-icon">🛡️</div>
-      <div class="card-title">Built-In Risk Management</div>
-      <div class="card-desc">Trailing stops, daily loss limits, correlation filters, earnings protection, and adaptive sizing included.</div>
+
+<!-- ── Features ──────────────────────────────────────────────────────────── -->
+<div id="features" class="section-wrap">
+  <div class="section">
+    <div class="eyebrow">What you get</div>
+    <h2 class="sec-title">Everything in one dashboard</h2>
+    <p class="sec-sub">Professional-grade tools with zero setup. Connect Alpaca, run the engine, watch it trade.</p>
+    <div class="feat-grid">
+      <div class="feat-card">
+        <div class="feat-icon fi-blue">📡</div>
+        <div class="feat-title">Real-Time Signal Analysis</div>
+        <div class="feat-desc">RSI, MACD, EMA, Bollinger Bands, momentum, and mean-reversion signals — scored, weighted, and blended into a single composite score every minute.</div>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon fi-purple">🧠</div>
+        <div class="feat-title">Multi-Indicator Scoring</div>
+        <div class="feat-desc">Eight independent signal types across three timeframes. A Gradient Boosting ML model re-ranks candidates based on your own trading history.</div>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon fi-green">🏦</div>
+        <div class="feat-title">Alpaca Paper Trading</div>
+        <div class="feat-desc">Orders route directly through Alpaca's paper trading API — real market prices, real order logic, zero real money at risk. Flip to live when you're ready.</div>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon fi-amber">📈</div>
+        <div class="feat-title">Live Portfolio Tracking</div>
+        <div class="feat-desc">Equity curve, open positions, unrealized P&amp;L, trailing stops, sector exposure, and a full trade journal updated in real time.</div>
+      </div>
     </div>
   </div>
 </div>
-<footer>NYSE Trading Engine &mdash; algorithmic paper trading for everyone</footer>
+
+<!-- ── How it works ───────────────────────────────────────────────────────── -->
+<div id="how-it-works" class="hiw">
+  <div class="hiw-inner">
+    <div class="eyebrow">How it works</div>
+    <h2 class="sec-title">Up and running in three steps</h2>
+    <div class="hiw-steps">
+      <div class="hiw-step">
+        <div class="hiw-num">1</div>
+        <div class="hiw-title">Connect &amp; Configure</div>
+        <div class="hiw-desc">Add your free Alpaca paper-trading API keys to <code style="background:rgba(59,130,246,.12);padding:1px 5px;border-radius:4px;font-size:12px">.env</code>. No broker account, no real money required. The engine starts in simulation mode if you skip this step.</div>
+      </div>
+      <div class="hiw-step">
+        <div class="hiw-num">2</div>
+        <div class="hiw-title">Scan &amp; Score</div>
+        <div class="hiw-desc">Click <strong style="color:#e8edf5">Run Cycle</strong>. The engine scans the S&amp;P 500, scores every ticker across 8 signal types, and selects the 8–10 highest-conviction, non-correlated setups.</div>
+      </div>
+      <div class="hiw-step">
+        <div class="hiw-num">3</div>
+        <div class="hiw-title">Trade &amp; Relax</div>
+        <div class="hiw-desc">Orders are placed automatically with adaptive position sizing. Trailing stops, take-profit targets, and a daily loss limit protect your paper portfolio around the clock.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Stats bar section ──────────────────────────────────────────────────── -->
+<div class="proof">
+  <div class="proof-grid">
+    <div class="proof-card">
+      <div class="proof-val pv-blue">10+</div>
+      <div class="proof-lbl">Technical indicators tracked per ticker</div>
+    </div>
+    <div class="proof-card">
+      <div class="proof-val pv-green">Real-Time</div>
+      <div class="proof-lbl">Market data via yFinance &amp; Alpaca</div>
+    </div>
+    <div class="proof-card">
+      <div class="proof-val pv-purple">S&amp;P 500</div>
+      <div class="proof-lbl">Universe scanned each session</div>
+    </div>
+    <div class="proof-card">
+      <div class="proof-val pv-amber">$0</div>
+      <div class="proof-lbl">Real money needed to get started</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Footer ─────────────────────────────────────────────────────────────── -->
+<footer>
+  <div class="footer-brand">
+    <div class="footer-dot"></div>
+    NYSE Trading Engine
+  </div>
+  <div class="footer-links">
+    <a href="/dashboard" class="footer-link">Dashboard</a>
+    <a href="/login" class="footer-link">Login</a>
+    <a href="/stats" class="footer-link">Stats</a>
+  </div>
+  <div class="footer-note">For research and education only. Not financial advice. Past simulated performance does not guarantee future results.</div>
+</footer>
 </body>
 </html>"""
 
