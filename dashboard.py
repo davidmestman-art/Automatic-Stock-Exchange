@@ -34,6 +34,118 @@ app = Flask(__name__)
 # X-Forwarded-Proto/Host correctly — required for secure session cookies.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
+# ── Public landing page ───────────────────────────────────────────────────────
+_LANDING_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>NYSE Trading Engine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
+nav{display:flex;align-items:center;justify-content:space-between;padding:18px 40px;
+    border-bottom:1px solid #1e293b;position:sticky;top:0;background:#0f172aee;
+    backdrop-filter:blur(8px);z-index:10}
+.nav-logo{font-size:16px;font-weight:700;color:#38bdf8;letter-spacing:-.3px}
+.btn-cta{background:#0ea5e9;color:#fff;border:none;border-radius:7px;padding:9px 22px;
+         font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
+.btn-cta:hover{opacity:.88}
+.hero{text-align:center;padding:96px 24px 72px}
+.hero-badge{display:inline-block;background:#0c1e35;border:1px solid #0ea5e920;
+            border-radius:99px;padding:4px 14px;font-size:11px;font-weight:600;
+            color:#38bdf8;letter-spacing:.5px;margin-bottom:24px;text-transform:uppercase}
+.hero h1{font-size:clamp(38px,6vw,68px);font-weight:800;letter-spacing:-2px;line-height:1.08;
+         margin-bottom:20px;background:linear-gradient(135deg,#e2e8f0 30%,#38bdf8);
+         -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero-tag{font-size:clamp(15px,2.2vw,20px);color:#94a3b8;max-width:540px;margin:0 auto 44px;line-height:1.65}
+.btn-primary{background:#0ea5e9;color:#fff;border:none;border-radius:8px;padding:14px 34px;
+             font-size:15px;font-weight:700;text-decoration:none;display:inline-block}
+.btn-primary:hover{opacity:.88}
+.strip{display:flex;justify-content:center;gap:56px;padding:32px 24px;
+       border-top:1px solid #1e293b;border-bottom:1px solid #1e293b;flex-wrap:wrap}
+.strip-item{text-align:center}
+.strip-val{font-size:22px;font-weight:700;color:#38bdf8}
+.strip-lbl{font-size:12px;color:#64748b;margin-top:3px}
+.features{max-width:1060px;margin:0 auto;padding:80px 24px}
+.features h2{text-align:center;font-size:clamp(22px,4vw,34px);font-weight:700;
+             letter-spacing:-.5px;margin-bottom:8px}
+.features-sub{text-align:center;color:#64748b;font-size:15px;margin-bottom:50px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px}
+.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:24px;transition:border-color .2s}
+.card:hover{border-color:#0ea5e9}
+.card-icon{font-size:26px;margin-bottom:12px}
+.card-title{font-size:15px;font-weight:700;color:#e2e8f0;margin-bottom:7px}
+.card-desc{font-size:13px;color:#64748b;line-height:1.6}
+footer{text-align:center;padding:30px 24px;border-top:1px solid #1e293b;color:#475569;font-size:12px}
+@media(max-width:600px){nav{padding:14px 18px}.strip{gap:24px}}
+</style>
+</head>
+<body>
+<nav>
+  <div class="nav-logo">NYSE Trading Engine</div>
+  {% if logged_in %}
+  <a href="/dashboard" class="btn-cta">Open Dashboard</a>
+  {% else %}
+  <a href="/login" class="btn-cta">Log In</a>
+  {% endif %}
+</nav>
+<section class="hero">
+  <div class="hero-badge">Algorithmic Trading</div>
+  <h1>NYSE Trading Engine</h1>
+  <p class="hero-tag">Algorithmic paper trading powered by real-time market analysis</p>
+  {% if logged_in %}
+  <a href="/dashboard" class="btn-primary">Go to Dashboard &rarr;</a>
+  {% else %}
+  <a href="/login" class="btn-primary">Get Started &rarr;</a>
+  {% endif %}
+</section>
+<div class="strip">
+  <div class="strip-item"><div class="strip-val">10+</div><div class="strip-lbl">Technical Indicators</div></div>
+  <div class="strip-item"><div class="strip-val">S&amp;P 500</div><div class="strip-lbl">Universe</div></div>
+  <div class="strip-item"><div class="strip-val">Real-Time</div><div class="strip-lbl">Signal Analysis</div></div>
+  <div class="strip-item"><div class="strip-val">Paper</div><div class="strip-lbl">Risk-Free Trading</div></div>
+</div>
+<div class="features">
+  <h2>Everything you need</h2>
+  <p class="features-sub">A complete algorithmic trading platform built for clarity and control</p>
+  <div class="grid">
+    <div class="card">
+      <div class="card-icon">📡</div>
+      <div class="card-title">Real-Time Signal Analysis</div>
+      <div class="card-desc">RSI, MACD, EMA, Bollinger Bands, momentum, and mean-reversion signals scored and blended continuously.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🧠</div>
+      <div class="card-title">Multi-Indicator Scoring</div>
+      <div class="card-desc">Composite engine weighs 8 signal types across multiple timeframes, filtered by live market regime.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🏦</div>
+      <div class="card-title">Alpaca Paper Trading</div>
+      <div class="card-desc">Routes orders through Alpaca's paper API — test strategies with real market data, zero real money.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📈</div>
+      <div class="card-title">Live Portfolio Tracking</div>
+      <div class="card-desc">Real-time P&amp;L, equity curve, open positions, trailing stops, and sector exposure in one view.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🤖</div>
+      <div class="card-title">ML Signal Ranking</div>
+      <div class="card-desc">Gradient Boosting classifier re-trains on trade outcomes to improve signal selection over time.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🛡️</div>
+      <div class="card-title">Built-In Risk Management</div>
+      <div class="card-desc">Trailing stops, daily loss limits, correlation filters, earnings protection, and adaptive sizing included.</div>
+    </div>
+  </div>
+</div>
+<footer>NYSE Trading Engine &mdash; algorithmic paper trading for everyone</footer>
+</body>
+</html>"""
+
 # ── Login page template ────────────────────────────────────────────────────────
 _LOGIN_HTML = """<!doctype html>
 <html lang="en">
@@ -99,7 +211,7 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 def _require_login():
     if not _AUTH_ENABLED:
         return
-    if request.endpoint in ("login", "logout"):
+    if request.endpoint in ("login", "logout", "home"):
         return
     if not session.get("logged_in"):
         if request.path.startswith("/api/"):
@@ -118,9 +230,9 @@ def login():
         if user_ok and pass_ok:
             session.permanent = True
             session["logged_in"] = True
-            next_url = request.args.get("next", "/")
+            next_url = request.args.get("next", "/dashboard")
             if not next_url.startswith("/"):
-                next_url = "/"
+                next_url = "/dashboard"
             return redirect(next_url)
         error = "Invalid username or password."
     return render_template_string(_LOGIN_HTML, error=error, auth=_AUTH_ENABLED)
@@ -129,7 +241,7 @@ def login():
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect("/login")
+    return redirect("/")
 
 
 _lock = threading.Lock()
@@ -1543,7 +1655,7 @@ body.light .news-meta{color:#94a3b8}
     <button class="btn-rescan" id="btn-rescan" onclick="rescan()">Re-scan</button>
     <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
     <button class="btn-refresh" onclick="window.location='/stats'" style="background:#1e3a5f;color:#93c5fd">Stats</button>
-    {% if auth %}<a href="/logout" style="padding:7px 14px;border-radius:6px;background:#1e293b;color:#64748b;font-size:12px;font-weight:600;text-decoration:none;border:1px solid #334155">Sign out</a>{% endif %}
+    {% if auth %}<a href="/logout" style="padding:7px 14px;border-radius:6px;background:#7f1d1d;color:#fca5a5;font-size:12px;font-weight:600;text-decoration:none;border:1px solid #991b1b;white-space:nowrap">Logout</a>{% endif %}
   </div>
 </header>
 
@@ -3360,6 +3472,15 @@ def stats_page():
 
 
 @app.route("/")
+def home():
+    return render_template_string(
+        _LANDING_HTML,
+        auth=_AUTH_ENABLED,
+        logged_in=bool(session.get("logged_in")) if _AUTH_ENABLED else True,
+    )
+
+
+@app.route("/dashboard")
 def index():
     return render_template_string(HTML, auth=_AUTH_ENABLED)
 
