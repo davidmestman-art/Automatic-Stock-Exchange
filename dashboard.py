@@ -544,12 +544,21 @@ def _run_backtest_bg() -> None:
 @app.route("/api/state")
 def api_state():
     global _last_state
-    with _lock:
+    # If the engine lock is held by a running cycle, return the last cached
+    # state immediately so the Refresh button never hangs.
+    acquired = _lock.acquire(timeout=3)
+    if not acquired:
+        cached = dict(_last_state)
+        cached["cycle_running"] = True
+        return jsonify(cached)
+    try:
         try:
             signals, prices, ind_map = _engine.get_signals()
             _last_state = _build_state(signals, prices, ind_map)
         except Exception as e:
             _last_state = _build_state(error=str(e))
+    finally:
+        _lock.release()
     return jsonify(_last_state)
 
 
@@ -2101,8 +2110,16 @@ async function rescan() {
   document.getElementById('overlay-msg').textContent = 'Scanning S&P 500 universe…';
   btn.disabled = true;
   overlay.classList.add('active');
+  const timer = setTimeout(() => {
+    overlay.classList.remove('active');
+    document.getElementById('overlay-msg').textContent = 'Running cycle…';
+    btn.disabled = false;
+    document.getElementById('err-banner').textContent = 'Scan timed out — yfinance may be slow. Try again shortly.';
+    document.getElementById('err-banner').style.display = 'block';
+  }, 120000);
   try {
     const res = await fetch('/api/rescan', {method:'POST'});
+    clearTimeout(timer);
     const data = await res.json();
     if (data.ok) applyState(data.state);
     else {
@@ -2110,6 +2127,7 @@ async function rescan() {
       document.getElementById('err-banner').style.display = 'block';
     }
   } catch(e) {
+    clearTimeout(timer);
     document.getElementById('err-banner').textContent = 'Scan failed: ' + e;
     document.getElementById('err-banner').style.display = 'block';
   } finally {
@@ -2123,9 +2141,17 @@ async function runCycle() {
   const btn = document.getElementById('btn-cycle');
   const overlay = document.getElementById('overlay');
   btn.disabled = true;
+  document.getElementById('overlay-msg').textContent = 'Running cycle — scanning universe & fetching quotes… (60-90 s)';
   overlay.classList.add('active');
+  const timer = setTimeout(() => {
+    overlay.classList.remove('active');
+    btn.disabled = false;
+    document.getElementById('err-banner').textContent = 'Cycle timed out — yfinance may be slow (market closed?). Click Refresh to check status.';
+    document.getElementById('err-banner').style.display = 'block';
+  }, 120000);
   try {
     const res = await fetch('/api/cycle', {method:'POST'});
+    clearTimeout(timer);
     const data = await res.json();
     if (data.ok) applyState(data.state);
     else {
@@ -2133,6 +2159,7 @@ async function runCycle() {
       document.getElementById('err-banner').style.display = 'block';
     }
   } catch(e) {
+    clearTimeout(timer);
     document.getElementById('err-banner').textContent = 'Cycle failed: ' + e;
     document.getElementById('err-banner').style.display = 'block';
   } finally {
