@@ -488,6 +488,98 @@ _equity_snapshots: list = []          # [{ts, value}] — portfolio value over t
 _last_snapshot_ts: Optional[datetime] = None
 _ext_hours = ExtendedHoursMonitor(cache_ttl_seconds=120)
 
+# ── Risk profiles / settings ──────────────────────────────────────────────────
+_SETTINGS_PATH = Path(__file__).resolve().parent / "user_settings.json"
+
+RISK_PROFILES = {
+    "conservative": {
+        "label": "Conservative",
+        "tagline": "Lower risk, smaller positions, only strong signals",
+        "color": "#10b981",
+        "overrides": {
+            "max_position_pct": 0.05,
+            "min_position_pct": 0.02,
+            "max_open_positions": 5,
+            "stop_loss_pct": 0.03,
+            "take_profit_pct": 0.10,
+            "trailing_stop_pct": 0.03,
+            "daily_loss_limit_pct": 0.02,
+            "buy_threshold": 0.35,
+            "sell_threshold": -0.35,
+        },
+    },
+    "moderate": {
+        "label": "Moderate",
+        "tagline": "Balanced defaults — current behaviour",
+        "color": "#3b82f6",
+        "overrides": {
+            "max_position_pct": 0.10,
+            "min_position_pct": 0.03,
+            "max_open_positions": 8,
+            "stop_loss_pct": 0.05,
+            "take_profit_pct": 0.15,
+            "trailing_stop_pct": 0.05,
+            "daily_loss_limit_pct": 0.03,
+            "buy_threshold": 0.20,
+            "sell_threshold": -0.20,
+        },
+    },
+    "aggressive": {
+        "label": "Aggressive",
+        "tagline": "Larger positions, wider stops, acts on weaker signals",
+        "color": "#f59e0b",
+        "overrides": {
+            "max_position_pct": 0.18,
+            "min_position_pct": 0.05,
+            "max_open_positions": 12,
+            "stop_loss_pct": 0.08,
+            "take_profit_pct": 0.25,
+            "trailing_stop_pct": 0.08,
+            "daily_loss_limit_pct": 0.05,
+            "buy_threshold": 0.10,
+            "sell_threshold": -0.10,
+        },
+    },
+}
+_current_profile: str = "moderate"
+
+
+def _load_user_settings() -> dict:
+    if _SETTINGS_PATH.exists():
+        try:
+            return json.loads(_SETTINGS_PATH.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_user_settings(data: dict) -> None:
+    try:
+        _SETTINGS_PATH.write_text(json.dumps(data, indent=2))
+    except Exception as e:
+        log.warning(f"Failed to save user settings: {e}")
+
+
+def _apply_risk_profile(name: str) -> bool:
+    global _current_profile
+    profile = RISK_PROFILES.get(name)
+    if not profile:
+        return False
+    for key, val in profile["overrides"].items():
+        if hasattr(_engine.config, key):
+            setattr(_engine.config, key, val)
+    _current_profile = name
+    log.info(f"[SETTINGS] Risk profile applied: {name}")
+    return True
+
+
+# Apply saved profile at startup
+_saved = _load_user_settings()
+if _saved.get("risk_profile") in RISK_PROFILES:
+    _apply_risk_profile(_saved["risk_profile"])
+else:
+    _current_profile = "moderate"
+
 # ── News feed cache ───────────────────────────────────────────────────────────
 _news_cache: dict = {}       # {symbol: {"items": [...], "fetched_at": datetime}}
 _NEWS_CACHE_TTL = 900        # 15-minute TTL
@@ -1296,6 +1388,24 @@ def api_journal():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/settings", methods=["GET", "POST"])
+def api_settings():
+    global _current_profile
+    if request.method == "GET":
+        return jsonify({"ok": True, "risk_profile": _current_profile, "profiles": {
+            k: {"label": v["label"], "tagline": v["tagline"], "color": v["color"], "overrides": v["overrides"]}
+            for k, v in RISK_PROFILES.items()
+        }})
+    data = request.get_json(silent=True) or {}
+    name = data.get("risk_profile", "")
+    if not _apply_risk_profile(name):
+        return jsonify({"ok": False, "error": f"Unknown profile: {name}"}), 400
+    saved = _load_user_settings()
+    saved["risk_profile"] = name
+    _save_user_settings(saved)
+    return jsonify({"ok": True, "risk_profile": name})
+
+
 @app.route("/api/news")
 def api_news():
     """Return recent headlines for watchlist symbols (15-min cache, ≤8 symbols)."""
@@ -1965,6 +2075,7 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
     <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
     <button class="btn-refresh" onclick="window.location='/stats'" style="background:#1e3a5f;color:#93c5fd">Stats</button>
     <button class="btn-refresh" onclick="window.location='/journal'" style="background:#1a3020;color:#6ee7b7;border:1px solid #14532d">Journal</button>
+    <button class="btn-refresh" onclick="window.location='/settings'" style="background:#1c1a30;color:#c4b5fd;border:1px solid #4c1d95">Settings</button>
     {% if auth %}<a href="/logout" style="padding:7px 14px;border-radius:6px;background:#7f1d1d;color:#fca5a5;font-size:12px;font-weight:600;text-decoration:none;border:1px solid #991b1b;white-space:nowrap">Logout</a>{% endif %}
   </div>
 </header>
@@ -3306,6 +3417,227 @@ if ('serviceWorker' in navigator) {
 </html>"""
 
 
+SETTINGS_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Settings — NYSE Trading Engine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#07090f;--surface:#0d1220;--surface2:#121a2e;
+  --border:#1a2540;--border2:#223060;
+  --accent:#2563eb;--accent2:#3b82f6;
+  --green:#10b981;--amber:#f59e0b;
+  --text:#eaf0fb;--text2:#8898b8;--text3:#4a5a78;
+}
+body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;
+     -webkit-font-smoothing:antialiased;min-height:100vh}
+a{color:inherit;text-decoration:none}
+/* Nav */
+nav{display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:56px;
+    background:rgba(13,18,32,.98);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
+.nav-left{display:flex;align-items:center;gap:18px}
+.nav-logo{font-size:14px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
+.nav-dot{width:7px;height:7px;background:var(--accent2);border-radius:50%;box-shadow:0 0 8px var(--accent2)}
+.nav-link{font-size:13px;color:var(--text2);padding:5px 10px;border-radius:6px;transition:all .15s}
+.nav-link:hover{background:var(--surface2);color:var(--text)}
+.nav-link.active{background:var(--surface2);color:var(--text)}
+.btn-logout{padding:6px 14px;border-radius:6px;background:#7f1d1d;color:#fca5a5;font-size:12px;
+            font-weight:600;border:1px solid #991b1b}
+/* Page */
+.page{max-width:860px;margin:0 auto;padding:48px 24px}
+.page-title{font-size:26px;font-weight:700;letter-spacing:-.5px;margin-bottom:6px}
+.page-sub{font-size:14px;color:var(--text2);margin-bottom:40px}
+/* Profile cards */
+.profiles{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:40px}
+@media(max-width:640px){.profiles{grid-template-columns:1fr}}
+.profile-card{background:var(--surface);border:2px solid var(--border);border-radius:14px;
+              padding:26px 24px;cursor:pointer;transition:all .2s;position:relative;user-select:none}
+.profile-card:hover{border-color:var(--border2);background:var(--surface2);transform:translateY(-2px)}
+.profile-card.selected{border-color:var(--card-color,var(--accent));
+                        box-shadow:0 0 0 1px var(--card-color,var(--accent)),
+                                   0 0 24px color-mix(in srgb,var(--card-color,var(--accent)) 20%,transparent)}
+.profile-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+              font-size:22px;margin-bottom:18px;background:color-mix(in srgb,var(--card-color,var(--accent)) 15%,transparent)}
+.profile-name{font-size:17px;font-weight:700;margin-bottom:6px;color:var(--text)}
+.profile-tagline{font-size:12px;color:var(--text2);margin-bottom:18px;line-height:1.5}
+.profile-params{display:flex;flex-direction:column;gap:7px}
+.param-row{display:flex;justify-content:space-between;align-items:center;font-size:12px}
+.param-label{color:var(--text3)}
+.param-val{color:var(--text2);font-weight:600}
+.selected-badge{position:absolute;top:14px;right:14px;background:var(--card-color,var(--accent));
+                color:#fff;font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;
+                letter-spacing:.5px;display:none}
+.profile-card.selected .selected-badge{display:block}
+/* Save button */
+.save-row{display:flex;align-items:center;gap:14px;margin-bottom:40px}
+.btn-save{padding:11px 32px;background:var(--accent);color:#fff;border:none;border-radius:8px;
+          font-size:14px;font-weight:700;cursor:pointer;transition:all .15s}
+.btn-save:hover{background:var(--accent2)}
+.btn-save:disabled{opacity:.5;cursor:default}
+.save-msg{font-size:13px;color:var(--green);display:none}
+/* Detail table */
+.detail-wrap{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.detail-hdr{padding:14px 20px;font-size:13px;font-weight:700;color:var(--text2);
+            background:var(--surface2);border-bottom:1px solid var(--border);letter-spacing:.4px}
+.detail-table{width:100%;border-collapse:collapse}
+.detail-table th,.detail-table td{padding:11px 20px;font-size:13px;text-align:left}
+.detail-table th{color:var(--text3);font-weight:600;border-bottom:1px solid var(--border)}
+.detail-table td{border-bottom:1px solid rgba(26,37,64,.5)}
+.detail-table tr:last-child td{border-bottom:none}
+.detail-table td:last-child{text-align:right;font-weight:600;color:var(--text)}
+td.diff-up{color:#6ee7b7}
+td.diff-dn{color:#f87171}
+</style>
+</head>
+<body>
+<nav>
+  <div class="nav-left">
+    <div class="nav-dot"></div>
+    <span class="nav-logo">NYSE Engine</span>
+    <a href="/dashboard" class="nav-link">Dashboard</a>
+    <a href="/journal" class="nav-link">Journal</a>
+    <a href="/settings" class="nav-link active">Settings</a>
+  </div>
+  <div>
+    <a href="/logout" class="btn-logout">Logout</a>
+  </div>
+</nav>
+
+<div class="page">
+  <div class="page-title">Settings</div>
+  <div class="page-sub">Choose your risk profile. Changes apply immediately to the live trading engine.</div>
+
+  <div class="profiles" id="profiles">
+    <!-- Rendered by JS -->
+  </div>
+
+  <div class="save-row">
+    <button class="btn-save" id="btn-save" onclick="saveProfile()">Save Profile</button>
+    <span class="save-msg" id="save-msg">&#10003; Saved successfully</span>
+  </div>
+
+  <div class="detail-wrap">
+    <div class="detail-hdr">PROFILE COMPARISON</div>
+    <table class="detail-table">
+      <thead>
+        <tr>
+          <th>Parameter</th>
+          <th>Conservative</th>
+          <th>Moderate</th>
+          <th>Aggressive</th>
+        </tr>
+      </thead>
+      <tbody id="detail-body">
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const PROFILES = {{ profiles_json }};
+let selected = "{{ current_profile }}";
+
+const PARAM_LABELS = {
+  max_position_pct:    "Max position size",
+  min_position_pct:    "Min position size",
+  max_open_positions:  "Max open positions",
+  stop_loss_pct:       "Stop-loss",
+  take_profit_pct:     "Take-profit",
+  trailing_stop_pct:   "Trailing stop",
+  daily_loss_limit_pct:"Daily loss limit",
+  buy_threshold:       "Buy threshold (score)",
+  sell_threshold:      "Sell threshold (score)",
+};
+
+const ICONS = { conservative: "🛡️", moderate: "⚖️", aggressive: "🚀" };
+
+function pct(v) {
+  if (typeof v === "number" && Math.abs(v) < 10) return (v * 100).toFixed(0) + "%";
+  return v;
+}
+
+function renderCards() {
+  const container = document.getElementById("profiles");
+  container.innerHTML = "";
+  for (const [key, prof] of Object.entries(PROFILES)) {
+    const card = document.createElement("div");
+    card.className = "profile-card" + (key === selected ? " selected" : "");
+    card.style.setProperty("--card-color", prof.color);
+    const overrides = prof.overrides;
+    card.innerHTML = `
+      <span class="selected-badge">ACTIVE</span>
+      <div class="profile-icon">${ICONS[key] || "📊"}</div>
+      <div class="profile-name">${prof.label}</div>
+      <div class="profile-tagline">${prof.tagline}</div>
+      <div class="profile-params">
+        <div class="param-row"><span class="param-label">Max position</span><span class="param-val">${pct(overrides.max_position_pct)}</span></div>
+        <div class="param-row"><span class="param-label">Stop-loss</span><span class="param-val">${pct(overrides.stop_loss_pct)}</span></div>
+        <div class="param-row"><span class="param-label">Take-profit</span><span class="param-val">${pct(overrides.take_profit_pct)}</span></div>
+        <div class="param-row"><span class="param-label">Buy threshold</span><span class="param-val">${overrides.buy_threshold}</span></div>
+        <div class="param-row"><span class="param-label">Max positions</span><span class="param-val">${overrides.max_open_positions}</span></div>
+      </div>`;
+    card.onclick = () => selectProfile(key);
+    container.appendChild(card);
+  }
+}
+
+function renderDetail() {
+  const tbody = document.getElementById("detail-body");
+  const keys = Object.keys(PARAM_LABELS);
+  const vals = { conservative: PROFILES.conservative.overrides, moderate: PROFILES.moderate.overrides, aggressive: PROFILES.aggressive.overrides };
+  tbody.innerHTML = keys.map(k => {
+    const c = vals.conservative[k], m = vals.moderate[k], a = vals.aggressive[k];
+    return `<tr>
+      <td>${PARAM_LABELS[k]}</td>
+      <td class="diff-up">${pct(c)}</td>
+      <td>${pct(m)}</td>
+      <td class="diff-dn">${pct(a)}</td>
+    </tr>`;
+  }).join("");
+}
+
+function selectProfile(key) {
+  selected = key;
+  renderCards();
+  document.getElementById("save-msg").style.display = "none";
+}
+
+async function saveProfile() {
+  const btn = document.getElementById("btn-save");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ risk_profile: selected }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      const msg = document.getElementById("save-msg");
+      msg.style.display = "inline";
+      setTimeout(() => { msg.style.display = "none"; }, 3000);
+    } else {
+      alert("Save failed: " + (data.error || "unknown error"));
+    }
+  } catch(e) {
+    alert("Network error: " + e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Save Profile";
+  }
+}
+
+renderCards();
+renderDetail();
+</script>
+</body>
+</html>"""
+
+
 JOURNAL_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -4278,6 +4610,23 @@ def journal_page():
     if _AUTH_ENABLED and not session.get("logged_in"):
         return redirect("/login?next=/journal")
     resp = make_response(render_template_string(JOURNAL_HTML))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return resp
+
+
+@app.route("/settings")
+def settings_page():
+    if _AUTH_ENABLED and not session.get("logged_in"):
+        return redirect("/login?next=/settings")
+    profiles_json = json.dumps({
+        k: {"label": v["label"], "tagline": v["tagline"], "color": v["color"], "overrides": v["overrides"]}
+        for k, v in RISK_PROFILES.items()
+    })
+    resp = make_response(render_template_string(
+        SETTINGS_HTML,
+        profiles_json=profiles_json,
+        current_profile=_current_profile,
+    ))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp
 
