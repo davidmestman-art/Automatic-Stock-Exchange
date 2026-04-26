@@ -910,6 +910,34 @@ def _background_loop() -> None:
 
 # ── State builder ─────────────────────────────────────────────────────────────
 
+def _safe_empty_state(error: str = "") -> dict:
+    """Minimal valid state returned when _build_state fails completely."""
+    return {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": "Local Simulation",
+        "market_open": None,
+        "portfolio": {
+            "total_value": 0, "cash": 0, "position_value": 0,
+            "total_pnl": 0, "total_pnl_pct": 0,
+            "open_positions": 0, "total_trades": 0, "initial_capital": 0,
+        },
+        "positions": [], "signals": [], "trades": [],
+        "error": error,
+        "last_cycle_at": None, "next_cycle_at": None,
+        "cycle_interval": CYCLE_INTERVAL,
+        "watchlist": [], "scan": None, "voo": None,
+        "notifications": {"ntfy": False, "pushover": False},
+        "mtf_enabled": False, "sector_exposure": {},
+        "max_per_sector": 3, "earnings_enabled": False, "earnings_warnings": {},
+        "trailing_stop_enabled": False, "confirmation_enabled": False,
+        "pending_confirmation": [], "extended_hours": [],
+        "mean_reversion_enabled": False, "correlation_filter_enabled": False,
+        "adaptive_sizing_enabled": False, "regime": None, "ml_status": None,
+        "public_url": None, "personal_watchlist": [],
+        "alpaca_connected": False,
+    }
+
+
 def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
     eng = _get_engine()
     portfolio = eng.portfolio
@@ -1368,7 +1396,10 @@ def api_state():
             signals, prices, ind_map = eng.get_signals()
             _last_state = _build_state(signals, prices, ind_map)
         except Exception as e:
-            _last_state = _build_state(error=str(e))
+            try:
+                _last_state = _build_state(error=str(e))
+            except Exception:
+                _last_state = _safe_empty_state(str(e))
     finally:
         _lock.release()
     return jsonify(_last_state)
@@ -2639,16 +2670,21 @@ const fmtD = n => n == null ? '—' : (n>=0?'+':'')+fmt(n);
 const cls = n => n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu';
 
 function applyState(s) {
-  const p = s.portfolio;
+  if (!s || typeof s !== 'object') return;
+  const p = s.portfolio || {};
+  const signals   = s.signals   || [];
+  const positions = s.positions || [];
+  const trades    = s.trades    || [];
 
   // no-keys banner
   const noKeysBanner = document.getElementById('no-keys-banner');
   if (noKeysBanner) noKeysBanner.style.display = (s.alpaca_connected === false) ? 'flex' : 'none';
 
   // mode badge
+  const mode = s.mode || 'Local Simulation';
   const badge = document.getElementById('mode-badge');
-  badge.textContent = s.mode;
-  badge.className = 'badge ' + (s.mode.includes('Paper') ? 'badge-paper' : s.mode.includes('LIVE') ? 'badge-live' : 'badge-sim');
+  badge.textContent = mode;
+  badge.className = 'badge ' + (mode.includes('Paper') ? 'badge-paper' : mode.includes('LIVE') ? 'badge-live' : 'badge-sim');
 
   // market
   const dot = document.getElementById('market-dot');
@@ -2675,17 +2711,17 @@ function applyState(s) {
   const pnlEl = document.getElementById('c-pnl');
   pnlEl.textContent = fmtD(p.total_pnl) && ('$' + (p.total_pnl >= 0 ? '+' : '') + fmt(Math.abs(p.total_pnl)));
   pnlEl.className = 'card-value ' + cls(p.total_pnl);
-  document.getElementById('c-pnl-pct').textContent = (p.total_pnl_pct >= 0 ? '+' : '') + fmt(p.total_pnl_pct) + '%';
+  document.getElementById('c-pnl-pct').textContent = p.total_pnl_pct != null ? ((p.total_pnl_pct >= 0 ? '+' : '') + fmt(p.total_pnl_pct) + '%') : '—';
 
   document.getElementById('c-open').textContent = p.open_positions;
   document.getElementById('c-trades').textContent = p.total_trades;
 
   // live P&L ticker — sum unrealized from all open positions
   {
-    const unrealized = (s.positions || []).reduce((sum, pos) => sum + (pos.pnl || 0), 0);
+    const unrealized = positions.reduce((sum, pos) => sum + (pos.pnl || 0), 0);
     const basis = (p.total_value || 0) - unrealized;
     const unrealizedPct = basis > 0 ? unrealized / basis * 100 : 0;
-    updatePnlTicker(unrealized, unrealizedPct, (s.positions || []).length);
+    updatePnlTicker(unrealized, unrealizedPct, positions.length);
   }
 
   // regime card
@@ -2776,12 +2812,12 @@ function applyState(s) {
   }
 
   // signals
-  document.getElementById('sig-count').textContent = s.signals.length;
+  document.getElementById('sig-count').textContent = signals.length;
   const sb = document.getElementById('sig-body');
-  if (!s.signals.length) {
+  if (!signals.length) {
     sb.innerHTML = '<tr><td colspan="9" class="empty">No signals — click Refresh</td></tr>';
   } else {
-    sb.innerHTML = s.signals.map(r => {
+    sb.innerHTML = signals.map(r => {
       const barPct = Math.round(Math.abs(r.score) * 100);
       const barCol = r.action === 'BUY' ? '#22c55e' : r.action === 'SELL' ? '#ef4444' : '#6b7280';
       const fmtTF  = v => v == null ? '' : `<span style="color:${v>=0?'#4ade80':'#f87171'}">${v>=0?'+':''}${fmt(v,3)}</span>`;
@@ -2858,7 +2894,7 @@ function applyState(s) {
   const strip = document.getElementById('sector-strip');
   const maxPerSector = s.max_per_sector || 3;
   const expo = s.sector_exposure || {};
-  if (s.positions.length && Object.keys(expo).length) {
+  if (positions.length && Object.keys(expo).length) {
     strip.style.display = 'flex';
     strip.innerHTML = Object.entries(expo).map(([sec, cnt]) => {
       const cls2 = cnt >= maxPerSector ? 'sector-chip at-limit'
@@ -2881,12 +2917,12 @@ function applyState(s) {
   }
 
   // positions — Ticker, Sector, Entry, Current, Stop/Trail, Qty, Unrealized P&L
-  document.getElementById('pos-count').textContent = s.positions.length;
+  document.getElementById('pos-count').textContent = positions.length;
   const pb = document.getElementById('pos-body');
-  if (!s.positions.length) {
+  if (!positions.length) {
     pb.innerHTML = '<tr><td colspan="7" class="empty">No open positions</td></tr>';
   } else {
-    pb.innerHTML = s.positions.map(p => {
+    pb.innerHTML = positions.map(p => {
       // Stop column: green when trailing stop has ratcheted above the fixed stop
       const fixedStop = p.entry_price * (1 - 0.05);
       const stopMoved = s.trailing_stop_enabled && p.stop_loss > fixedStop * 1.001;
@@ -2907,12 +2943,12 @@ function applyState(s) {
   }
 
   // trades — columns: Time, Ticker, Side, Qty, Price, Realized P&L
-  document.getElementById('trade-count').textContent = s.trades.length;
+  document.getElementById('trade-count').textContent = trades.length;
   const tb = document.getElementById('trade-body');
-  if (!s.trades.length) {
+  if (!trades.length) {
     tb.innerHTML = '<tr><td colspan="6" class="empty">No trades yet</td></tr>';
   } else {
-    tb.innerHTML = s.trades.map(t => `<tr>
+    tb.innerHTML = trades.map(t => `<tr>
       <td style="color:#64748b;font-size:12px">${t.timestamp}</td>
       <td style="font-weight:600">${t.symbol}</td>
       <td><span class="pill pill-${t.action}">${t.action}</span></td>
@@ -2923,7 +2959,7 @@ function applyState(s) {
   }
 
   // sector allocation pie
-  renderSectorPie(s.positions);
+  renderSectorPie(positions);
 
   // after-hours panel
   renderExtHours(s.extended_hours || [], s.market_open);
