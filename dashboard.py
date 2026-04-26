@@ -7,6 +7,7 @@ Then open http://localhost:8080
 
 import json
 import logging
+import os
 import threading
 import time
 import traceback
@@ -14,7 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
 from config import config
 from src.data.extended_hours import ExtendedHoursMonitor
@@ -41,6 +42,31 @@ _NEWS_CACHE_TTL = 900        # 15-minute TTL
 _backtest_report: dict = {}
 _backtest_running: bool = False
 _BACKTEST_REPORT_PATH = Path(__file__).resolve().parent / "backtest_report.json"
+
+# ── Personal watchlist ────────────────────────────────────────────────────────
+_PERSONAL_WL_PATH = Path(__file__).resolve().parent / "personal_watchlist.json"
+_personal_watchlist: list = []
+
+
+def _load_personal_watchlist() -> None:
+    global _personal_watchlist
+    if _PERSONAL_WL_PATH.exists():
+        try:
+            with open(_PERSONAL_WL_PATH) as f:
+                _personal_watchlist = [s.upper().strip() for s in json.load(f) if s]
+        except Exception:
+            _personal_watchlist = []
+
+
+def _save_personal_watchlist() -> None:
+    with open(_PERSONAL_WL_PATH, "w") as f:
+        json.dump(_personal_watchlist, f)
+
+
+_load_personal_watchlist()
+
+# ── Public ngrok URL ──────────────────────────────────────────────────────────
+_public_url: str = ""
 
 log = logging.getLogger(__name__)
 
@@ -311,6 +337,8 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "adaptive_sizing_enabled": config.use_adaptive_sizing,
         "regime": _engine.current_regime.to_dict() if _engine.current_regime else None,
         "ml_status": _engine.ml_status,
+        "public_url": _public_url,
+        "personal_watchlist": _personal_watchlist,
     }
 
 
@@ -847,6 +875,120 @@ def api_backtest_report():
     return jsonify({"ok": False, "running": _backtest_running, "reason": "no report yet"})
 
 
+# ── Stock search & personal watchlist endpoints ───────────────────────────────
+
+@app.route("/api/search/<symbol>")
+def api_search(symbol):
+    import re
+    symbol = symbol.upper().strip()
+    if not symbol or not re.match(r"^[A-Z0-9.\-]{1,6}$", symbol):
+        return jsonify({"ok": False, "error": f"Invalid symbol: {symbol}"}), 400
+    try:
+        import yfinance as yf
+        from src.data.fetcher import MarketDataFetcher
+        from src.signals.analyzer import SignalAnalyzer
+        from src.signals.indicators import TechnicalIndicators
+
+        fetcher = MarketDataFetcher(lookback_days=60, interval="1d")
+        df = fetcher.fetch(symbol)
+
+        rsi = score = action = None
+        if df is not None and not df.empty:
+            ind_calc = TechnicalIndicators(
+                rsi_period=config.rsi_period, macd_fast=config.macd_fast,
+                macd_slow=config.macd_slow, macd_signal=config.macd_signal,
+                ema_fast=config.ema_fast, ema_slow=config.ema_slow,
+                bb_period=config.bb_period, bb_std=config.bb_std,
+            )
+            ind = ind_calc.compute(df)
+            sig = SignalAnalyzer(
+                buy_threshold=config.buy_threshold,
+                sell_threshold=config.sell_threshold,
+            ).analyze(ind)
+            rsi    = round(ind.rsi, 1) if ind.rsi is not None else None
+            score  = round(sig.score, 3)
+            action = sig.action
+
+        info = {}
+        price = None
+        try:
+            info  = yf.Ticker(symbol).info or {}
+            price = (info.get("regularMarketPrice") or info.get("currentPrice")
+                     or info.get("previousClose"))
+        except Exception:
+            pass
+        if price is None and df is not None and not df.empty:
+            price = float(df["Close"].iloc[-1])
+
+        return jsonify({
+            "ok":       True,
+            "symbol":   symbol,
+            "name":     info.get("longName") or info.get("shortName") or symbol,
+            "price":    round(float(price), 2) if price else None,
+            "sector":   info.get("sector") or get_sector(symbol) or "—",
+            "pe_ratio": round(float(info["trailingPE"]), 1) if info.get("trailingPE") else None,
+            "market_cap": info.get("marketCap"),
+            "rsi":      rsi,
+            "score":    score,
+            "action":   action,
+            "pinned":   symbol in _personal_watchlist,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/watchlist")
+def api_watchlist_get():
+    if not _personal_watchlist:
+        return jsonify({"ok": True, "symbols": [], "items": []})
+    items = []
+    # Use engine's fetcher cache (no extra network calls)
+    try:
+        market_data = _engine.fetcher.fetch_many(_personal_watchlist, force_refresh=False)
+    except Exception:
+        market_data = {}
+    # Last computed signals for signal/rsi columns
+    with _lock:
+        sig_lookup = {s["symbol"]: s for s in _last_state.get("signals", [])}
+
+    for sym in _personal_watchlist:
+        price = change_pct = rsi = score = action = None
+        df = market_data.get(sym)
+        if df is not None and not df.empty:
+            price = round(float(df["Close"].iloc[-1]), 2)
+            if len(df) >= 2:
+                prev = float(df["Close"].iloc[-2])
+                change_pct = round((price / prev - 1) * 100, 2) if prev else None
+        sig = sig_lookup.get(sym)
+        if sig:
+            rsi    = sig.get("rsi")
+            score  = sig.get("score")
+            action = sig.get("action")
+        items.append({"symbol": sym, "price": price, "change_pct": change_pct,
+                       "rsi": rsi, "score": score, "action": action or "—"})
+    return jsonify({"ok": True, "symbols": _personal_watchlist, "items": items})
+
+
+@app.route("/api/watchlist/add", methods=["POST"])
+def api_watchlist_add():
+    sym = (request.json or {}).get("symbol", "").upper().strip()
+    if not sym:
+        return jsonify({"ok": False, "error": "No symbol"}), 400
+    if sym not in _personal_watchlist:
+        _personal_watchlist.append(sym)
+        _save_personal_watchlist()
+    return jsonify({"ok": True, "symbols": _personal_watchlist})
+
+
+@app.route("/api/watchlist/remove", methods=["POST"])
+def api_watchlist_remove():
+    sym = (request.json or {}).get("symbol", "").upper().strip()
+    if sym in _personal_watchlist:
+        _personal_watchlist.remove(sym)
+        _save_personal_watchlist()
+    return jsonify({"ok": True, "symbols": _personal_watchlist})
+
+
 # ── PWA routes ────────────────────────────────────────────────────────────────
 
 @app.route("/manifest.json")
@@ -1169,6 +1311,52 @@ body.light .pnl-ticker{border-left-color:#e2e8f0}
 .pnl-flash{animation:pnl-flash .55s ease}
 @media(max-width:600px){.pnl-ticker{display:none}}
 
+/* ── Stock search panel ──────────────────────────────────────────────────────── */
+.search-bar{display:flex;gap:8px;padding:12px 14px;border-bottom:1px solid #334155;flex-wrap:wrap}
+.search-bar input{flex:1;min-width:120px;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px 12px;color:#e2e8f0;font-size:14px}
+.search-bar input:focus{outline:none;border-color:#0ea5e9}
+.search-bar input::placeholder{color:#475569}
+.btn-search{background:#0ea5e9;color:#fff;padding:8px 20px;border-radius:6px;border:none;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap}
+.btn-search:hover{opacity:.85}
+.search-result{padding:14px 16px}
+.sr-header{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.sr-name{font-size:15px;font-weight:700;color:#f1f5f9}
+.sr-company{font-size:12px;color:#64748b}
+.sr-stats{display:flex;flex-wrap:wrap;gap:14px;margin-bottom:12px}
+.sr-stat{display:flex;flex-direction:column;gap:2px}
+.sr-stat-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.4px}
+.sr-stat-value{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums;color:#e2e8f0}
+.btn-pin{padding:7px 16px;border-radius:6px;border:none;font-size:13px;font-weight:600;cursor:pointer}
+.btn-pin-add{background:#14532d;color:#4ade80}.btn-pin-add:hover{opacity:.85}
+.btn-pin-rem{background:#7f1d1d;color:#f87171}.btn-pin-rem:hover{opacity:.85}
+/* ── Pinned watchlist cards ──────────────────────────────────────────────────── */
+.pin-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;padding:12px 14px}
+.pin-card{background:#0f172a;border-radius:8px;padding:10px 12px;border:1px solid #334155;position:relative;min-width:0}
+.pin-sym{font-size:15px;font-weight:700;color:#f1f5f9;margin-bottom:4px;padding-right:18px}
+.pin-price{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;color:#e2e8f0}
+.pin-change{font-size:11px;font-weight:600;margin-top:1px;font-variant-numeric:tabular-nums}
+.pin-rsi{font-size:11px;color:#64748b;margin-top:3px}
+.pin-remove{position:absolute;top:6px;right:8px;background:none;border:none;color:#475569;font-size:14px;cursor:pointer;padding:0;min-height:unset;line-height:1}
+.pin-remove:hover{color:#f87171}
+/* ── Public URL badge ─────────────────────────────────────────────────────────── */
+.public-url-wrap{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:6px;background:#0f2318;border:1px solid #166534;white-space:nowrap;flex-shrink:0}
+.public-url-label{font-size:10px;color:#4ade80;font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+.public-url-val{font-size:11px;color:#4ade80;font-weight:600;max-width:180px;overflow:hidden;text-overflow:ellipsis}
+.btn-copy-url{background:none;border:none;color:#4ade80;cursor:pointer;font-size:11px;padding:1px 4px;min-height:unset}
+.btn-copy-url:hover{opacity:.7}
+@media(max-width:900px){.public-url-val{max-width:120px}}
+@media(max-width:600px){.public-url-wrap{display:none}}
+/* light theme for new panels */
+body.light .search-bar{border-bottom-color:#e2e8f0}
+body.light .search-bar input{background:#f8fafc;border-color:#e2e8f0;color:#1e293b}
+body.light .search-bar input::placeholder{color:#94a3b8}
+body.light .sr-name{color:#0f172a}
+body.light .sr-stat-value{color:#1e293b}
+body.light .pin-card{background:#f8fafc;border-color:#e2e8f0}
+body.light .pin-sym,.pin-price{color:#0f172a}
+body.light .pin-remove{color:#94a3b8}
+body.light .public-url-wrap{background:#f0fdf4;border-color:#bbf7d0}
+body.light .public-url-label,.public-url-val{color:#166534}
 /* ── News feed panel ─────────────────────────────────────────────────────────── */
 .news-item{display:flex;flex-direction:column;gap:2px;padding:10px 14px;border-bottom:1px solid #1e293b;transition:background .12s}
 .news-item:last-child{border-bottom:none}
@@ -1214,6 +1402,12 @@ body.light .news-meta{color:#94a3b8}
     <span class="market-dot market-unknown" id="market-dot"></span>
     <span id="market-label">Market —</span>
   </span>
+  <!-- Public ngrok URL badge — visible only when tunnel is active -->
+  <div class="public-url-wrap" id="public-url-wrap" style="display:none">
+    <span class="public-url-label">🌐 Public</span>
+    <span class="public-url-val" id="public-url-val">—</span>
+    <button class="btn-copy-url" onclick="copyPublicUrl()" title="Copy public URL">⎘ Copy</button>
+  </div>
   <!-- Live unrealized P&L ticker -->
   <div class="pnl-ticker" id="pnl-ticker" style="display:none">
     <div class="pnl-ticker-label">Unrealized P&amp;L</div>
@@ -1268,6 +1462,29 @@ body.light .news-meta{color:#94a3b8}
       <div class="card-value" id="c-regime">—</div>
       <div class="card-sub" id="c-regime-sub">—</div>
     </div>
+  </div>
+
+  <!-- Stock search & personal watchlist -->
+  <div class="panel grid1">
+    <div class="panel-title">Stock Search
+      <span style="font-size:11px;color:#475569;font-weight:400;margin-left:8px">type any ticker to see price, RSI, signal, and fundamentals</span>
+    </div>
+    <div class="search-bar">
+      <input type="text" id="search-input" placeholder="e.g. AAPL, TSLA, SPY…" maxlength="6"
+             oninput="this.value=this.value.toUpperCase()"
+             onkeydown="if(event.key==='Enter')searchStock()"/>
+      <button class="btn-search" onclick="searchStock()">Search</button>
+    </div>
+    <div id="search-result" style="display:none"></div>
+  </div>
+
+  <!-- Pinned personal watchlist -->
+  <div class="panel grid1" id="pinned-panel" style="display:none">
+    <div class="panel-title">⭐ Pinned Watchlist
+      <span id="pin-count" style="background:#334155;color:#94a3b8;border-radius:99px;padding:1px 8px;font-size:11px">0</span>
+      <span style="font-size:11px;color:#475569;margin-left:8px">persists between restarts</span>
+    </div>
+    <div class="pin-grid" id="pin-grid"></div>
   </div>
 
   <!-- VOO 200-week MA monitor -->
@@ -1680,6 +1897,9 @@ function applyState(s) {
   // VOO panel
   renderVOO(s.voo);
 
+  // public URL
+  if (s.public_url) updatePublicUrl(s.public_url);
+
   // error
   const eb = document.getElementById('err-banner');
   if (s.error) { eb.textContent = '⚠ ' + s.error; eb.style.display = 'block'; }
@@ -2009,6 +2229,141 @@ function closeChart() {
   document.getElementById('chart-modal').classList.remove('active');
   if (window.Plotly) Plotly.purge('chart-plotly');
 }
+
+// ── Stock search & personal watchlist ────────────────────────────────────────
+async function searchStock() {
+  const input = document.getElementById('search-input');
+  const sym   = input.value.trim().toUpperCase();
+  if (!sym) return;
+  const resultEl = document.getElementById('search-result');
+  resultEl.style.display = '';
+  resultEl.innerHTML = '<div style="padding:14px;color:#64748b;font-size:13px">Searching <b>' + sym + '</b>…</div>';
+  try {
+    const res  = await fetch('/api/search/' + sym);
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error);
+    showSearchResult(data);
+  } catch(e) {
+    resultEl.innerHTML = '<div style="padding:14px;color:#f87171;font-size:13px">Error: ' + e.message + '</div>';
+  }
+}
+
+function _fmtCap(n) {
+  if (!n) return '—';
+  if (n >= 1e12) return '$' + (n/1e12).toFixed(1) + 'T';
+  if (n >= 1e9)  return '$' + (n/1e9).toFixed(1)  + 'B';
+  return '$' + (n/1e6).toFixed(0) + 'M';
+}
+
+function showSearchResult(d) {
+  const el = document.getElementById('search-result');
+  const scoreStr = d.score != null ? (d.score >= 0 ? '+' : '') + d.score.toFixed(3) : '—';
+  const scoreCol = d.score > 0 ? '#4ade80' : d.score < 0 ? '#f87171' : '#94a3b8';
+  const pinBtn   = d.pinned
+    ? `<button class="btn-pin btn-pin-rem" onclick="unpinStock('${d.symbol}')">✕ Unpin</button>`
+    : `<button class="btn-pin btn-pin-add" onclick="pinStock('${d.symbol}')">⭐ Pin to Watchlist</button>`;
+  el.innerHTML = `<div class="search-result">
+    <div class="sr-header">
+      <span class="sr-name">${d.symbol}</span>
+      <span class="sr-company">${d.name || ''}</span>
+      <span class="pill pill-${d.action||'HOLD'}">${d.action||'HOLD'}</span>
+      ${pinBtn}
+    </div>
+    <div class="sr-stats">
+      <div class="sr-stat"><div class="sr-stat-label">Price</div><div class="sr-stat-value">${d.price != null ? '$'+fmt(d.price) : '—'}</div></div>
+      <div class="sr-stat"><div class="sr-stat-label">RSI</div><div class="sr-stat-value">${d.rsi != null ? d.rsi : '—'}</div></div>
+      <div class="sr-stat"><div class="sr-stat-label">Score</div><div class="sr-stat-value" style="color:${scoreCol}">${scoreStr}</div></div>
+      <div class="sr-stat"><div class="sr-stat-label">Sector</div><div class="sr-stat-value" style="font-size:13px">${d.sector||'—'}</div></div>
+      <div class="sr-stat"><div class="sr-stat-label">P/E</div><div class="sr-stat-value">${d.pe_ratio != null ? d.pe_ratio : '—'}</div></div>
+      <div class="sr-stat"><div class="sr-stat-label">Mkt Cap</div><div class="sr-stat-value" style="font-size:13px">${_fmtCap(d.market_cap)}</div></div>
+    </div>
+  </div>`;
+}
+
+async function pinStock(sym) {
+  try {
+    await fetch('/api/watchlist/add', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({symbol: sym}),
+    });
+    // Refresh search result to flip pin button state
+    const res = await fetch('/api/search/' + sym);
+    const d   = await res.json();
+    if (d.ok) showSearchResult(d);
+    loadPinnedWatchlist();
+  } catch(e) {}
+}
+
+async function unpinStock(sym) {
+  try {
+    await fetch('/api/watchlist/remove', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({symbol: sym}),
+    });
+    const res = await fetch('/api/search/' + sym);
+    const d   = await res.json();
+    if (d.ok) showSearchResult(d);
+    loadPinnedWatchlist();
+  } catch(e) {}
+}
+
+async function loadPinnedWatchlist() {
+  try {
+    const res   = await fetch('/api/watchlist');
+    const data  = await res.json();
+    const panel = document.getElementById('pinned-panel');
+    const grid  = document.getElementById('pin-grid');
+    const count = document.getElementById('pin-count');
+    if (!data.ok || !data.items || !data.items.length) {
+      panel.style.display = 'none'; return;
+    }
+    panel.style.display = '';
+    count.textContent   = data.items.length;
+    grid.innerHTML = data.items.map(item => {
+      const chgCol = item.change_pct == null ? '#94a3b8'
+                   : item.change_pct >= 0 ? '#22c55e' : '#ef4444';
+      const chgStr = item.change_pct != null
+                   ? (item.change_pct >= 0 ? '+' : '') + item.change_pct.toFixed(2) + '%'
+                   : '—';
+      const act = item.action && item.action !== '—' ? item.action : 'HOLD';
+      return `<div class="pin-card">
+        <button class="pin-remove" onclick="unpinStock('${item.symbol}')" title="Unpin">✕</button>
+        <div class="pin-sym">${item.symbol}</div>
+        <div class="pin-price">${item.price != null ? '$'+fmt(item.price) : '—'}</div>
+        <div class="pin-change" style="color:${chgCol}">${chgStr}</div>
+        <div style="margin-top:5px"><span class="pill pill-${act}" style="font-size:10px">${act}</span></div>
+        ${item.rsi != null ? '<div class="pin-rsi">RSI '+item.rsi+'</div>' : ''}
+      </div>`;
+    }).join('');
+  } catch(e) {}
+}
+
+// ── Public URL ─────────────────────────────────────────────────────────────────
+function updatePublicUrl(url) {
+  const wrap = document.getElementById('public-url-wrap');
+  const val  = document.getElementById('public-url-val');
+  if (!url || !wrap) return;
+  wrap.style.display = 'flex';
+  val.textContent    = url;
+}
+
+function copyPublicUrl() {
+  const val = document.getElementById('public-url-val');
+  if (!val) return;
+  const url = val.textContent;
+  (navigator.clipboard
+    ? navigator.clipboard.writeText(url)
+    : Promise.reject()
+  ).then(() => {
+    const orig = val.textContent;
+    val.textContent = 'Copied!';
+    setTimeout(() => { val.textContent = orig; }, 1500);
+  }).catch(() => { window.prompt('Copy this URL:', url); });
+}
+
+// Load pinned watchlist on init; refresh every 30s
+loadPinnedWatchlist();
+setInterval(loadPinnedWatchlist, 30000);
 
 // ── News feed ─────────────────────────────────────────────────────────────────
 let _newsLoaded = false;
@@ -2886,22 +3241,23 @@ if __name__ == "__main__":
     local_url = f"http://localhost:{args.port}"
     print(f"\n  Local:   {local_url}")
 
-    if args.tunnel:
+    # Auto-start ngrok if --tunnel passed OR NGROK_AUTHTOKEN env var is set
+    ngrok_auth = os.getenv("NGROK_AUTHTOKEN") or os.getenv("NGROK_TOKEN")
+    if args.tunnel or ngrok_auth:
         try:
-            from pyngrok import ngrok
+            from pyngrok import conf, ngrok
+            if ngrok_auth:
+                conf.get_default().auth_token = ngrok_auth
             tunnel = ngrok.connect(args.port)
-            public_url = tunnel.public_url
-            # Prefer https if ngrok gave us both
-            if hasattr(tunnel, "public_url"):
-                public_url = tunnel.public_url.replace("http://", "https://")
-            print(f"  Public:  {public_url}  ← share this URL")
-            print(f"  (ngrok tunnel is active — keep this window open)\n")
+            _public_url = tunnel.public_url.replace("http://", "https://")
+            print(f"  Public:  {_public_url}")
+            print(f"  ← access from phone on cellular, work network, anywhere\n")
         except ImportError:
-            print("\n  ERROR: pyngrok not installed.")
-            print("  Run:  pip install pyngrok\n")
-            sys.exit(1)
+            print("\n  ERROR: pyngrok not installed — run:  pip install pyngrok\n")
+            if args.tunnel:
+                sys.exit(1)
         except Exception as e:
-            print(f"\n  ERROR starting ngrok tunnel: {e}")
+            print(f"\n  WARNING: ngrok tunnel failed: {e}")
             print("  Continuing without tunnel — local access only.\n")
 
     print(f"  Auto-cycle every {CYCLE_INTERVAL}s\n")
