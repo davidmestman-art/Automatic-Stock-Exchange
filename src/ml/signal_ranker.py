@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 try:
     import joblib
+    from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
@@ -20,7 +21,11 @@ except ImportError:
 
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parent.parent.parent / "ml_model.pkl"
 
-_FEATURE_KEYS = ["rsi", "macd_hist", "ema_fast", "ema_slow", "score", "confidence"]
+_FEATURE_KEYS = [
+    "rsi", "macd_hist", "ema_fast", "ema_slow",
+    "z_score", "atr_pct", "roc_10", "stoch_rsi",
+    "score", "confidence",
+]
 
 
 class SignalRanker:
@@ -67,11 +72,12 @@ class SignalRanker:
         if fv is None:
             return 1.0
         try:
-            classes = list(self.model.classes_)
+            mdl = self.model
+            classes = list(mdl.classes_)
             pos_idx = classes.index(1) if 1 in classes else -1
             if pos_idx < 0:
                 return 1.0
-            prob = float(self.model.predict_proba([fv])[0][pos_idx])
+            prob = float(mdl.predict_proba([fv])[0][pos_idx])
             return round(0.8 + prob * 0.4, 4)   # [0,1] → [0.8, 1.2]
         except Exception as e:
             logger.debug(f"SignalRanker.score_adjustment: {e}")
@@ -117,9 +123,16 @@ class SignalRanker:
             ema_fast = float(ind.get("ema_fast") or 1.0)
             ema_slow = float(ind.get("ema_slow") or 1.0)
             ema_spread = (ema_fast - ema_slow) / max(ema_slow, 1e-8)
+            z_score = float(ind.get("z_score") or 0.0)
+            atr_pct = float(ind.get("atr_pct") or 0.02)
+            roc_10 = float(ind.get("roc_10") or 0.0)
+            stoch_rsi = float(ind.get("stoch_rsi") or 50.0) / 100.0
             score = float(ind.get("score") or 0.0)
             confidence = float(ind.get("confidence") or 0.0)
-            return np.array([rsi, macd_hist, ema_spread, score, confidence])
+            return np.array([
+                rsi, macd_hist, ema_spread, z_score,
+                atr_pct, roc_10, stoch_rsi, score, confidence,
+            ])
         except Exception as e:
             logger.debug(f"SignalRanker._to_feature_vector: {e}")
             return None
@@ -141,32 +154,44 @@ class SignalRanker:
             X_arr = np.array(X)
             y_arr = np.array(y)
 
-            split = max(1, int(len(X_arr) * 0.8))
-            X_train, X_val = X_arr[:split], X_arr[split:]
-            y_train, y_val = y_arr[:split], y_arr[split:]
-
-            pipe = Pipeline([
-                ("scaler", StandardScaler()),
-                ("clf", LogisticRegression(
-                    class_weight="balanced",
-                    max_iter=500,
+            # Prefer GradientBoosting (no scaling required); fallback to LR
+            try:
+                model = GradientBoostingClassifier(
+                    n_estimators=100,
+                    max_depth=3,
+                    learning_rate=0.1,
+                    subsample=0.8,
                     random_state=42,
-                )),
-            ])
-            pipe.fit(X_train, y_train)
+                )
+                model.fit(X_arr, y_arr)
+            except Exception:
+                model = Pipeline([
+                    ("scaler", StandardScaler()),
+                    ("clf", LogisticRegression(
+                        class_weight="balanced",
+                        max_iter=500,
+                        random_state=42,
+                    )),
+                ])
+                model.fit(X_arr, y_arr)
 
+            # Hold-out validation on the most recent 20 % of trades
             val_acc: Optional[float] = None
+            split = max(1, int(len(X_arr) * 0.8))
+            X_val, y_val = X_arr[split:], y_arr[split:]
             if len(X_val) > 0:
-                val_acc = round(float(pipe.score(X_val, y_val)), 4)
+                val_acc = round(float(
+                    np.mean(model.predict(X_val) == y_val)
+                ), 4)
 
-            self.model = pipe
+            self.model = model
             self._train_samples = len(pairs)
             self._last_trained = datetime.utcnow()
             self._val_accuracy = val_acc
 
-            joblib.dump(pipe, self.model_path)
+            joblib.dump(model, self.model_path)
             logger.info(
-                f"SignalRanker: trained on {len(pairs)} pairs"
+                f"SignalRanker: trained GBM on {len(pairs)} pairs"
                 + (f", val_acc={val_acc:.2%}" if val_acc is not None else "")
             )
             return True

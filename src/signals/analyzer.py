@@ -21,17 +21,20 @@ class SignalAnalyzer:
         buy_threshold: float = 0.35,
         sell_threshold: float = -0.35,
         use_mean_reversion: bool = True,
+        use_momentum: bool = True,
     ):
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
         self.use_mean_reversion = use_mean_reversion
+        self.use_momentum = use_momentum
 
         raw = {
-            "rsi": 0.20,
-            "macd": 0.25,
-            "ema_cross": 0.20,
-            "bollinger": 0.15,
-            "mean_reversion": 0.20 if use_mean_reversion else 0.0,
+            "rsi": 0.18,
+            "macd": 0.22,
+            "ema_cross": 0.18,
+            "bollinger": 0.12,
+            "mean_reversion": 0.18 if use_mean_reversion else 0.0,
+            "momentum": 0.12 if use_momentum else 0.0,
         }
         total = sum(raw.values())
         self._weights = {k: v / total for k, v in raw.items()}
@@ -59,6 +62,10 @@ class SignalAnalyzer:
         mr_score, mr_reasons = self._mean_reversion_signal(ind)
         scores["mean_reversion"] = mr_score
         reasons.extend(mr_reasons)
+
+        mom_score, mom_reasons = self._momentum_signal(ind)
+        scores["momentum"] = mom_score
+        reasons.extend(mom_reasons)
 
         vol_mult = self._volume_multiplier(ind)
         composite = sum(scores[k] * self._weights[k] for k in scores) * vol_mult
@@ -210,6 +217,45 @@ class SignalAnalyzer:
             score = -0.3
         else:
             score = 0.0
+
+        return score, reasons
+
+    def _momentum_signal(self, ind: IndicatorValues):
+        """10-day rate of change filtered by Stochastic RSI extreme zones."""
+        if not self.use_momentum or ind.roc_10 is None:
+            return 0.0, []
+        roc = ind.roc_10
+        reasons: List[str] = []
+
+        if roc >= 0.07:
+            score = 1.0
+            reasons.append(f"Strong momentum (+{roc * 100:.1f}% / 10d)")
+        elif roc >= 0.03:
+            score = 0.5
+            reasons.append(f"Positive momentum (+{roc * 100:.1f}% / 10d)")
+        elif roc >= 0.01:
+            score = 0.2
+        elif roc <= -0.07:
+            score = -1.0
+            reasons.append(f"Bearish momentum ({roc * 100:.1f}% / 10d)")
+        elif roc <= -0.03:
+            score = -0.5
+            reasons.append(f"Negative momentum ({roc * 100:.1f}% / 10d)")
+        elif roc <= -0.01:
+            score = -0.2
+        else:
+            score = roc * 20  # linear near zero
+
+        # StochRSI extreme zones nudge momentum score toward reversal
+        if ind.stoch_rsi is not None:
+            if ind.stoch_rsi < 20:
+                score = min(score + 0.25, 1.0)
+                if score > 0.3:
+                    reasons.append(f"StochRSI oversold ({ind.stoch_rsi:.0f})")
+            elif ind.stoch_rsi > 80:
+                score = max(score - 0.25, -1.0)
+                if score < -0.3:
+                    reasons.append(f"StochRSI overbought ({ind.stoch_rsi:.0f})")
 
         return score, reasons
 

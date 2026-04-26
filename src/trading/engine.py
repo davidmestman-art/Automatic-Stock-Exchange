@@ -44,6 +44,7 @@ class TradingEngine:
             buy_threshold=config.buy_threshold,
             sell_threshold=config.sell_threshold,
             use_mean_reversion=config.use_mean_reversion,
+            use_momentum=getattr(config, "use_momentum_signals", True),
         )
         self.risk = RiskManager(
             max_position_pct=config.max_position_pct,
@@ -469,6 +470,8 @@ class TradingEngine:
             "ema_slow": round(ind.ema_slow, 2) if ind.ema_slow is not None else None,
             "z_score": round(ind.z_score, 4) if getattr(ind, "z_score", None) is not None else None,
             "atr_pct": round(ind.atr_pct, 4) if getattr(ind, "atr_pct", None) is not None else None,
+            "roc_10": round(ind.roc_10, 4) if getattr(ind, "roc_10", None) is not None else None,
+            "stoch_rsi": round(ind.stoch_rsi, 2) if getattr(ind, "stoch_rsi", None) is not None else None,
             "score": round(signal.score, 4),
             "confidence": round(signal.confidence, 4),
         }
