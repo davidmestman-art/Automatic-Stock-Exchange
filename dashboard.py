@@ -1964,6 +1964,7 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
     <button class="btn-rescan" id="btn-rescan" onclick="rescan()">Re-scan</button>
     <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
     <button class="btn-refresh" onclick="window.location='/stats'" style="background:#1e3a5f;color:#93c5fd">Stats</button>
+    <button class="btn-refresh" onclick="window.location='/journal'" style="background:#1a3020;color:#6ee7b7;border:1px solid #14532d">Journal</button>
     {% if auth %}<a href="/logout" style="padding:7px 14px;border-radius:6px;background:#7f1d1d;color:#fca5a5;font-size:12px;font-weight:600;text-decoration:none;border:1px solid #991b1b;white-space:nowrap">Logout</a>{% endif %}
   </div>
 </header>
@@ -3305,6 +3306,284 @@ if ('serviceWorker' in navigator) {
 </html>"""
 
 
+JOURNAL_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Trade Journal — NYSE Trading Engine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#07090f;--surface:#0d1220;--surface2:#121a2e;
+  --border:#1a2540;--border2:#223060;
+  --accent:#2563eb;--accent2:#3b82f6;
+  --green:#10b981;--green2:#34d399;
+  --red:#ef4444;--red2:#f87171;
+  --text:#eaf0fb;--text2:#8898b8;--text3:#4a5a78;
+}
+body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;
+     font-size:14px;min-height:100vh;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+/* ── Header ── */
+header{background:rgba(7,9,15,.95);border-bottom:1px solid var(--border);
+       padding:0 24px;height:56px;display:flex;align-items:center;gap:14px;
+       position:sticky;top:0;z-index:10;backdrop-filter:blur(12px)}
+.logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px;display:flex;align-items:center;gap:7px}
+.logo::before{content:'';display:inline-block;width:7px;height:7px;background:var(--accent2);
+              border-radius:50%;box-shadow:0 0 8px var(--accent2)}
+.hdr-right{margin-left:auto;display:flex;align-items:center;gap:8px}
+.btn-back{background:var(--surface2);color:var(--text2);border:1px solid var(--border);
+          border-radius:6px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer}
+.btn-back:hover{border-color:var(--accent2);color:var(--text)}
+/* ── Layout ── */
+main{padding:24px;max-width:1400px;margin:0 auto}
+/* ── Stat cards ── */
+.stat-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px}
+.sc{background:var(--surface);border-radius:10px;padding:16px 18px;border:1px solid var(--border);
+    box-shadow:0 2px 8px rgba(0,0,0,.3)}
+.sc-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px;font-weight:500}
+.sc-val{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.5px}
+.sc-sub{font-size:11px;color:var(--text3);margin-top:3px}
+.pos{color:var(--green2)}.neg{color:var(--red2)}.neu{color:var(--text)}
+/* ── Panel ── */
+.panel{background:var(--surface);border-radius:12px;border:1px solid var(--border);
+       overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+.panel-hdr{padding:13px 18px;display:flex;align-items:center;justify-content:space-between;
+           border-bottom:1px solid var(--border);background:var(--surface2);flex-wrap:wrap;gap:8px}
+.panel-title{font-weight:700;font-size:12px;color:var(--text2);text-transform:uppercase;
+             letter-spacing:.6px;display:flex;align-items:center;gap:8px}
+.count-badge{background:var(--surface);color:var(--text3);border:1px solid var(--border);
+             border-radius:99px;padding:1px 9px;font-size:11px}
+.filter-wrap{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.filter-btn{padding:4px 12px;border-radius:99px;border:1px solid var(--border);background:none;
+            color:var(--text3);font-size:11px;font-weight:600;cursor:pointer}
+.filter-btn.active{background:var(--surface2);color:var(--text);border-color:var(--border2)}
+.filter-btn:hover{border-color:var(--accent2);color:var(--text)}
+/* ── Table ── */
+.tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;min-width:700px}
+th{padding:10px 14px;text-align:left;font-size:10px;color:var(--text3);text-transform:uppercase;
+   letter-spacing:.6px;border-bottom:1px solid var(--border);white-space:nowrap;font-weight:700;
+   background:var(--surface2)}
+td{padding:11px 14px;border-bottom:1px solid rgba(26,37,64,.6);font-variant-numeric:tabular-nums;
+   font-size:13px;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(18,26,46,.8)}
+/* ── Pills ── */
+.pill{display:inline-block;padding:3px 9px;border-radius:4px;font-weight:700;font-size:11px;letter-spacing:.3px}
+.pill-BUY{background:rgba(16,185,129,.15);color:var(--green2);border:1px solid rgba(16,185,129,.2)}
+.pill-SELL{background:rgba(239,68,68,.15);color:var(--red2);border:1px solid rgba(239,68,68,.2)}
+/* ── Score chip ── */
+.score-chip{display:inline-block;padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px;
+            font-variant-numeric:tabular-nums}
+/* ── Reason cell ── */
+.reason-cell{max-width:280px;white-space:normal;line-height:1.4;color:var(--text2)}
+/* ── P&L cell ── */
+.pnl-pos{color:var(--green2);font-weight:700}
+.pnl-neg{color:var(--red2);font-weight:700}
+/* ── Empty state ── */
+.empty{padding:48px;text-align:center;color:var(--text3)}
+.empty-icon{font-size:36px;margin-bottom:12px;opacity:.5}
+.empty-msg{font-size:15px;font-weight:600;color:var(--text2);margin-bottom:6px}
+.empty-sub{font-size:13px;color:var(--text3)}
+/* ── RSI mini badge ── */
+.rsi-badge{font-size:11px;color:var(--text3);margin-left:4px}
+/* ── Loading ── */
+.loading{padding:40px;text-align:center;color:var(--text3);font-size:13px}
+/* ── Responsive ── */
+@media(max-width:900px){main{padding:16px}}
+@media(max-width:600px){
+  header{padding:0 14px}
+  main{padding:10px 12px}
+  .stat-row{grid-template-columns:1fr 1fr}
+  .sc{padding:12px}
+  .sc-val{font-size:18px}
+  td,th{padding:8px 10px;font-size:12px}
+  .reason-cell{max-width:160px}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Trade Journal</div>
+  <div class="hdr-right">
+    <button class="btn-back" onclick="window.location='/stats'">Stats</button>
+    <button class="btn-back" onclick="window.location='/dashboard'">← Dashboard</button>
+  </div>
+</header>
+
+<main>
+  <!-- ── Summary stats ── -->
+  <div class="stat-row" id="stat-row">
+    <div class="sc"><div class="sc-label">Total Trades</div><div class="sc-val neu" id="s-total">—</div></div>
+    <div class="sc"><div class="sc-label">Win Rate</div><div class="sc-val" id="s-winrate">—</div><div class="sc-sub">on closed positions</div></div>
+    <div class="sc"><div class="sc-label">Avg Gain</div><div class="sc-val pos" id="s-gain">—</div></div>
+    <div class="sc"><div class="sc-label">Avg Loss</div><div class="sc-val neg" id="s-loss">—</div></div>
+    <div class="sc"><div class="sc-label">Total Realized P&amp;L</div><div class="sc-val" id="s-pnl">—</div></div>
+    <div class="sc"><div class="sc-label">Best Trade</div><div class="sc-val pos" id="s-best">—</div></div>
+    <div class="sc"><div class="sc-label">Worst Trade</div><div class="sc-val neg" id="s-worst">—</div></div>
+  </div>
+
+  <!-- ── Journal table ── -->
+  <div class="panel">
+    <div class="panel-hdr">
+      <div class="panel-title">
+        All Trades
+        <span class="count-badge" id="tbl-count">0</span>
+      </div>
+      <div class="filter-wrap">
+        <button class="filter-btn active" onclick="setFilter('ALL',this)">All</button>
+        <button class="filter-btn" onclick="setFilter('BUY',this)">BUY</button>
+        <button class="filter-btn" onclick="setFilter('SELL',this)">SELL</button>
+      </div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Date &amp; Time</th>
+            <th>Ticker</th>
+            <th>Action</th>
+            <th>Qty</th>
+            <th>Price</th>
+            <th>Score</th>
+            <th>RSI</th>
+            <th>P&amp;L</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody id="jrn-body">
+          <tr><td colspan="9" class="loading">Loading journal…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+let _allEntries = [];
+let _filter = 'ALL';
+
+function fmt$(v, dec=2) {
+  if (v == null) return '—';
+  return '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits:dec, maximumFractionDigits:dec});
+}
+function fmtNum(v, dec=2) {
+  if (v == null) return '—';
+  return Number(v).toFixed(dec);
+}
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const date = d.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'});
+  const time = d.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', hour12:true});
+  return `<span style="color:#eaf0fb;font-weight:600">${date}</span><br>
+          <span style="color:#4a5a78;font-size:11px">${time}</span>`;
+}
+
+function setFilter(f, btn) {
+  _filter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTable();
+}
+
+function renderTable() {
+  const rows = _filter === 'ALL' ? _allEntries
+             : _allEntries.filter(e => e.action === _filter);
+  document.getElementById('tbl-count').textContent = rows.length;
+  const tbody = document.getElementById('jrn-body');
+  if (!rows.length) {
+    const msg = _filter === 'ALL' ? 'No trades logged yet — run a cycle to start trading'
+              : `No ${_filter} trades in the journal`;
+    tbody.innerHTML = `<tr><td colspan="9">
+      <div class="empty">
+        <div class="empty-icon">📋</div>
+        <div class="empty-msg">No trades yet</div>
+        <div class="empty-sub">${msg}</div>
+      </div>
+    </td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(e => {
+    const ind   = e.indicators || {};
+    const score = ind.score != null ? ind.score : null;
+    const rsi   = ind.rsi   != null ? ind.rsi   : null;
+    const isBuy = e.action === 'BUY';
+
+    // Score chip colour
+    const scoreCol = score == null ? '#4a5a78'
+                   : score >= 0.3 ? '#34d399' : score <= -0.3 ? '#f87171' : '#8898b8';
+    const scoreStr = score != null ? `${score >= 0 ? '+' : ''}${fmtNum(score, 3)}` : '—';
+
+    // RSI colour hint
+    const rsiCol = rsi == null ? '#4a5a78'
+                 : rsi < 30 ? '#34d399' : rsi > 70 ? '#f87171' : '#8898b8';
+
+    // P&L
+    let pnlHtml = '<span style="color:#4a5a78">—</span>';
+    if (e.pnl != null) {
+      const sign = e.pnl >= 0 ? '+' : '';
+      const cls  = e.pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+      const pct  = e.pnl_pct != null ? ` (${sign}${(e.pnl_pct*100).toFixed(2)}%)` : '';
+      pnlHtml = `<span class="${cls}">${sign}${fmt$(e.pnl)}${pct}</span>`;
+    }
+
+    // Reason — truncate long strings with title tooltip
+    const reason = e.reason || '—';
+    const reasonDisplay = reason.length > 60 ? reason.slice(0, 58) + '…' : reason;
+
+    return `<tr>
+      <td>${fmtDate(e.timestamp)}</td>
+      <td><span style="font-weight:700;color:#f1f5f9;font-size:14px;letter-spacing:-.3px">${e.symbol}</span></td>
+      <td><span class="pill pill-${e.action}">${e.action}</span></td>
+      <td style="font-weight:600">${e.shares != null ? fmtNum(e.shares, 0) : '—'}</td>
+      <td style="font-weight:600">${fmt$(e.price)}</td>
+      <td><span class="score-chip" style="color:${scoreCol};background:${scoreCol}22;border:1px solid ${scoreCol}33">${scoreStr}</span></td>
+      <td style="color:${rsiCol}">${rsi != null ? fmtNum(rsi, 1) : '—'}</td>
+      <td>${pnlHtml}</td>
+      <td class="reason-cell" title="${reason.replace(/"/g,'&quot;')}">${reasonDisplay}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderStats(stats) {
+  const dollar = v => v == null ? '—' : (v >= 0 ? '+' : '') + '$' + Math.abs(v).toFixed(2);
+  document.getElementById('s-total').textContent   = stats.total_trades ?? '—';
+  const wr = document.getElementById('s-winrate');
+  wr.textContent = stats.win_rate != null ? stats.win_rate + '%' : '—';
+  wr.className   = 'sc-val ' + (stats.win_rate >= 50 ? 'pos' : stats.win_rate < 50 ? 'neg' : 'neu');
+  document.getElementById('s-gain').textContent    = stats.avg_gain != null ? '+$' + stats.avg_gain.toFixed(2) : '—';
+  document.getElementById('s-loss').textContent    = stats.avg_loss != null ? '$' + stats.avg_loss.toFixed(2) : '—';
+  const pnlEl = document.getElementById('s-pnl');
+  pnlEl.textContent = dollar(stats.total_pnl);
+  pnlEl.className   = 'sc-val ' + (stats.total_pnl > 0 ? 'pos' : stats.total_pnl < 0 ? 'neg' : 'neu');
+  document.getElementById('s-best').textContent    = stats.best_trade  != null ? '+$' + stats.best_trade.toFixed(2) : '—';
+  document.getElementById('s-worst').textContent   = stats.worst_trade != null ? '$' + stats.worst_trade.toFixed(2) : '—';
+}
+
+async function loadJournal() {
+  try {
+    const res  = await fetch('/api/journal');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'API error');
+    // most recent first
+    _allEntries = (data.entries || []).slice().reverse();
+    renderTable();
+    if (data.stats) renderStats(data.stats);
+  } catch (err) {
+    document.getElementById('jrn-body').innerHTML =
+      `<tr><td colspan="9" class="loading" style="color:#f87171">Failed to load: ${err.message}</td></tr>`;
+  }
+}
+
+loadJournal();
+</script>
+</body>
+</html>"""
+
+
 STATS_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -3992,6 +4271,15 @@ if ('serviceWorker' in navigator) {
 @app.route("/stats")
 def stats_page():
     return render_template_string(STATS_HTML)
+
+
+@app.route("/journal")
+def journal_page():
+    if _AUTH_ENABLED and not session.get("logged_in"):
+        return redirect("/login?next=/journal")
+    resp = make_response(render_template_string(JOURNAL_HTML))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return resp
 
 
 @app.route("/")
