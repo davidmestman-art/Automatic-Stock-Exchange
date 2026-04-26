@@ -57,9 +57,12 @@ class Backtester:
             return compute_metrics([], [], 0)
 
         first_df = next(iter(all_data.values()))
+        tz = first_df.index.tz
+        start_ts = pd.Timestamp(start_date).tz_localize(tz) if tz else pd.Timestamp(start_date)
+        end_ts   = pd.Timestamp(end_date).tz_localize(tz)   if tz else pd.Timestamp(end_date)
         trading_days = first_df.index[
-            (first_df.index >= pd.Timestamp(start_date))
-            & (first_df.index <= pd.Timestamp(end_date))
+            (first_df.index >= start_ts)
+            & (first_df.index <= end_ts)
         ]
 
         warm_up = max(
