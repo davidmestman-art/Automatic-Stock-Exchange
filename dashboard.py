@@ -750,9 +750,10 @@ RISK_PROFILES = {
         "label": "Conservative",
         "tagline": "Lower risk, smaller positions, only strong signals",
         "color": "#10b981",
+        "score_label": "8+",
         "overrides": {
-            "max_position_pct": 0.05,
-            "min_position_pct": 0.02,
+            "max_position_pct": 0.02,
+            "min_position_pct": 0.01,
             "max_open_positions": 5,
             "stop_loss_pct": 0.03,
             "take_profit_pct": 0.10,
@@ -766,9 +767,10 @@ RISK_PROFILES = {
         "label": "Moderate",
         "tagline": "Balanced defaults — current behaviour",
         "color": "#3b82f6",
+        "score_label": "6+",
         "overrides": {
-            "max_position_pct": 0.10,
-            "min_position_pct": 0.03,
+            "max_position_pct": 0.05,
+            "min_position_pct": 0.02,
             "max_open_positions": 8,
             "stop_loss_pct": 0.05,
             "take_profit_pct": 0.15,
@@ -782,9 +784,10 @@ RISK_PROFILES = {
         "label": "Aggressive",
         "tagline": "Larger positions, wider stops, acts on weaker signals",
         "color": "#f59e0b",
+        "score_label": "4+",
         "overrides": {
-            "max_position_pct": 0.18,
-            "min_position_pct": 0.05,
+            "max_position_pct": 0.10,
+            "min_position_pct": 0.03,
             "max_open_positions": 12,
             "stop_loss_pct": 0.08,
             "take_profit_pct": 0.25,
@@ -1764,7 +1767,8 @@ def api_settings():
             "email_notifications": _get_engine().emailer.active,
             "email_configured": _get_engine().emailer.is_configured,
             "profiles": {
-                k: {"label": v["label"], "tagline": v["tagline"], "color": v["color"], "overrides": v["overrides"]}
+                k: {"label": v["label"], "tagline": v["tagline"], "color": v["color"],
+                    "score_label": v.get("score_label", ""), "overrides": v["overrides"]}
                 for k, v in RISK_PROFILES.items()
             },
         })
@@ -4337,7 +4341,7 @@ td.diff-dn{color:#f87171}
 </div>
 
 <script>
-const PROFILES = {{ profiles_json }};
+const PROFILES = {{ profiles_json | safe }};
 let selected = "{{ current_profile }}";
 
 const PARAM_LABELS = {
@@ -4373,10 +4377,10 @@ function renderCards() {
       <div class="profile-name">${prof.label}</div>
       <div class="profile-tagline">${prof.tagline}</div>
       <div class="profile-params">
-        <div class="param-row"><span class="param-label">Max position</span><span class="param-val">${pct(overrides.max_position_pct)}</span></div>
+        <div class="param-row"><span class="param-label">Position size</span><span class="param-val">${pct(overrides.max_position_pct)}</span></div>
         <div class="param-row"><span class="param-label">Stop-loss</span><span class="param-val">${pct(overrides.stop_loss_pct)}</span></div>
         <div class="param-row"><span class="param-label">Take-profit</span><span class="param-val">${pct(overrides.take_profit_pct)}</span></div>
-        <div class="param-row"><span class="param-label">Buy threshold</span><span class="param-val">${overrides.buy_threshold}</span></div>
+        <div class="param-row"><span class="param-label">Min score</span><span class="param-val">${prof.score_label || overrides.buy_threshold}</span></div>
         <div class="param-row"><span class="param-label">Max positions</span><span class="param-val">${overrides.max_open_positions}</span></div>
       </div>`;
     card.onclick = () => selectProfile(key);
@@ -4387,7 +4391,8 @@ function renderCards() {
 function renderDetail() {
   const tbody = document.getElementById("detail-body");
   const keys = Object.keys(PARAM_LABELS);
-  const vals = { conservative: PROFILES.conservative.overrides, moderate: PROFILES.moderate.overrides, aggressive: PROFILES.aggressive.overrides };
+  const cp = PROFILES.conservative || {}; const mp = PROFILES.moderate || {}; const ap = PROFILES.aggressive || {};
+  const vals = { conservative: cp.overrides || {}, moderate: mp.overrides || {}, aggressive: ap.overrides || {} };
   tbody.innerHTML = keys.map(k => {
     const c = vals.conservative[k], m = vals.moderate[k], a = vals.aggressive[k];
     return `<tr>
@@ -5488,7 +5493,8 @@ def settings_page():
     if _AUTH_ENABLED and not session.get("logged_in"):
         return redirect("/login?next=/settings")
     profiles_json = json.dumps({
-        k: {"label": v["label"], "tagline": v["tagline"], "color": v["color"], "overrides": v["overrides"]}
+        k: {"label": v["label"], "tagline": v["tagline"], "color": v["color"],
+            "score_label": v.get("score_label", ""), "overrides": v["overrides"]}
         for k, v in RISK_PROFILES.items()
     })
     eng = _get_engine()
