@@ -537,6 +537,7 @@ _AUTH_ENABLED = bool(_DASH_USER and _DASH_PASS)
 # across restarts; otherwise a random key is generated (sessions reset on restart).
 app.secret_key = os.getenv("DASH_SECRET_KEY") or secrets.token_hex(32)
 app.config["SESSION_PERMANENT"] = False
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=4)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
@@ -5578,10 +5579,12 @@ def settings_page():
 
 @app.route("/")
 def home():
+    _logged_in = bool(session.get("logged_in"))
+    logging.info("[HOME] logged_in=%s session_keys=%s", _logged_in, list(session.keys()))
     resp = make_response(render_template_string(
         _LANDING_HTML,
         auth=_AUTH_ENABLED,
-        logged_in=bool(session.get("logged_in")),
+        logged_in=_logged_in,
     ))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp
