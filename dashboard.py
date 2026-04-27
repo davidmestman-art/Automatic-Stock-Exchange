@@ -942,7 +942,7 @@ def _safe_empty_state(error: str = "") -> dict:
         "mean_reversion_enabled": False, "correlation_filter_enabled": False,
         "adaptive_sizing_enabled": False, "regime": None, "ml_status": None,
         "public_url": None, "personal_watchlist": [],
-        "alpaca_connected": False,
+        "alpaca_connected": None,
     }
 
 
@@ -5583,7 +5583,7 @@ def home():
     resp = make_response(render_template_string(
         _LANDING_HTML,
         auth=_AUTH_ENABLED,
-        logged_in=bool(session.get("logged_in")) if _AUTH_ENABLED else True,
+        logged_in=bool(session.get("logged_in")),
     ))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp
