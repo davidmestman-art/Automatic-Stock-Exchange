@@ -2675,6 +2675,7 @@ const cls = n => n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu';
 
 function applyState(s) {
   if (!s || typeof s !== 'object') return;
+  window._state = s;
   const p = s.portfolio || {};
   const signals   = s.signals   || [];
   const positions = s.positions || [];
