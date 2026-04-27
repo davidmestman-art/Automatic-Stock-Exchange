@@ -288,8 +288,7 @@ footer{border-top:1px solid var(--border);padding:32px 48px;display:flex;align-i
     {% if logged_in %}
     <a href="/dashboard" class="btn-hero-p">Open Dashboard &rarr;</a>
     {% else %}
-    <a href="/login" class="btn-hero-p">Start Paper Trading Free &rarr;</a>
-    <a href="#how-it-works" class="btn-hero-s">See how it works</a>
+    <a href="/register" class="btn-hero-p">Start Paper Trading Free &rarr;</a>
     {% endif %}
     <a href="/leaderboard" class="btn-hero-s" style="border-color:rgba(16,185,129,.4);color:#6ee7b7">&#127942; See Our Track Record</a>
   </div>
@@ -537,7 +536,7 @@ _AUTH_ENABLED = bool(_DASH_USER and _DASH_PASS)
 # Secret key signs session cookies. Set DASH_SECRET_KEY in .env for persistence
 # across restarts; otherwise a random key is generated (sessions reset on restart).
 app.secret_key = os.getenv("DASH_SECRET_KEY") or secrets.token_hex(32)
-app.permanent_session_lifetime = timedelta(days=30)
+app.config["SESSION_PERMANENT"] = False
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
@@ -624,7 +623,6 @@ def login():
             # Re-fetch in case _ensure_admin_in_db() just created the row
             if db_user is None:
                 db_user = User.query.filter_by(username=username).first()
-            session.permanent = True
             session["logged_in"] = True
             session["user_id"] = db_user.id if db_user else None
             next_url = request.args.get("next", "/dashboard")
@@ -2526,9 +2524,11 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
 
 <main>
   <div class="error-banner" id="err-banner"></div>
-  <div id="no-keys-banner" style="{% if alpaca_connected %}display:none{% else %}display:flex{% endif %};background:#1c1508;border:1px solid #92400e;border-radius:8px;padding:12px 16px;margin-bottom:14px;align-items:center;justify-content:space-between;gap:12px">
+{% if not alpaca_connected %}
+  <div id="no-keys-banner" style="display:flex;background:#1c1508;border:1px solid #92400e;border-radius:8px;padding:12px 16px;margin-bottom:14px;align-items:center;justify-content:space-between;gap:12px">
     <span style="font-size:13px;color:#fbbf24">&#9888; Connect your Alpaca API keys in <a href="/settings" style="color:#fbbf24;text-decoration:underline">Settings</a> to start trading.</span>
   </div>
+{% endif %}
 
   <!-- ══ Stock Search & Favorites — always first, impossible to miss ══ -->
   <div class="panel grid1" id="search-panel" style="border:1px solid #0ea5e9;margin-bottom:14px">
@@ -2712,8 +2712,6 @@ function applyState(s) {
   const trades    = s.trades    || [];
 
   // no-keys banner
-  const noKeysBanner = document.getElementById('no-keys-banner');
-  if (noKeysBanner) noKeysBanner.style.display = (s.alpaca_connected === false) ? 'flex' : 'none';
 
   // mode badge
   const mode = s.mode || 'Local Simulation';
