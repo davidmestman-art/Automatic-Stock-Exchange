@@ -754,7 +754,7 @@ RISK_PROFILES = {
         "overrides": {
             "max_position_pct": 0.02,
             "min_position_pct": 0.01,
-            "max_open_positions": 5,
+            "max_open_positions": 3,
             "stop_loss_pct": 0.03,
             "take_profit_pct": 0.10,
             "trailing_stop_pct": 0.03,
@@ -771,7 +771,7 @@ RISK_PROFILES = {
         "overrides": {
             "max_position_pct": 0.05,
             "min_position_pct": 0.02,
-            "max_open_positions": 8,
+            "max_open_positions": 5,
             "stop_loss_pct": 0.05,
             "take_profit_pct": 0.15,
             "trailing_stop_pct": 0.05,
@@ -788,7 +788,7 @@ RISK_PROFILES = {
         "overrides": {
             "max_position_pct": 0.10,
             "min_position_pct": 0.03,
-            "max_open_positions": 12,
+            "max_open_positions": 8,
             "stop_loss_pct": 0.08,
             "take_profit_pct": 0.25,
             "trailing_stop_pct": 0.08,
@@ -4344,17 +4344,6 @@ td.diff-dn{color:#f87171}
 const PROFILES = {{ profiles_json | safe }};
 let selected = "{{ current_profile }}";
 
-const PARAM_LABELS = {
-  max_position_pct:    "Max position size",
-  min_position_pct:    "Min position size",
-  max_open_positions:  "Max open positions",
-  stop_loss_pct:       "Stop-loss",
-  take_profit_pct:     "Take-profit",
-  trailing_stop_pct:   "Trailing stop",
-  daily_loss_limit_pct:"Daily loss limit",
-  buy_threshold:       "Buy threshold (score)",
-  sell_threshold:      "Sell threshold (score)",
-};
 
 const ICONS = { conservative: "🛡️", moderate: "⚖️", aggressive: "🚀" };
 
@@ -4390,18 +4379,19 @@ function renderCards() {
 
 function renderDetail() {
   const tbody = document.getElementById("detail-body");
-  const keys = Object.keys(PARAM_LABELS);
-  const cp = PROFILES.conservative || {}; const mp = PROFILES.moderate || {}; const ap = PROFILES.aggressive || {};
-  const vals = { conservative: cp.overrides || {}, moderate: mp.overrides || {}, aggressive: ap.overrides || {} };
-  tbody.innerHTML = keys.map(k => {
-    const c = vals.conservative[k], m = vals.moderate[k], a = vals.aggressive[k];
-    return `<tr>
-      <td>${PARAM_LABELS[k]}</td>
-      <td class="diff-up">${pct(c)}</td>
-      <td>${pct(m)}</td>
-      <td class="diff-dn">${pct(a)}</td>
-    </tr>`;
-  }).join("");
+  const rows = [
+    {label: "Position Size",       c: "2%",     m: "5%",   a: "10%"},
+    {label: "Stop-Loss",           c: "3%",     m: "5%",   a: "8%"},
+    {label: "Signal Threshold",    c: "8+",     m: "6+",   a: "4+"},
+    {label: "Max Open Positions",  c: "3",      m: "5",    a: "8"},
+    {label: "Rebalance Frequency", c: "Weekly", m: "Daily",a: "Every Cycle"},
+  ];
+  tbody.innerHTML = rows.map(r => `<tr>
+    <td>${r.label}</td>
+    <td class="diff-up">${r.c}</td>
+    <td>${r.m}</td>
+    <td class="diff-dn">${r.a}</td>
+  </tr>`).join("");
 }
 
 function selectProfile(key) {
