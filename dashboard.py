@@ -942,6 +942,8 @@ def _safe_empty_state(error: str = "") -> dict:
         "adaptive_sizing_enabled": False, "regime": None, "ml_status": None,
         "public_url": None, "personal_watchlist": [],
         "alpaca_connected": None,
+        "next_close": None,
+        "today": {"pnl": None, "pnl_pct": None, "trades": 0, "sparkline": []},
     }
 
 
@@ -980,6 +982,8 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                     "pnl": round(pnl, 2),
                     "pnl_pct": round(pnl_pct, 2),
                     "sector": get_sector(sym) or "—",
+                    "change_today": round(float(p["change_today"]), 2) if p.get("change_today") is not None else None,
+                    "change_today_pct": round(float(p["change_today_pct"]) * 100, 2) if p.get("change_today_pct") is not None else None,
                 })
         except Exception as e:
             log.warning(f"Alpaca live positions failed: {e}")
@@ -1127,11 +1131,28 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
     )
 
     market_open = None
+    next_close = None
     if eng.config.use_alpaca:
         try:
             market_open = eng.executor.is_market_open()
+            clock = eng.executor.get_clock_info()
+            next_close = clock.get("next_close")
         except Exception:
             market_open = None
+
+    # ── Today's performance — Alpaca portfolio history ────────────────────────
+    today_perf: dict = {}
+    if eng.config.use_alpaca:
+        try:
+            today_perf = eng.executor.get_daily_performance()
+        except Exception as e:
+            log.debug("Daily performance fetch failed: %s", e)
+
+    # Count today's trades
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_trade_count = sum(
+        1 for t in trades_list if (t.get("timestamp") or "").startswith(today_str)
+    )
 
     # ── Extended hours ────────────────────────────────────────────────────────
     ext_hours = []
@@ -1185,6 +1206,13 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "public_url": _public_url,
         "personal_watchlist": _personal_watchlist,
         "alpaca_connected": eng.config.use_alpaca,
+        "next_close": next_close,
+        "today": {
+            "pnl": today_perf.get("today_pnl"),
+            "pnl_pct": today_perf.get("today_pnl_pct"),
+            "trades": today_trade_count,
+            "sparkline": today_perf.get("sparkline") or [],
+        },
     }
 
 
@@ -2189,6 +2217,14 @@ button{cursor:pointer;padding:7px 16px;border-radius:6px;border:none;font-size:1
 /* ── Layout ──────────────────────────────────────────────────────────────── */
 main{padding:16px 20px;max-width:1400px;margin:0 auto}
 
+/* ── Today's performance strip ───────────────────────────────────────────── */
+.today-strip{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;margin-bottom:14px;background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px 18px;align-items:start}
+.today-item{display:flex;flex-direction:column;gap:3px}
+.today-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px}
+.today-val{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;color:#f1f5f9}
+.today-sub{font-size:11px;color:#64748b}
+.today-spark-wrap{min-width:140px}
+.today-spark-wrap svg{display:block;margin-top:6px}
 /* ── Stat cards ──────────────────────────────────────────────────────────── */
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px}
 .card{background:#1e293b;border-radius:10px;padding:14px 16px;border:1px solid #334155}
@@ -2619,6 +2655,28 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
     <div class="pin-grid" id="pin-grid"></div>
   </div>
 
+  <!-- today's performance strip -->
+  <div class="today-strip" id="today-strip">
+    <div class="today-item">
+      <div class="today-label">Today's P&amp;L</div>
+      <div class="today-val" id="td-pnl">—</div>
+      <div class="today-sub" id="td-pnl-pct">—</div>
+    </div>
+    <div class="today-item">
+      <div class="today-label">Today's Trades</div>
+      <div class="today-val neu" id="td-trades">—</div>
+    </div>
+    <div class="today-item">
+      <div class="today-label">Market</div>
+      <div class="today-val" id="td-market">—</div>
+      <div class="today-sub" id="td-market-sub">—</div>
+    </div>
+    <div class="today-spark-wrap">
+      <div class="today-label">Today's Equity</div>
+      <svg id="today-spark" width="100%" height="48" preserveAspectRatio="none"></svg>
+    </div>
+  </div>
+
   <!-- stat cards -->
   <div class="cards">
     <div class="card">
@@ -2744,9 +2802,9 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
       <div class="sector-strip" id="sector-strip" style="display:none"></div>
       <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Ticker</th><th>Sector</th><th>Entry</th><th>Current</th><th id="stop-th">Stop</th><th>Qty</th><th>Unrealized P&amp;L</th>
+          <th>Ticker</th><th>Sector</th><th>Entry</th><th>Current</th><th id="stop-th">Stop</th><th>Qty</th><th>Day Change</th><th>Unrealized P&amp;L</th>
         </tr></thead>
-        <tbody id="pos-body"><tr><td colspan="7" class="empty">No open positions</td></tr></tbody>
+        <tbody id="pos-body"><tr><td colspan="8" class="empty">No open positions</td></tr></tbody>
       </table></div>
     </div>
     <div class="panel">
@@ -2811,6 +2869,9 @@ function applyState(s) {
 
   document.getElementById('c-open').textContent = p.open_positions;
   document.getElementById('c-trades').textContent = p.total_trades;
+
+  // today's performance strip
+  renderToday(s.today || {}, s.market_open, s.next_close);
 
   // live P&L ticker — sum unrealized from all open positions
   {
@@ -3016,7 +3077,7 @@ function applyState(s) {
   document.getElementById('pos-count').textContent = positions.length;
   const pb = document.getElementById('pos-body');
   if (!positions.length) {
-    pb.innerHTML = '<tr><td colspan="7" class="empty">No open positions</td></tr>';
+    pb.innerHTML = '<tr><td colspan="8" class="empty">No open positions</td></tr>';
   } else {
     pb.innerHTML = positions.map(p => {
       // Stop column: green when trailing stop has ratcheted above the fixed stop
@@ -3026,6 +3087,13 @@ function applyState(s) {
       const stopTip = stopMoved
         ? `title="High: $${fmt(p.highest_price)}  Locked in ${fmt((p.stop_loss/p.entry_price-1)*100,1)}%"`
         : '';
+      // Day Change
+      let dayHtml = '<span style="color:#4a5a78">—</span>';
+      if (p.change_today != null) {
+        const sign = p.change_today >= 0 ? '+' : '';
+        const pctStr = p.change_today_pct != null ? ` (${sign}${fmt(p.change_today_pct)}%)` : '';
+        dayHtml = `<span class="${cls(p.change_today)}">${sign}$${fmt(Math.abs(p.change_today))}${pctStr}</span>`;
+      }
       return `<tr>
         <td style="font-weight:600">${p.symbol}</td>
         <td style="color:#64748b;font-size:12px">${p.sector||'—'}</td>
@@ -3033,6 +3101,7 @@ function applyState(s) {
         <td>$${fmt(p.current_price)}</td>
         <td style="color:${stopCol};font-size:12px" ${stopTip}>$${fmt(p.stop_loss)}${stopMoved?' ↑':''}</td>
         <td>${p.shares}</td>
+        <td>${dayHtml}</td>
         <td class="${cls(p.pnl)}">${p.pnl >= 0 ? '+' : ''}$${fmt(Math.abs(p.pnl))} (${p.pnl_pct >= 0 ? '+' : ''}${fmt(p.pnl_pct)}%)</td>
       </tr>`;
     }).join('');
@@ -3251,6 +3320,75 @@ async function refreshVOO() {
     btn.disabled = false;
     btn.textContent = 'Refresh VOO';
   }
+}
+
+function renderSparkline(equity) {
+  const svg = document.getElementById('today-spark');
+  if (!svg || !equity || equity.length < 2) {
+    if (svg) svg.innerHTML = '';
+    return;
+  }
+  const W = svg.clientWidth || 140, H = 48;
+  const min = Math.min(...equity), max = Math.max(...equity);
+  const range = max - min || 1;
+  const pts = equity.map((v, i) => {
+    const x = (i / (equity.length - 1)) * W;
+    const y = H - ((v - min) / range) * (H - 4) - 2;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const last = equity[equity.length - 1], first = equity[0];
+  const lineCol = last >= first ? '#34d399' : '#f87171';
+  svg.innerHTML = `
+    <polyline points="${pts}" fill="none" stroke="${lineCol}" stroke-width="1.5" stroke-linejoin="round"/>
+    <circle cx="${W}" cy="${(H - ((last - min) / range) * (H - 4) - 2).toFixed(1)}" r="3" fill="${lineCol}"/>`;
+}
+
+function renderToday(today, marketOpen, nextClose) {
+  const pnlEl    = document.getElementById('td-pnl');
+  const pnlPctEl = document.getElementById('td-pnl-pct');
+  const tradesEl = document.getElementById('td-trades');
+  const mktEl    = document.getElementById('td-market');
+  const mktSubEl = document.getElementById('td-market-sub');
+
+  // P&L
+  if (today.pnl != null) {
+    const sign = today.pnl >= 0 ? '+' : '';
+    pnlEl.textContent = sign + '$' + fmt(Math.abs(today.pnl));
+    pnlEl.className   = 'today-val ' + cls(today.pnl);
+  } else {
+    pnlEl.textContent = '—';
+    pnlEl.className   = 'today-val neu';
+  }
+  pnlPctEl.textContent = today.pnl_pct != null
+    ? (today.pnl_pct >= 0 ? '+' : '') + fmt(today.pnl_pct) + '%'
+    : '—';
+
+  // Trades
+  tradesEl.textContent = today.trades != null ? today.trades : '—';
+
+  // Market status + countdown
+  if (marketOpen === true) {
+    mktEl.textContent = 'OPEN';
+    mktEl.className   = 'today-val pos';
+    if (nextClose) {
+      const secsLeft = Math.max(0, Math.round((new Date(nextClose) - Date.now()) / 1000));
+      const h = Math.floor(secsLeft / 3600), m = Math.floor((secsLeft % 3600) / 60);
+      mktSubEl.textContent = `Closes in ${h}h ${m}m`;
+    } else {
+      mktSubEl.textContent = '';
+    }
+  } else if (marketOpen === false) {
+    mktEl.textContent = 'CLOSED';
+    mktEl.className   = 'today-val neu';
+    mktSubEl.textContent = nextClose ? 'Opens ' + new Date(nextClose).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '';
+  } else {
+    mktEl.textContent = '—';
+    mktEl.className   = 'today-val neu';
+    mktSubEl.textContent = '';
+  }
+
+  // Sparkline
+  renderSparkline(today.sparkline || []);
 }
 
 async function refresh() {
