@@ -157,8 +157,33 @@ class AlpacaExecutor:
                 "current_price": float(p.current_price) if p.current_price else None,
                 "pnl": float(p.unrealized_pl) if p.unrealized_pl else None,
                 "pnl_pct": float(p.unrealized_plpc) if p.unrealized_plpc else None,
+                "change_today": float(p.unrealized_intraday_pl) if p.unrealized_intraday_pl else None,
+                "change_today_pct": float(p.unrealized_intraday_plpc) if p.unrealized_intraday_plpc else None,
             })
         return result
+
+    def get_daily_performance(self) -> dict:
+        """Return today's P&L and equity sparkline from Alpaca portfolio history."""
+        from alpaca.trading.requests import GetPortfolioHistoryRequest
+        try:
+            hist = self.trading.get_portfolio_history(
+                GetPortfolioHistoryRequest(period="1D", timeframe="5Min", extended_hours=True)
+            )
+            if not hist or not hist.equity:
+                return {}
+            equity = [round(float(e), 2) for e in hist.equity if e is not None]
+            pnl_series = [round(float(pl), 2) for pl in hist.profit_loss if pl is not None]
+            pnl_pct_series = [
+                round(float(pp) * 100, 4) for pp in hist.profit_loss_pct if pp is not None
+            ]
+            return {
+                "today_pnl": pnl_series[-1] if pnl_series else 0,
+                "today_pnl_pct": pnl_pct_series[-1] if pnl_pct_series else 0,
+                "sparkline": equity[-48:],
+            }
+        except Exception as e:
+            logger.warning("Portfolio history fetch failed: %s", e)
+            return {}
 
     def get_filled_orders(self, limit: int = 30) -> List[dict]:
         """Return recent filled orders from Alpaca, newest first."""
