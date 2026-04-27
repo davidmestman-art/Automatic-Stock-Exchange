@@ -61,9 +61,11 @@ with app.app_context():
     from sqlalchemy import text as _sql
     with db.engine.connect() as _conn:
         for _col in [
-            "ALTER TABLE users ADD COLUMN alpaca_api_key_enc    TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE users ADD COLUMN alpaca_secret_key_enc TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE users ADD COLUMN alpaca_paper          INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE users ADD COLUMN alpaca_api_key_enc          TEXT    NOT NULL DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN alpaca_secret_key_enc        TEXT    NOT NULL DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN alpaca_paper                 INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE users ADD COLUMN notify_email                 TEXT    NOT NULL DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN email_notifications_enabled  INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 _conn.execute(_sql(_col))
@@ -721,6 +723,9 @@ def _create_user_engine(user_id: int) -> TradingEngine:
     journal_dir.mkdir(exist_ok=True)
     eng = TradingEngine(cfg)
     eng.journal = TradeJournal(journal_dir / f"user_{user_id}.jsonl")
+    if user and user.notify_email:
+        eng.emailer.notify_email = user.notify_email
+        eng.emailer.active = bool(user.email_notifications_enabled)
     return eng
 
 
@@ -1783,10 +1788,16 @@ def api_settings():
     # Email notifications toggle
     if "email_notifications" in data:
         enabled = bool(data["email_notifications"])
-        if enabled and not _get_engine().emailer.is_configured:
-            return jsonify({"ok": False, "error": "Email not configured — set EMAIL_HOST, EMAIL_USER, EMAIL_PASSWORD, NOTIFY_EMAIL environment variables."}), 400
         _get_engine().emailer.active = enabled
         saved["email_notifications"] = enabled
+        if _AUTH_ENABLED:
+            user_id = session.get("user_id")
+            if user_id:
+                _u = db.session.get(User, user_id)
+                if _u:
+                    _u.email_notifications_enabled = enabled
+                    db.session.commit()
+                    _invalidate_user_engine(user_id)
     _save_user_settings(saved)
     return jsonify({
         "ok": True,
@@ -1815,6 +1826,25 @@ def api_alpaca_keys():
     user.alpaca_api_key_enc    = _encrypt_key(api_key)
     user.alpaca_secret_key_enc = _encrypt_key(secret_key)
     user.alpaca_paper          = paper
+    db.session.commit()
+    _invalidate_user_engine(user_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/user-email", methods=["POST"])
+def api_user_email():
+    """Save per-user notification email address."""
+    if not _AUTH_ENABLED:
+        return jsonify({"ok": False, "error": "Auth not enabled"}), 400
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"ok": False, "error": "Not logged in"}), 401
+    data = request.get_json(silent=True) or {}
+    notify_email = (data.get("notify_email") or "").strip()
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({"ok": False, "error": "User not found"}), 404
+    user.notify_email = notify_email
     db.session.commit()
     _invalidate_user_engine(user_id)
     return jsonify({"ok": True})
@@ -2496,7 +2526,7 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
 
 <main>
   <div class="error-banner" id="err-banner"></div>
-  <div id="no-keys-banner" style="display:none;background:#1c1508;border:1px solid #92400e;border-radius:8px;padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+  <div id="no-keys-banner" style="{% if alpaca_connected %}display:none{% else %}display:flex{% endif %};background:#1c1508;border:1px solid #92400e;border-radius:8px;padding:12px 16px;margin-bottom:14px;align-items:center;justify-content:space-between;gap:12px">
     <span style="font-size:13px;color:#fbbf24">&#9888; Connect your Alpaca API keys in <a href="/settings" style="color:#fbbf24;text-decoration:underline">Settings</a> to start trading.</span>
   </div>
 
@@ -2675,6 +2705,7 @@ const cls = n => n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu';
 
 function applyState(s) {
   if (!s || typeof s !== 'object') return;
+  window._state = s;
   const p = s.portfolio || {};
   const signals   = s.signals   || [];
   const positions = s.positions || [];
@@ -4317,26 +4348,31 @@ td.diff-dn{color:#f87171}
   <!-- Email Notifications -->
   <div class="section-title">Notifications</div>
   <div class="section-sub">Get an email whenever a trade is executed with the ticker, action, price, score, and a plain-English explanation.</div>
-  <div class="email-card" id="email-card">
-    <div class="email-info">
-      <div class="email-title">Email Notifications</div>
-      <div class="email-desc">Sends a trade alert to <strong id="notify-addr">{{ notify_email or "NOTIFY_EMAIL" }}</strong> when a BUY or SELL is executed.</div>
-      {% if not email_configured %}
-      <div class="email-unconfigured">
-        &#9888; Add <code>EMAIL_HOST</code>, <code>EMAIL_PORT</code>, <code>EMAIL_USER</code>, <code>EMAIL_PASSWORD</code>, and <code>NOTIFY_EMAIL</code> environment variables to enable notifications.
+  <div class="email-card" id="email-card" style="flex-direction:column;align-items:stretch;gap:14px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+      <div class="email-info">
+        <div class="email-title">Email Notifications</div>
+        <div class="email-desc">Send a trade alert to your email whenever a BUY or SELL is executed.</div>
       </div>
-      {% endif %}
+      <div class="toggle-wrap">
+        <span class="toggle-label" id="email-state-label">{{ "ON" if email_active else "OFF" }}</span>
+        <label class="toggle">
+          <input type="checkbox" id="email-toggle"
+                 {% if email_active %}checked{% endif %}
+                 onchange="toggleEmail(this.checked)">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
     </div>
-    <div class="toggle-wrap">
-      <span class="toggle-label" id="email-state-label">{{ "ON" if email_active else "OFF" }}</span>
-      <label class="toggle">
-        <input type="checkbox" id="email-toggle"
-               {% if email_active %}checked{% endif %}
-               {% if not email_configured %}disabled{% endif %}
-               onchange="toggleEmail(this.checked)">
-        <span class="toggle-slider"></span>
-      </label>
+    <div style="display:flex;gap:10px;align-items:center">
+      <input id="notify-email-input" type="email"
+             class="alpaca-input" style="flex:1"
+             placeholder="your@email.com"
+             value="{{ notify_email }}"
+             autocomplete="email"/>
+      <button class="btn-save" onclick="saveNotifyEmail()">Save Email</button>
     </div>
+    <div id="email-save-status" style="font-size:12px;display:none"></div>
   </div>
 </div>
 
@@ -4451,6 +4487,32 @@ async function toggleEmail(enabled) {
   } finally {
     toggle.disabled = false;
   }
+}
+
+async function saveNotifyEmail() {
+  const input  = document.getElementById("notify-email-input");
+  const status = document.getElementById("email-save-status");
+  const email  = input.value.trim();
+  status.style.display = "none";
+  try {
+    const res = await fetch("/api/user-email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notify_email: email }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      status.textContent = email ? "✓ Email saved." : "✓ Email cleared.";
+      status.style.color = "#10b981";
+    } else {
+      status.textContent = "Error: " + (data.error || "unknown error");
+      status.style.color = "#f87171";
+    }
+  } catch(e) {
+    status.textContent = "Network error: " + e;
+    status.style.color = "#f87171";
+  }
+  status.style.display = "block";
 }
 
 renderCards();
@@ -5490,20 +5552,25 @@ def settings_page():
     eng = _get_engine()
     alpaca_connected = False
     alpaca_paper     = True
+    user_notify_email   = ""
+    user_email_enabled  = False
     if _AUTH_ENABLED:
         user_id = session.get("user_id")
         if user_id:
             _u = db.session.get(User, user_id)
-            if _u and _u.alpaca_api_key_enc:
-                alpaca_connected = True
-                alpaca_paper     = bool(_u.alpaca_paper)
+            if _u:
+                if _u.alpaca_api_key_enc:
+                    alpaca_connected = True
+                    alpaca_paper     = bool(_u.alpaca_paper)
+                user_notify_email  = _u.notify_email or ""
+                user_email_enabled = bool(_u.email_notifications_enabled)
     resp = make_response(render_template_string(
         SETTINGS_HTML,
         profiles_json=profiles_json,
         current_profile=_current_profile,
         email_configured=eng.emailer.is_configured,
-        email_active=eng.emailer.active,
-        notify_email=eng.emailer.notify_email,
+        email_active=user_email_enabled if _AUTH_ENABLED else eng.emailer.active,
+        notify_email=user_notify_email if _AUTH_ENABLED else eng.emailer.notify_email,
         alpaca_connected=alpaca_connected,
         alpaca_paper=alpaca_paper,
     ))
@@ -5528,7 +5595,17 @@ def index():
     if _AUTH_ENABLED and not session.get("logged_in"):
         logging.warning("[AUTH] /dashboard hit without session — redirecting to login")
         return redirect("/login?next=/dashboard")
-    resp = make_response(render_template_string(HTML, auth=_AUTH_ENABLED))
+    alpaca_connected = False
+    if _AUTH_ENABLED:
+        user_id = session.get("user_id")
+        if user_id:
+            try:
+                _u = db.session.get(User, user_id)
+                if _u and _u.alpaca_api_key_enc:
+                    alpaca_connected = True
+            except Exception:
+                pass
+    resp = make_response(render_template_string(HTML, auth=_AUTH_ENABLED, alpaca_connected=alpaca_connected))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp
 
