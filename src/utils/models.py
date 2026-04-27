@@ -21,6 +21,9 @@ class User(db.Model):
     alpaca_api_key_enc    = db.Column(db.Text, nullable=False, default="")
     alpaca_secret_key_enc = db.Column(db.Text, nullable=False, default="")
     alpaca_paper          = db.Column(db.Boolean, nullable=False, default=True)
+    # Email notification settings
+    notify_email                = db.Column(db.Text, nullable=False, default="")
+    email_notifications_enabled = db.Column(db.Boolean, nullable=False, default=False)
 
     def __repr__(self) -> str:
         return f"<User id={self.id} username={self.username!r}>"
