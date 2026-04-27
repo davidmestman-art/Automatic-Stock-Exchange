@@ -1682,8 +1682,70 @@ def api_chart(symbol):
 def api_journal():
     try:
         eng = _get_engine()
-        entries = list(reversed(eng.journal.read_recent(200)))
-        return jsonify({"ok": True, "entries": entries, "stats": eng.journal.stats()})
+
+        # Primary source: JSONL entries — include full indicator snapshots (score, RSI, etc.)
+        journal_entries = eng.journal.read_recent(200)
+
+        # Secondary source: same trades the dashboard uses (Alpaca or in-memory portfolio)
+        extra_trades: list = []
+        if eng.config.use_alpaca:
+            try:
+                extra_trades = eng.executor.get_filled_orders(limit=200)
+            except Exception as _e:
+                log.warning("[JOURNAL] Alpaca orders fetch failed: %s", _e)
+        if not extra_trades:
+            portfolio = eng.portfolio
+            extra_trades = [
+                {
+                    "timestamp": t.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    "action": t.action,
+                    "symbol": t.symbol,
+                    "shares": round(t.shares, 4),
+                    "price": round(t.price, 2),
+                    "pnl": round(t.pnl, 2) if t.pnl is not None else None,
+                    "pnl_pct": round(t.pnl_pct, 4) if t.pnl_pct is not None else None,
+                    "reason": t.reason,
+                }
+                for t in portfolio.trades[-200:]
+            ]
+
+        # Merge: JSONL takes priority (has indicators). Add extra trades not already in JSONL.
+        def _ts_min(ts: str) -> str:
+            return (ts or "")[:16].replace("T", " ")
+
+        seen = {
+            (_ts_min(e.get("timestamp", "")), e.get("symbol"), e.get("action"))
+            for e in journal_entries
+        }
+        for t in extra_trades:
+            key = (_ts_min(t.get("timestamp", "")), t.get("symbol"), t.get("action"))
+            if key not in seen:
+                seen.add(key)
+                journal_entries.append(t)
+
+        journal_entries.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        entries = journal_entries[:200]
+
+        # Recompute stats from merged entry set
+        sells = [e for e in entries if e.get("action") == "SELL" and e.get("pnl") is not None]
+        if sells:
+            pnls     = [e["pnl"] for e in sells]
+            winners  = [p for p in pnls if p > 0]
+            losers   = [p for p in pnls if p <= 0]
+            stats = {
+                "total_trades": len(entries),
+                "sell_trades":  len(sells),
+                "win_rate":     round(len(winners) / len(sells) * 100, 1),
+                "avg_gain":     round(sum(winners) / len(winners), 2) if winners else 0,
+                "avg_loss":     round(sum(losers)  / len(losers),  2) if losers  else 0,
+                "best_trade":   round(max(pnls), 2),
+                "worst_trade":  round(min(pnls), 2),
+                "total_pnl":    round(sum(pnls), 2),
+            }
+        else:
+            stats = {"total_trades": len(entries), "sell_trades": 0}
+
+        return jsonify({"ok": True, "entries": entries, "stats": stats})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
