@@ -2496,7 +2496,7 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
 
 <main>
   <div class="error-banner" id="err-banner"></div>
-  <div id="no-keys-banner" style="display:none;background:#1c1508;border:1px solid #92400e;border-radius:8px;padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+  <div id="no-keys-banner" style="{% if alpaca_connected %}display:none{% else %}display:flex{% endif %};background:#1c1508;border:1px solid #92400e;border-radius:8px;padding:12px 16px;margin-bottom:14px;align-items:center;justify-content:space-between;gap:12px">
     <span style="font-size:13px;color:#fbbf24">&#9888; Connect your Alpaca API keys in <a href="/settings" style="color:#fbbf24;text-decoration:underline">Settings</a> to start trading.</span>
   </div>
 
@@ -5528,7 +5528,17 @@ def index():
     if _AUTH_ENABLED and not session.get("logged_in"):
         logging.warning("[AUTH] /dashboard hit without session — redirecting to login")
         return redirect("/login?next=/dashboard")
-    resp = make_response(render_template_string(HTML, auth=_AUTH_ENABLED))
+    alpaca_connected = False
+    if _AUTH_ENABLED:
+        user_id = session.get("user_id")
+        if user_id:
+            try:
+                _u = db.session.get(User, user_id)
+                if _u and _u.alpaca_api_key_enc:
+                    alpaca_connected = True
+            except Exception:
+                pass
+    resp = make_response(render_template_string(HTML, auth=_AUTH_ENABLED, alpaca_connected=alpaca_connected))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp
 
