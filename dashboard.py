@@ -1787,6 +1787,18 @@ def api_journal():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/universe")
+def api_universe():
+    try:
+        eng = _get_engine()
+        result = dict(eng.dynamic_universe.last_result)
+        result["current_watchlist"] = eng.watchlist
+        result["watchlist_size"]    = eng.config.watchlist_size
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/leaderboard")
 def api_leaderboard():
     try:
@@ -2215,6 +2227,8 @@ header{background:var(--bg1);border-bottom:1px solid var(--border);padding:0 20p
 .badge-paper{background:rgba(59,130,246,.18);color:#93c5fd;border:1px solid rgba(59,130,246,.3)}
 .badge-live{background:rgba(239,68,68,.18);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
 .badge-sim{background:rgba(100,116,139,.15);color:#94a3b8;border:1px solid var(--border)}
+.badge-connecting{background:rgba(100,116,139,.1);color:#64748b;border:1px dashed var(--border);animation:badge-pulse 1.4s ease-in-out infinite}
+@keyframes badge-pulse{0%,100%{opacity:.45}50%{opacity:1}}
 .market-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px;flex-shrink:0}
 .market-open{background:var(--green);box-shadow:0 0 5px var(--green)}
 .market-closed{background:var(--red)}
@@ -2596,7 +2610,7 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
 
 <header>
   <div class="logo">Automatic Trading Engine</div>
-  <span class="badge" id="mode-badge">—</span>
+  <span class="badge {% if alpaca_connected %}badge-connecting{% else %}badge-sim{% endif %}" id="mode-badge">{% if alpaca_connected %}Connecting…{% else %}LOCAL SIMULATION{% endif %}</span>
   <span id="market-status">
     <span class="market-dot market-unknown" id="market-dot"></span>
     <span id="market-label">Market —</span>
@@ -2637,11 +2651,10 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
 
 <nav class="nav-tabs-bar">
   <button class="nav-tab active" id="ntab-dashboard" onclick="switchTab('dashboard')">Dashboard</button>
-  <button class="nav-tab" id="ntab-positions" onclick="switchTab('positions')">Positions <span class="count" id="ntab-pos-count" style="display:none"></span></button>
+  <button class="nav-tab" id="ntab-positions" onclick="switchTab('positions')">Positions</button>
   <button class="nav-tab" id="ntab-watchlist" onclick="switchTab('watchlist')">Watchlist</button>
-  <button class="nav-tab" id="ntab-signals" onclick="switchTab('signals')">Signals <span class="count" id="ntab-sig-count" style="display:none"></span></button>
-  <button class="nav-tab" id="ntab-trades" onclick="switchTab('trades')">Trades <span class="count" id="ntab-trade-count" style="display:none"></span></button>
-  <button class="nav-tab" onclick="window.location='/journal'">Journal</button>
+  <button class="nav-tab" id="ntab-signals" onclick="switchTab('signals')">Signals</button>
+  <button class="nav-tab" id="ntab-trades" onclick="switchTab('trades')">Trades</button>
   <button class="nav-tab" onclick="window.location='/settings'">Settings</button>
   {% if auth %}<button class="nav-tab nav-tab-logout" onclick="window.location='/logout'">Logout</button>{% endif %}
 </nav>
@@ -2818,7 +2831,28 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
   <!-- ══ Trades tab ══ -->
   <div id="tab-trades" class="tab-section">
     <div class="panel">
-      <div class="panel-title">Trades <span class="count" id="trade-count">0</span></div>
+      <div class="panel-title" style="flex-wrap:wrap;gap:8px">
+        Trades <span class="count" id="trade-count">0</span>
+        <input type="text" id="trade-search" placeholder="Filter by ticker…" maxlength="6"
+               oninput="this.value=this.value.toUpperCase();renderTrades()"
+               style="margin-left:auto;width:130px;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text0);font-size:12px;font-family:inherit;outline:none"/>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 16px;border-top:1px solid var(--border)">
+        <div class="tab-btns" id="trade-period-btns">
+          <button class="tab-btn" onclick="setTradePeriod('today',this)">Today</button>
+          <button class="tab-btn" onclick="setTradePeriod('7d',this)">7 Days</button>
+          <button class="tab-btn active" onclick="setTradePeriod('30d',this)">30 Days</button>
+          <button class="tab-btn" onclick="setTradePeriod('60d',this)">60 Days</button>
+          <button class="tab-btn" onclick="setTradePeriod('90d',this)">90 Days</button>
+          <button class="tab-btn" onclick="setTradePeriod('180d',this)">180 Days</button>
+          <button class="tab-btn" onclick="setTradePeriod('all',this)">All</button>
+        </div>
+        <div class="tab-btns" id="trade-side-btns" style="margin-left:8px">
+          <button class="tab-btn active" onclick="setTradeSide('all',this)">All</button>
+          <button class="tab-btn" onclick="setTradeSide('BUY',this)">Buy</button>
+          <button class="tab-btn" onclick="setTradeSide('SELL',this)">Sell</button>
+        </div>
+      </div>
       <div class="tbl-wrap"><table>
         <thead><tr>
           <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>P&amp;L</th>
@@ -3007,7 +3041,6 @@ function applyState(s) {
 
   // signals
   document.getElementById('sig-count').textContent = signals.length;
-  {const nb=document.getElementById('ntab-sig-count');if(nb){nb.textContent=signals.length;nb.style.display=signals.length?'':'none';}}
   const sb = document.getElementById('sig-body');
   if (!signals.length) {
     sb.innerHTML = '<tr><td colspan="9" class="empty">No signals — click Refresh</td></tr>';
@@ -3113,7 +3146,6 @@ function applyState(s) {
 
   // positions — Ticker, Sector, Entry, Current, Stop/Trail, Qty, Unrealized P&L
   document.getElementById('pos-count').textContent = positions.length;
-  {const nb=document.getElementById('ntab-pos-count');if(nb){nb.textContent=positions.length;nb.style.display=positions.length?'':'none';}}
   const pb = document.getElementById('pos-body');
   if (!positions.length) {
     pb.innerHTML = '<tr><td colspan="8" class="empty">No open positions</td></tr>';
@@ -3144,23 +3176,6 @@ function applyState(s) {
         <td class="${cls(p.pnl)}">${p.pnl >= 0 ? '+' : ''}$${fmt(Math.abs(p.pnl))} (${p.pnl_pct >= 0 ? '+' : ''}${fmt(p.pnl_pct)}%)</td>
       </tr>`;
     }).join('');
-  }
-
-  // trades — columns: Time, Ticker, Side, Qty, Price, Realized P&L
-  document.getElementById('trade-count').textContent = trades.length;
-  {const nb=document.getElementById('ntab-trade-count');if(nb){nb.textContent=trades.length;nb.style.display=trades.length?'':'none';}}
-  const tb = document.getElementById('trade-body');
-  if (!trades.length) {
-    tb.innerHTML = '<tr><td colspan="6" class="empty">No trades yet</td></tr>';
-  } else {
-    tb.innerHTML = trades.map(t => `<tr>
-      <td style="color:#64748b;font-size:12px">${t.timestamp}</td>
-      <td style="font-weight:600">${t.symbol}</td>
-      <td><span class="pill pill-${t.action}">${t.action}</span></td>
-      <td>${t.shares}</td>
-      <td>$${fmt(t.price)}</td>
-      <td class="${t.pnl != null ? cls(t.pnl) : 'neu'}">${t.pnl != null ? (t.pnl >= 0 ? '+' : '') + '$' + fmt(Math.abs(t.pnl)) + ' (' + (t.pnl_pct >= 0 ? '+' : '') + fmt(t.pnl_pct) + '%)' : '—'}</td>
-    </tr>`).join('');
   }
 
   // sector allocation pie
@@ -3373,6 +3388,7 @@ async function refresh() {
     const data = await res.json();
     applyState(data);
     loadHeatmap();
+    loadJournalTrades();
     _lastRefreshAt = Date.now();
     updateLastUpdated();
   } catch(e) {
@@ -3441,6 +3457,74 @@ function updateLastUpdated() {
 setInterval(updateLastUpdated, 1000);
 
 // Tab switching — persists active tab in localStorage
+// ── Trades tab filters ────────────────────────────────────────────────────────
+let _allTrades = [];
+let _tradePeriod = '30d';
+let _tradeSide = 'all';
+
+function setTradePeriod(p, btn) {
+  _tradePeriod = p;
+  document.querySelectorAll('#trade-period-btns .tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTrades();
+}
+
+function setTradeSide(s, btn) {
+  _tradeSide = s;
+  document.querySelectorAll('#trade-side-btns .tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTrades();
+}
+
+function renderTrades() {
+  const now = new Date();
+  const ticker = (document.getElementById('trade-search')?.value || '').trim().toUpperCase();
+  let cutoff = null;
+  if (_tradePeriod === 'today') {
+    cutoff = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  } else if (_tradePeriod !== 'all') {
+    const days = parseInt(_tradePeriod);
+    cutoff = new Date(now - days * 86400000);
+  }
+  const filtered = _allTrades.filter(t => {
+    if (_tradeSide !== 'all' && t.action !== _tradeSide) return false;
+    if (ticker && !t.symbol.startsWith(ticker)) return false;
+    if (cutoff && t.timestamp) {
+      const d = new Date(t.timestamp);
+      if (!isNaN(d.getTime()) && d < cutoff) return false;
+    }
+    return true;
+  });
+  const tb = document.getElementById('trade-body');
+  document.getElementById('trade-count').textContent = filtered.length;
+  if (!filtered.length) {
+    tb.innerHTML = '<tr><td colspan="6" class="empty">No trades for this period</td></tr>';
+  } else {
+    tb.innerHTML = filtered.map(t => {
+      const pnlPct = t.pnl_pct != null ? t.pnl_pct * 100 : null;
+      return `<tr>
+      <td style="color:#64748b;font-size:12px">${t.timestamp}</td>
+      <td style="font-weight:600">${t.symbol}</td>
+      <td><span class="pill pill-${t.action}">${t.action}</span></td>
+      <td>${t.shares}</td>
+      <td>$${fmt(t.price)}</td>
+      <td class="${t.pnl != null ? cls(t.pnl) : 'neu'}">${t.pnl != null ? (t.pnl >= 0 ? '+' : '') + '$' + fmt(Math.abs(t.pnl)) + (pnlPct != null ? ' (' + (pnlPct >= 0 ? '+' : '') + fmt(Math.abs(pnlPct)) + '%)' : '') : '—'}</td>
+    </tr>`;
+    }).join('');
+  }
+}
+
+async function loadJournalTrades() {
+  try {
+    const res = await fetch('/api/journal');
+    const data = await res.json();
+    if (data.ok && data.entries) {
+      _allTrades = data.entries;
+      renderTrades();
+    }
+  } catch(e) {}
+}
+
 const _TAB_IDS = ['dashboard','positions','watchlist','signals','trades'];
 function switchTab(name) {
   if (!_TAB_IDS.includes(name)) return;
@@ -3451,6 +3535,7 @@ function switchTab(name) {
     if (btn) btn.classList.toggle('active', id === name);
   });
   localStorage.setItem('activeTab', name);
+  if (name === 'trades') loadJournalTrades();
 }
 (function restoreTab() {
   const saved = localStorage.getItem('activeTab');
@@ -4394,6 +4479,17 @@ td.diff-dn{color:#f87171}
 /* Toggle switch */
 .toggle-wrap{display:flex;align-items:center;gap:10px;flex-shrink:0}
 .toggle-label{font-size:12px;color:var(--text2);min-width:36px;text-align:right}
+/* Universe section */
+.universe-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px}
+.universe-meta{display:flex;flex-wrap:wrap;gap:20px;margin-bottom:18px}
+.universe-stat{display:flex;flex-direction:column;gap:3px}
+.universe-stat-val{font-size:22px;font-weight:700;color:var(--text)}
+.universe-stat-lbl{font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px}
+.universe-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.universe-chip{background:var(--surface2);border:1px solid var(--border2);border-radius:6px;
+               padding:4px 10px;font-size:12px;font-weight:600;color:var(--text);font-family:monospace}
+.universe-note{font-size:11px;color:var(--text3);margin-top:14px}
+.universe-loading{font-size:13px;color:var(--text2)}
 .toggle{position:relative;width:48px;height:26px;flex-shrink:0}
 .toggle input{opacity:0;width:0;height:0;position:absolute}
 .toggle-slider{position:absolute;inset:0;background:#1a2540;border-radius:26px;
@@ -4499,6 +4595,35 @@ td.diff-dn{color:#f87171}
       <button class="btn-save" onclick="saveNotifyEmail()">Save Email</button>
     </div>
     <div id="email-save-status" style="font-size:12px;display:none"></div>
+  </div>
+
+  <!-- Universe -->
+  <div class="section-title">Trading Universe</div>
+  <div class="section-sub">Stocks screened from S&amp;P 500, Nasdaq 100, and Dow 30 — filtered daily by volume, price ($20–$500), and market cap (&gt;$10 B). The engine scans all of these each cycle and trades the top signals.</div>
+  <div class="universe-card" id="universe-card">
+    <div class="universe-loading" id="universe-loading">Loading universe…</div>
+    <div id="universe-content" style="display:none">
+      <div class="universe-meta">
+        <div class="universe-stat">
+          <div class="universe-stat-val" id="u-size">—</div>
+          <div class="universe-stat-lbl">Stocks in Universe</div>
+        </div>
+        <div class="universe-stat">
+          <div class="universe-stat-val" id="u-candidates">—</div>
+          <div class="universe-stat-lbl">Total Candidates</div>
+        </div>
+        <div class="universe-stat">
+          <div class="universe-stat-val" id="u-watchlist">—</div>
+          <div class="universe-stat-lbl">Active Watchlist</div>
+        </div>
+        <div class="universe-stat" style="margin-left:auto">
+          <div class="universe-stat-val" style="font-size:14px;color:var(--text2)" id="u-date">—</div>
+          <div class="universe-stat-lbl">Last Screened</div>
+        </div>
+      </div>
+      <div class="universe-chips" id="u-chips"></div>
+      <div class="universe-note">Screener runs once daily before the first trading cycle. Filters: avg daily volume ≥ 1 M shares · price $20–$500 · market cap &gt; $10 B.</div>
+    </div>
   </div>
 </div>
 
@@ -4641,8 +4766,33 @@ async function saveNotifyEmail() {
   status.style.display = "block";
 }
 
+async function loadUniverse() {
+  try {
+    const res  = await fetch('/api/universe');
+    const data = await res.json();
+    document.getElementById('universe-loading').style.display = 'none';
+    const content = document.getElementById('universe-content');
+    if (!data.ok) { document.getElementById('universe-loading').textContent = 'Failed to load universe.'; document.getElementById('universe-loading').style.display = ''; return; }
+    content.style.display = '';
+    document.getElementById('u-size').textContent       = data.universe_size || 0;
+    document.getElementById('u-candidates').textContent = data.total_candidates || '—';
+    document.getElementById('u-watchlist').textContent  = (data.current_watchlist || []).length;
+    document.getElementById('u-date').textContent       = data.screen_date || 'Not yet run';
+    const chips = document.getElementById('u-chips');
+    const tickers = data.universe || [];
+    if (tickers.length) {
+      chips.innerHTML = tickers.map(t => `<span class="universe-chip">${t}</span>`).join('');
+    } else {
+      chips.innerHTML = '<span style="font-size:12px;color:var(--text2)">No screen results yet — will run before the first trading cycle today.</span>';
+    }
+  } catch(e) {
+    document.getElementById('universe-loading').textContent = 'Failed to load universe.';
+  }
+}
+
 renderCards();
 renderDetail();
+loadUniverse();
 
 async function saveAlpacaKeys() {
   const apiKey    = document.getElementById('alpaca-api-key').value.trim();
@@ -5733,6 +5883,11 @@ def index():
                     alpaca_connected = True
             except Exception:
                 pass
+    else:
+        try:
+            alpaca_connected = bool(_get_engine().config.use_alpaca)
+        except Exception:
+            pass
     resp = make_response(render_template_string(HTML, auth=_AUTH_ENABLED, alpaca_connected=alpaca_connected))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp

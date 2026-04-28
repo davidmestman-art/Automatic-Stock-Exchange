@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Union
 from ..data.earnings import EarningsCalendar
 from ..data.fetcher import MarketDataFetcher
 from ..data.scanner import StockScanner
+from ..data.universe import DynamicUniverse
 from ..data.voo_monitor import VOOMonitor
 from ..signals.analyzer import SignalAnalyzer, SignalResult
 from ..signals.indicators import TechnicalIndicators
@@ -141,6 +142,7 @@ class TradingEngine:
         self._session_date: Optional[str] = None
         self._voo_alert_sent_date: Optional[str] = None  # send at most one VOO alert per day
         self.watchlist: List[str] = list(config.symbols)
+        self.dynamic_universe = DynamicUniverse()
         # BUY signals waiting for next-candle confirmation (symbol → {signal_price, queued_at})
         self._pending_signals: Dict[str, dict] = {}
         # Symbols blocked by correlation filter in the most recent signal pass
@@ -508,7 +510,17 @@ class TradingEngine:
         if self._pending_signals:
             logger.info(f"  New session — clearing {len(self._pending_signals)} stale pending signals")
             self._pending_signals.clear()
-        logger.info(f"  New session ({today}) — running watchlist scan…")
+        logger.info(f"  New session ({today}) — refreshing stock universe…")
+        try:
+            new_universe = self.dynamic_universe.refresh_if_stale()
+            if new_universe:
+                self.scanner.universe = list(dict.fromkeys(new_universe))
+                self.scanner.volume_top_n = len(new_universe)
+                logger.info(f"  Universe updated: {len(new_universe)} tickers from daily screen")
+        except Exception as e:
+            logger.warning(f"  Universe refresh failed: {e} — using previous scanner universe")
+
+        logger.info(f"  Running watchlist scan…")
         try:
             result = self.scanner.scan(self.indicators, self.analyzer)
             if result.watchlist:
