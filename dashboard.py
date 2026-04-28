@@ -1787,6 +1787,18 @@ def api_journal():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/universe")
+def api_universe():
+    try:
+        eng = _get_engine()
+        result = dict(eng.dynamic_universe.last_result)
+        result["current_watchlist"] = eng.watchlist
+        result["watchlist_size"]    = eng.config.watchlist_size
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/leaderboard")
 def api_leaderboard():
     try:
@@ -4467,6 +4479,17 @@ td.diff-dn{color:#f87171}
 /* Toggle switch */
 .toggle-wrap{display:flex;align-items:center;gap:10px;flex-shrink:0}
 .toggle-label{font-size:12px;color:var(--text2);min-width:36px;text-align:right}
+/* Universe section */
+.universe-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px}
+.universe-meta{display:flex;flex-wrap:wrap;gap:20px;margin-bottom:18px}
+.universe-stat{display:flex;flex-direction:column;gap:3px}
+.universe-stat-val{font-size:22px;font-weight:700;color:var(--text)}
+.universe-stat-lbl{font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px}
+.universe-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.universe-chip{background:var(--surface2);border:1px solid var(--border2);border-radius:6px;
+               padding:4px 10px;font-size:12px;font-weight:600;color:var(--text);font-family:monospace}
+.universe-note{font-size:11px;color:var(--text3);margin-top:14px}
+.universe-loading{font-size:13px;color:var(--text2)}
 .toggle{position:relative;width:48px;height:26px;flex-shrink:0}
 .toggle input{opacity:0;width:0;height:0;position:absolute}
 .toggle-slider{position:absolute;inset:0;background:#1a2540;border-radius:26px;
@@ -4572,6 +4595,35 @@ td.diff-dn{color:#f87171}
       <button class="btn-save" onclick="saveNotifyEmail()">Save Email</button>
     </div>
     <div id="email-save-status" style="font-size:12px;display:none"></div>
+  </div>
+
+  <!-- Universe -->
+  <div class="section-title">Trading Universe</div>
+  <div class="section-sub">Stocks screened from S&amp;P 500, Nasdaq 100, and Dow 30 — filtered daily by volume, price ($20–$500), and market cap (&gt;$10 B). The engine scans all of these each cycle and trades the top signals.</div>
+  <div class="universe-card" id="universe-card">
+    <div class="universe-loading" id="universe-loading">Loading universe…</div>
+    <div id="universe-content" style="display:none">
+      <div class="universe-meta">
+        <div class="universe-stat">
+          <div class="universe-stat-val" id="u-size">—</div>
+          <div class="universe-stat-lbl">Stocks in Universe</div>
+        </div>
+        <div class="universe-stat">
+          <div class="universe-stat-val" id="u-candidates">—</div>
+          <div class="universe-stat-lbl">Total Candidates</div>
+        </div>
+        <div class="universe-stat">
+          <div class="universe-stat-val" id="u-watchlist">—</div>
+          <div class="universe-stat-lbl">Active Watchlist</div>
+        </div>
+        <div class="universe-stat" style="margin-left:auto">
+          <div class="universe-stat-val" style="font-size:14px;color:var(--text2)" id="u-date">—</div>
+          <div class="universe-stat-lbl">Last Screened</div>
+        </div>
+      </div>
+      <div class="universe-chips" id="u-chips"></div>
+      <div class="universe-note">Screener runs once daily before the first trading cycle. Filters: avg daily volume ≥ 1 M shares · price $20–$500 · market cap &gt; $10 B.</div>
+    </div>
   </div>
 </div>
 
@@ -4714,8 +4766,33 @@ async function saveNotifyEmail() {
   status.style.display = "block";
 }
 
+async function loadUniverse() {
+  try {
+    const res  = await fetch('/api/universe');
+    const data = await res.json();
+    document.getElementById('universe-loading').style.display = 'none';
+    const content = document.getElementById('universe-content');
+    if (!data.ok) { document.getElementById('universe-loading').textContent = 'Failed to load universe.'; document.getElementById('universe-loading').style.display = ''; return; }
+    content.style.display = '';
+    document.getElementById('u-size').textContent       = data.universe_size || 0;
+    document.getElementById('u-candidates').textContent = data.total_candidates || '—';
+    document.getElementById('u-watchlist').textContent  = (data.current_watchlist || []).length;
+    document.getElementById('u-date').textContent       = data.screen_date || 'Not yet run';
+    const chips = document.getElementById('u-chips');
+    const tickers = data.universe || [];
+    if (tickers.length) {
+      chips.innerHTML = tickers.map(t => `<span class="universe-chip">${t}</span>`).join('');
+    } else {
+      chips.innerHTML = '<span style="font-size:12px;color:var(--text2)">No screen results yet — will run before the first trading cycle today.</span>';
+    }
+  } catch(e) {
+    document.getElementById('universe-loading').textContent = 'Failed to load universe.';
+  }
+}
+
 renderCards();
 renderDetail();
+loadUniverse();
 
 async function saveAlpacaKeys() {
   const apiKey    = document.getElementById('alpaca-api-key').value.trim();
