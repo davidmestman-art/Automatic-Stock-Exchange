@@ -50,14 +50,23 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # ── Database ──────────────────────────────────────────────────────────────────
-_DB_PATH = Path(__file__).resolve().parent / "users.db"
-app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{_DB_PATH}"
+_DATABASE_URL = os.environ.get("DATABASE_URL", "")
+if _DATABASE_URL:
+    # Railway/Heroku may emit "postgres://" but SQLAlchemy requires "postgresql://"
+    if _DATABASE_URL.startswith("postgres://"):
+        _DATABASE_URL = _DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    app.config["SQLALCHEMY_DATABASE_URI"] = _DATABASE_URL
+else:
+    _DB_PATH = Path(__file__).resolve().parent / "users.db"
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{_DB_PATH}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(app)
 
 with app.app_context():
     db.create_all()
-    # Migrate: add Alpaca columns to existing tables created before this column existed
+    # Add columns introduced after initial deployment; safe to run on any DB engine.
+    # PostgreSQL requires an explicit rollback after a failed statement before the
+    # connection can be reused, hence the _conn.rollback() in the except clause.
     from sqlalchemy import text as _sql
     with db.engine.connect() as _conn:
         for _col in [
@@ -71,7 +80,7 @@ with app.app_context():
                 _conn.execute(_sql(_col))
                 _conn.commit()
             except Exception:
-                pass  # column already exists
+                _conn.rollback()  # required for PostgreSQL; no-op for SQLite
 
 # ── Encryption helpers (Fernet key derived from app secret) ───────────────────
 def _make_fernet() -> Fernet:
@@ -2236,7 +2245,7 @@ main{padding:14px 20px;max-width:1400px;margin:0 auto}
 .today-strip{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:0;margin-bottom:12px;background:var(--bg1);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
 .today-item{display:flex;flex-direction:column;justify-content:center;gap:3px;padding:12px 16px;border-right:1px solid var(--border)}
 .today-label{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px}
-.today-val{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text0)}
+.today-val{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text0)}
 .today-sub{font-size:11px;color:var(--text2)}
 .today-spark-wrap{padding:10px 14px;min-width:140px}
 .today-spark-wrap svg{display:block;margin-top:4px}
@@ -2246,7 +2255,7 @@ main{padding:14px 20px;max-width:1400px;margin:0 auto}
 .card{background:var(--bg1);border-radius:var(--radius);padding:12px 14px;border:1px solid var(--border)}
 .card:hover{border-color:var(--border-strong)}
 .card-label{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;margin-bottom:5px}
-.card-value{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums}
+.card-value{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums}
 .card-sub{font-size:11px;color:var(--text2);margin-top:2px}
 .pos{color:var(--green)}.neg{color:var(--red)}.neu{color:var(--text0)}
 
@@ -2289,7 +2298,7 @@ tr:hover td{background:var(--bg2)}
 .voo-stat{padding:14px 16px;border-right:1px solid var(--border)}
 .voo-stat:last-child{border-right:none}
 .voo-stat-label{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
-.voo-stat-value{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+.voo-stat-value{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums}
 .voo-alert-bar{padding:10px 16px;display:flex;align-items:center;gap:10px;font-size:12px;font-weight:600}
 .voo-above{background:rgba(22,101,52,.15);color:#4ade80;border-top:1px solid rgba(34,197,94,.2)}
 .voo-below{background:rgba(20,83,45,.3);color:#dcfce7;border-top:1px solid var(--green);animation:voo-pulse 2s ease-in-out infinite}
@@ -2510,15 +2519,15 @@ body.light .pin-remove{color:#94a3b8}
 body.light .public-url-wrap{background:#f0fdf4;border-color:#bbf7d0}
 body.light .public-url-label,.public-url-val{color:#166534}
 /* ── News feed panel ─────────────────────────────────────────────────────────── */
-.news-item{display:flex;flex-direction:column;gap:2px;padding:10px 14px;border-bottom:1px solid #1e293b;transition:background .12s}
+.news-item{display:flex;flex-direction:column;gap:2px;padding:10px 14px;border-bottom:1px solid var(--border);transition:background .12s}
 .news-item:last-child{border-bottom:none}
-.news-item:hover{background:#263044}
-.news-sym{display:inline-block;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:700;background:#1e3a5f;color:#93c5fd;margin-right:6px;flex-shrink:0}
-.news-title{font-size:13px;color:#e2e8f0;line-height:1.4;cursor:pointer}
+.news-item:hover{background:var(--bg2)}
+.news-sym{display:inline-block;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:700;background:rgba(30,58,95,.5);color:#93c5fd;margin-right:6px;flex-shrink:0}
+.news-title{font-size:13px;color:var(--text0);line-height:1.4;cursor:pointer}
 .news-title:hover{color:#93c5fd;text-decoration:underline}
-.news-meta{font-size:10px;color:#475569;margin-top:1px}
-.news-loading{padding:22px;text-align:center;color:#475569;font-size:13px}
-body.light .news-item{border-bottom-color:#f1f5f9}
+.news-meta{font-size:10px;color:var(--text2);margin-top:1px}
+.news-loading{padding:22px;text-align:center;color:var(--text2);font-size:13px}
+body.light .news-item{border-bottom-color:#e2e8f0}
 body.light .news-item:hover{background:#f8fafc}
 body.light .news-sym{background:#dbeafe;color:#1d4ed8}
 body.light .news-title{color:#1e293b}
@@ -2529,19 +2538,19 @@ body.light .news-meta{color:#94a3b8}
 .explain-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);
                z-index:300;padding:20px;align-items:center;justify-content:center}
 .explain-modal.active{display:flex}
-.explain-box{width:100%;max-width:560px;background:#0f1629;border-radius:14px;
-             border:1px solid #1e2d45;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.7)}
-.explain-hdr{padding:16px 20px;display:flex;align-items:center;justify-content:space-between;
-             border-bottom:1px solid #1e2d45;background:#141d2e;gap:10px}
-.explain-sym{font-weight:800;font-size:20px;color:#f1f5f9;letter-spacing:-.5px}
-.explain-close{background:none;border:1px solid #1e2d45;color:#8898b8;padding:5px 12px;
-               border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;
+.explain-box{width:100%;max-width:560px;background:var(--bg1);border-radius:14px;
+             border:1px solid var(--border-strong);overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.7)}
+.explain-hdr{padding:14px 18px;display:flex;align-items:center;justify-content:space-between;
+             border-bottom:1px solid var(--border);background:var(--bg2);gap:10px}
+.explain-sym{font-weight:700;font-size:17px;color:var(--text0);letter-spacing:-.3px}
+.explain-close{background:none;border:1px solid var(--border);color:var(--text1);padding:4px 12px;
+               border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;
                min-height:unset;transition:border-color .15s}
-.explain-close:hover{border-color:#3b82f6;color:#e2e8f0}
-.explain-body{padding:20px;max-height:70vh;overflow-y:auto}
-.explain-score{font-size:13px;color:#8898b8;margin-bottom:16px;padding-bottom:14px;
-               border-bottom:1px solid #1e2d45}
-.explain-score strong{color:#f1f5f9;font-size:18px;font-weight:800}
+.explain-close:hover{border-color:var(--blue);color:var(--text0)}
+.explain-body{padding:16px 18px;max-height:70vh;overflow-y:auto}
+.explain-score{font-size:13px;color:var(--text1);margin-bottom:14px;padding-bottom:12px;
+               border-bottom:1px solid var(--border)}
+.explain-score strong{color:var(--text0);font-size:16px;font-weight:700}
 .explain-item{display:flex;gap:12px;margin-bottom:14px;align-items:flex-start}
 .explain-item:last-child{margin-bottom:0}
 .explain-icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;
@@ -2555,10 +2564,10 @@ body.light .news-meta{color:#94a3b8}
 .el-bull{color:#34d399}.el-bear{color:#f87171}.el-neu{color:#94a3b8}
 .explain-detail{font-size:13px;color:#c8d4e8;line-height:1.55}
 .explain-val{font-weight:700;color:#f1f5f9}
-.explain-reasons{margin-top:16px;padding-top:14px;border-top:1px solid #1e2d45}
+.explain-reasons{margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
 .explain-reasons-title{font-size:11px;font-weight:700;text-transform:uppercase;
-                        letter-spacing:.5px;color:#4d6380;margin-bottom:8px}
-.explain-reason{font-size:12px;color:#8898b8;padding:5px 0;border-bottom:1px solid rgba(30,45,69,.5);
+                        letter-spacing:.5px;color:var(--text2);margin-bottom:8px}
+.explain-reason{font-size:12px;color:var(--text1);padding:5px 0;border-bottom:1px solid var(--border);
                 line-height:1.45}
 .explain-reason:last-child{border-bottom:none}
 body.light .explain-box{background:#fff;border-color:#e2e8f0}
@@ -2665,17 +2674,16 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
 {% endif %}
 
   <!-- ══ Stock Search & Favorites — always first, impossible to miss ══ -->
-  <div class="panel grid1" id="search-panel" style="border:1px solid #0ea5e9;margin-bottom:14px">
-    <div class="panel-title" style="justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom-color:#0ea5e9">
-      <span style="color:#38bdf8">🔍 Stock Search &amp; Favorites</span>
-      <span style="font-size:11px;color:#475569;font-weight:400">type any ticker · Enter to search · ⭐ pin to save</span>
+  <div class="panel grid1" id="search-panel" style="margin-bottom:14px">
+    <div class="panel-title" style="justify-content:space-between;flex-wrap:wrap;gap:6px">
+      <span>🔍 Stock Search &amp; Favorites</span>
+      <span style="font-size:11px;color:var(--text2);font-weight:400">type any ticker · Enter to search · ⭐ pin to save</span>
     </div>
     <div class="search-bar">
       <input type="text" id="search-input" placeholder="e.g. AAPL, TSLA, SPY, QQQ…" maxlength="6"
              oninput="this.value=this.value.toUpperCase()"
-             onkeydown="if(event.key==='Enter')searchStock()" autocomplete="off" spellcheck="false"
-             style="font-size:15px;padding:10px 14px"/>
-      <button class="btn-search" onclick="searchStock()" style="padding:10px 24px;font-size:14px">Search</button>
+             onkeydown="if(event.key==='Enter')searchStock()" autocomplete="off" spellcheck="false"/>
+      <button class="btn-search" onclick="searchStock()">Search</button>
     </div>
     <div id="search-result" style="display:none"></div>
   </div>
@@ -2999,7 +3007,7 @@ function applyState(s) {
       const earnBadge = earnDays != null
         ? `<span style="color:#f97316;font-size:10px;margin-left:4px" title="Earnings in ${earnDays}d — buys blocked">⚠ ${earnDays}d</span>`
         : '';
-      return `<span style="background:#1e293b;border:1px solid ${earnDays != null ? '#92400e' : '#334155'};border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600">
+      return `<span style="background:rgba(26,37,64,.7);border:1px solid ${earnDays != null ? 'rgba(146,64,14,.6)' : 'rgba(255,255,255,0.08)'};border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600">
         <span style="color:${col}">${sym}</span><span style="color:#475569;font-size:11px">${scoreStr}</span>${earnBadge}
       </span>`;
     }).join('');
