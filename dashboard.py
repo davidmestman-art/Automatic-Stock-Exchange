@@ -2215,6 +2215,8 @@ header{background:var(--bg1);border-bottom:1px solid var(--border);padding:0 20p
 .badge-paper{background:rgba(59,130,246,.18);color:#93c5fd;border:1px solid rgba(59,130,246,.3)}
 .badge-live{background:rgba(239,68,68,.18);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
 .badge-sim{background:rgba(100,116,139,.15);color:#94a3b8;border:1px solid var(--border)}
+.badge-connecting{background:rgba(100,116,139,.1);color:#64748b;border:1px dashed var(--border);animation:badge-pulse 1.4s ease-in-out infinite}
+@keyframes badge-pulse{0%,100%{opacity:.45}50%{opacity:1}}
 .market-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px;flex-shrink:0}
 .market-open{background:var(--green);box-shadow:0 0 5px var(--green)}
 .market-closed{background:var(--red)}
@@ -2596,7 +2598,7 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
 
 <header>
   <div class="logo">Automatic Trading Engine</div>
-  <span class="badge" id="mode-badge">—</span>
+  <span class="badge {% if alpaca_connected %}badge-connecting{% else %}badge-sim{% endif %}" id="mode-badge">{% if alpaca_connected %}Connecting…{% else %}LOCAL SIMULATION{% endif %}</span>
   <span id="market-status">
     <span class="market-dot market-unknown" id="market-dot"></span>
     <span id="market-label">Market —</span>
@@ -5804,6 +5806,11 @@ def index():
                     alpaca_connected = True
             except Exception:
                 pass
+    else:
+        try:
+            alpaca_connected = bool(_get_engine().config.use_alpaca)
+        except Exception:
+            pass
     resp = make_response(render_template_string(HTML, auth=_AUTH_ENABLED, alpaca_connected=alpaca_connected))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp
