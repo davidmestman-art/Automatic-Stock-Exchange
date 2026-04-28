@@ -50,14 +50,23 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # ── Database ──────────────────────────────────────────────────────────────────
-_DB_PATH = Path(__file__).resolve().parent / "users.db"
-app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{_DB_PATH}"
+_DATABASE_URL = os.environ.get("DATABASE_URL", "")
+if _DATABASE_URL:
+    # Railway/Heroku may emit "postgres://" but SQLAlchemy requires "postgresql://"
+    if _DATABASE_URL.startswith("postgres://"):
+        _DATABASE_URL = _DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    app.config["SQLALCHEMY_DATABASE_URI"] = _DATABASE_URL
+else:
+    _DB_PATH = Path(__file__).resolve().parent / "users.db"
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{_DB_PATH}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(app)
 
 with app.app_context():
     db.create_all()
-    # Migrate: add Alpaca columns to existing tables created before this column existed
+    # Add columns introduced after initial deployment; safe to run on any DB engine.
+    # PostgreSQL requires an explicit rollback after a failed statement before the
+    # connection can be reused, hence the _conn.rollback() in the except clause.
     from sqlalchemy import text as _sql
     with db.engine.connect() as _conn:
         for _col in [
@@ -71,7 +80,7 @@ with app.app_context():
                 _conn.execute(_sql(_col))
                 _conn.commit()
             except Exception:
-                pass  # column already exists
+                _conn.rollback()  # required for PostgreSQL; no-op for SQLite
 
 # ── Encryption helpers (Fernet key derived from app secret) ───────────────────
 def _make_fernet() -> Fernet:
