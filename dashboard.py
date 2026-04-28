@@ -113,7 +113,7 @@ _LANDING_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>NYSE Trading Engine — Algorithmic Trading for Everyone</title>
+<title>Automatic Trading Engine — Algorithmic Trading for Everyone</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -273,7 +273,7 @@ footer{border-top:1px solid var(--border);padding:32px 48px;display:flex;align-i
 <nav>
   <div class="nav-brand">
     <div class="nav-dot"></div>
-    <span class="nav-name">NYSE Trading Engine</span>
+    <span class="nav-name">Automatic Trading Engine</span>
   </div>
   <div class="nav-actions">
     {% if logged_in %}
@@ -408,7 +408,7 @@ footer{border-top:1px solid var(--border);padding:32px 48px;display:flex;align-i
 <footer>
   <div class="footer-brand">
     <div class="footer-dot"></div>
-    NYSE Trading Engine
+    Automatic Trading Engine
   </div>
   <div class="footer-links">
     <a href="/dashboard" class="footer-link">Dashboard</a>
@@ -428,7 +428,7 @@ _LOGIN_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Login — NYSE Trading Engine</title>
+<title>Login — Automatic Trading Engine</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;
@@ -452,7 +452,7 @@ input::placeholder{color:#475569}
 </head>
 <body>
 <div class="card">
-  <div class="logo">NYSE Trading Engine</div>
+  <div class="logo">Automatic Trading Engine</div>
   <div class="sub">Sign in to access your dashboard</div>
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
   <form method="post">
@@ -478,7 +478,7 @@ _REGISTER_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Sign Up — NYSE Trading Engine</title>
+<title>Sign Up — Automatic Trading Engine</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;
@@ -504,7 +504,7 @@ input::placeholder{color:#475569}
 </head>
 <body>
 <div class="card">
-  <div class="logo">NYSE Trading Engine</div>
+  <div class="logo">Automatic Trading Engine</div>
   <div class="sub">Create a free account to get started</div>
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
   <form method="post" novalidate>
@@ -2122,7 +2122,7 @@ def api_watchlist_remove():
 def pwa_manifest():
     from flask import Response
     m = {
-        "name":             "NYSE Trading Engine",
+        "name":             "Automatic Trading Engine",
         "short_name":       "TradingEng",
         "start_url":        "/",
         "display":          "standalone",
@@ -2191,7 +2191,7 @@ HTML = """<!doctype html>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <link rel="manifest" href="/manifest.json"/>
 <link rel="apple-touch-icon" href="/icon-192.svg"/>
-<title>NYSE Trading Engine</title>
+<title>Automatic Trading Engine</title>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -2232,11 +2232,6 @@ header{background:var(--bg1);border-bottom:1px solid var(--border);padding:0 20p
 button{cursor:pointer;padding:6px 13px;border-radius:6px;border:1px solid var(--border);font-size:12px;font-weight:600;transition:opacity .15s;min-height:30px;touch-action:manipulation;font-family:inherit}
 .btn-refresh{background:var(--bg3);color:var(--text1);border-color:var(--border)}
 .btn-refresh:hover{color:var(--text0);border-color:var(--border-strong)}
-.btn-rescan{background:rgba(124,58,237,.2);color:#c4b5fd;border:1px solid rgba(124,58,237,.35)}
-.btn-rescan:hover{opacity:.85}
-.btn-rescan:disabled,.btn-cycle:disabled,.btn-voo:disabled{opacity:.4;cursor:not-allowed}
-.btn-cycle{background:rgba(14,165,233,.2);color:#7dd3fc;border:1px solid rgba(14,165,233,.35)}
-.btn-cycle:hover{opacity:.85}
 
 /* ── Layout ──────────────────────────────────────────────────────────────── */
 main{padding:14px 20px;max-width:1400px;margin:0 auto}
@@ -2289,24 +2284,6 @@ tr:hover td{background:var(--bg2)}
 .score-bar-bg{width:48px;height:4px;background:var(--bg3);border-radius:3px;overflow:hidden;flex-shrink:0}
 .score-bar{height:4px;border-radius:3px;transition:width .3s}
 
-/* ── VOO monitor ─────────────────────────────────────────────────────────── */
-.voo-panel{background:var(--bg1);border-radius:var(--radius);border:1px solid var(--border);overflow:hidden;margin-bottom:10px}
-.voo-header{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.voo-title{font-weight:600;font-size:11px;color:var(--text1);text-transform:uppercase;letter-spacing:.5px}
-.voo-checked{font-size:11px;color:var(--text2);margin-left:auto}
-.voo-stats{display:grid;grid-template-columns:repeat(3,1fr)}
-.voo-stat{padding:14px 16px;border-right:1px solid var(--border)}
-.voo-stat:last-child{border-right:none}
-.voo-stat-label{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
-.voo-stat-value{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums}
-.voo-alert-bar{padding:10px 16px;display:flex;align-items:center;gap:10px;font-size:12px;font-weight:600}
-.voo-above{background:rgba(22,101,52,.15);color:#4ade80;border-top:1px solid rgba(34,197,94,.2)}
-.voo-below{background:rgba(20,83,45,.3);color:#dcfce7;border-top:1px solid var(--green);animation:voo-pulse 2s ease-in-out infinite}
-.voo-loading{padding:20px;text-align:center;color:var(--text2);font-size:12px}
-@keyframes voo-pulse{0%,100%{opacity:1}50%{opacity:.8}}
-.btn-voo{background:rgba(29,78,216,.2);color:#93c5fd;border:1px solid rgba(29,78,216,.35);font-size:11px;padding:4px 10px}
-.btn-voo:hover{opacity:.85}
-
 /* ── Sector exposure strip ───────────────────────────────────────────────── */
 .sector-strip{display:flex;flex-wrap:wrap;gap:6px;padding:8px 14px;border-bottom:1px solid var(--border)}
 .sector-chip{padding:2px 9px;border-radius:99px;font-size:10px;font-weight:600;background:rgba(30,58,95,.5);color:#93c5fd;border:1px solid rgba(59,130,246,.25)}
@@ -2347,6 +2324,23 @@ tr:hover td{background:var(--bg2)}
 .sym-link{cursor:pointer;color:#93c5fd}
 .sym-link:hover{text-decoration:underline}
 
+/* ── Tab navigation bar ──────────────────────────────────────────────────── */
+.nav-tabs-bar{background:var(--bg1);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9}
+.nav-tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--text2);font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;font-family:inherit;min-height:unset;border-radius:0;transition:color .15s}
+.nav-tab:hover{color:var(--text1);background:none;border-color:transparent}
+.nav-tab.active{color:var(--text0);border-bottom-color:var(--blue)}
+.nav-tab-logout{margin-left:auto;color:var(--red)!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:var(--red-bg)!important;border:1px solid rgba(239,68,68,.25)!important;cursor:pointer;min-height:unset;white-space:nowrap;font-family:inherit}
+.tab-section{display:none}.tab-section.active{display:block}
+.btn-icon-refresh{background:none;border:none;color:var(--text1);font-size:20px;padding:0;min-height:unset;width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:pointer;line-height:1}
+.btn-icon-refresh:hover{color:var(--text0);background:var(--bg3)}
+body.light .nav-tabs-bar{background:#fff;border-bottom-color:#e2e8f0}
+body.light .nav-tab{color:#64748b}
+body.light .nav-tab:hover{color:#475569}
+body.light .nav-tab.active{color:#1e293b;border-bottom-color:#3b82f6}
+body.light .nav-tab-logout{color:#b91c1c!important;background:#fee2e2!important;border-color:#fca5a5!important}
+body.light .btn-icon-refresh{color:#475569}
+body.light .btn-icon-refresh:hover{color:#1e293b;background:#e2e8f0}
+
 /* ── Responsive — tablet (≤ 900 px) ─────────────────────────────────────── */
 @media(max-width:900px){
   .grid2{grid-template-columns:1fr}
@@ -2360,19 +2354,11 @@ tr:hover td{background:var(--bg2)}
   .logo{font-size:13px;border-right:none;padding-right:8px}
   .ts{display:none}
   .hdr-right{margin-left:auto}
-  .btn-refresh,.btn-rescan,.btn-cycle{padding:6px 10px;font-size:11px}
   main{padding:10px 12px}
   .cards{grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px}
   .card{padding:10px 12px}
   .card-value{font-size:16px}
   .card-label{font-size:10px}
-  .voo-stats{grid-template-columns:1fr}
-  .voo-stat{border-right:none;border-bottom:1px solid var(--border);padding:11px 14px}
-  .voo-stat:last-child{border-bottom:none}
-  .voo-stat-value{font-size:18px}
-  .voo-header{gap:6px}
-  .voo-checked{width:100%;margin-left:0;font-size:10px}
-  .btn-voo{width:100%;margin-top:4px}
   .panel-title{font-size:10px;padding:9px 12px}
   th{padding:6px 8px;font-size:10px}
   td{padding:7px 8px;font-size:12px}
@@ -2413,7 +2399,7 @@ body.light header{background:#fff;border-bottom-color:#e2e8f0}
 body.light .logo{color:#0f172a}
 body.light .badge-sim{background:#e2e8f0;color:#475569}
 body.light #market-status{color:#475569}
-body.light #cycle-info,.ts{color:#94a3b8}
+body.light .ts{color:#94a3b8}
 body.light .card{background:#fff;border-color:#e2e8f0}
 body.light .card-label{color:#64748b}
 body.light .card-sub{color:#94a3b8}
@@ -2433,15 +2419,6 @@ body.light .empty{color:#94a3b8}
 body.light .mtf-scores{color:#94a3b8}
 body.light .sig-sub{color:#94a3b8}
 body.light .sym-link{color:#1d4ed8}
-body.light .voo-panel{background:#fff;border-color:#e2e8f0}
-body.light .voo-header{background:#fff;border-bottom-color:#e2e8f0}
-body.light .voo-title{color:#475569}
-body.light .voo-stat{border-right-color:#e2e8f0}
-body.light .voo-stat-label{color:#64748b}
-body.light .voo-loading{color:#94a3b8}
-body.light .voo-checked{color:#94a3b8}
-body.light .voo-above{background:#f0fdf4;color:#166534;border-top-color:#bbf7d0}
-body.light .voo-below{background:#dcfce7;color:#14532d;border-top-color:#86efac}
 body.light .chart-box{background:#fff;border-color:#e2e8f0}
 body.light .chart-hdr{border-bottom-color:#e2e8f0}
 body.light .chart-sym{color:#0f172a}
@@ -2618,7 +2595,7 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
 </div>
 
 <header>
-  <div class="logo">NYSE Trading Engine</div>
+  <div class="logo">Automatic Trading Engine</div>
   <span class="badge" id="mode-badge">—</span>
   <span id="market-status">
     <span class="market-dot market-unknown" id="market-dot"></span>
@@ -2651,19 +2628,23 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
     <div id="pnl-ticker-pct"></div>
   </div>
   <div class="hdr-right">
-    <span class="ts" id="cycle-info">—</span>
-    <span class="ts" id="last-ts">—</span>
+    <span class="ts" id="last-updated-text"></span>
+    <button class="btn-icon-refresh" onclick="refresh()" title="Refresh data">↻</button>
     <span id="notif-indicator" title="Notifications" style="font-size:17px;cursor:default;opacity:.4" onclick="window.location='/stats'">🔔</span>
     <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
-    <button class="btn-refresh" onclick="refresh()">Refresh</button>
-    <button class="btn-rescan" id="btn-rescan" onclick="rescan()">Re-scan</button>
-    <button class="btn-cycle" id="btn-cycle" onclick="runCycle()">Run Cycle</button>
-    <button class="btn-refresh" onclick="window.location='/stats'" style="background:rgba(30,58,138,.25);color:#93c5fd;border-color:rgba(59,130,246,.3)">Stats</button>
-    <button class="btn-refresh" onclick="window.location='/journal'" style="background:rgba(20,83,45,.25);color:#6ee7b7;border-color:rgba(34,197,94,.25)">Journal</button>
-    <button class="btn-refresh" onclick="window.location='/settings'" style="background:rgba(76,29,149,.2);color:#c4b5fd;border-color:rgba(124,58,237,.3)">Settings</button>
-    {% if auth %}<a href="/logout" style="padding:7px 14px;border-radius:6px;background:rgba(127,29,29,.35);color:#fca5a5;font-size:12px;font-weight:600;text-decoration:none;border:1px solid rgba(185,28,28,.4);white-space:nowrap">Logout</a>{% endif %}
   </div>
 </header>
+
+<nav class="nav-tabs-bar">
+  <button class="nav-tab active" id="ntab-dashboard" onclick="switchTab('dashboard')">Dashboard</button>
+  <button class="nav-tab" id="ntab-positions" onclick="switchTab('positions')">Positions <span class="count" id="ntab-pos-count" style="display:none"></span></button>
+  <button class="nav-tab" id="ntab-watchlist" onclick="switchTab('watchlist')">Watchlist</button>
+  <button class="nav-tab" id="ntab-signals" onclick="switchTab('signals')">Signals <span class="count" id="ntab-sig-count" style="display:none"></span></button>
+  <button class="nav-tab" id="ntab-trades" onclick="switchTab('trades')">Trades <span class="count" id="ntab-trade-count" style="display:none"></span></button>
+  <button class="nav-tab" onclick="window.location='/journal'">Journal</button>
+  <button class="nav-tab" onclick="window.location='/settings'">Settings</button>
+  {% if auth %}<button class="nav-tab nav-tab-logout" onclick="window.location='/logout'">Logout</button>{% endif %}
+</nav>
 
 <main>
   <div class="error-banner" id="err-banner"></div>
@@ -2673,171 +2654,73 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
   </div>
 {% endif %}
 
-  <!-- ══ Stock Search & Favorites — always first, impossible to miss ══ -->
-  <div class="panel grid1" id="search-panel" style="margin-bottom:14px">
-    <div class="panel-title" style="justify-content:space-between;flex-wrap:wrap;gap:6px">
-      <span>🔍 Stock Search &amp; Favorites</span>
-      <span style="font-size:11px;color:var(--text2);font-weight:400">type any ticker · Enter to search · ⭐ pin to save</span>
+  <!-- ══ Dashboard tab ══ -->
+  <div id="tab-dashboard" class="tab-section">
+    <div class="today-strip" id="today-strip">
+      <div class="today-item">
+        <div class="today-label">Today's P&amp;L</div>
+        <div class="today-val" id="td-pnl">—</div>
+        <div class="today-sub" id="td-pnl-pct">—</div>
+      </div>
+      <div class="today-item">
+        <div class="today-label">Today's Trades</div>
+        <div class="today-val neu" id="td-trades">—</div>
+      </div>
+      <div class="today-item">
+        <div class="today-label">Market</div>
+        <div class="today-val" id="td-market">—</div>
+        <div class="today-sub" id="td-market-sub">—</div>
+      </div>
+      <div class="today-spark-wrap">
+        <div class="today-label">Today's Equity</div>
+        <svg id="today-spark" width="100%" height="48" preserveAspectRatio="none"></svg>
+      </div>
     </div>
-    <div class="search-bar">
-      <input type="text" id="search-input" placeholder="e.g. AAPL, TSLA, SPY, QQQ…" maxlength="6"
-             oninput="this.value=this.value.toUpperCase()"
-             onkeydown="if(event.key==='Enter')searchStock()" autocomplete="off" spellcheck="false"/>
-      <button class="btn-search" onclick="searchStock()">Search</button>
-    </div>
-    <div id="search-result" style="display:none"></div>
-  </div>
-
-  <!-- Pinned personal watchlist — shown when at least one ticker is pinned -->
-  <div class="panel grid1" id="pinned-panel" style="display:none">
-    <div class="panel-title">
-      ⭐ Pinned Favorites
-      <span id="pin-count" class="count">0</span>
-      <span style="font-size:11px;color:#475569;margin-left:8px">saved between restarts</span>
-    </div>
-    <div class="pin-grid" id="pin-grid"></div>
-  </div>
-
-  <!-- today's performance strip -->
-  <div class="today-strip" id="today-strip">
-    <div class="today-item">
-      <div class="today-label">Today's P&amp;L</div>
-      <div class="today-val" id="td-pnl">—</div>
-      <div class="today-sub" id="td-pnl-pct">—</div>
-    </div>
-    <div class="today-item">
-      <div class="today-label">Today's Trades</div>
-      <div class="today-val neu" id="td-trades">—</div>
-    </div>
-    <div class="today-item">
-      <div class="today-label">Market</div>
-      <div class="today-val" id="td-market">—</div>
-      <div class="today-sub" id="td-market-sub">—</div>
-    </div>
-    <div class="today-spark-wrap">
-      <div class="today-label">Today's Equity</div>
-      <svg id="today-spark" width="100%" height="48" preserveAspectRatio="none"></svg>
-    </div>
-  </div>
-
-  <!-- stat cards -->
-  <div class="cards">
-    <div class="card">
-      <div class="card-label">Total Value</div>
-      <div class="card-value neu" id="c-total">—</div>
-      <div class="card-sub" id="c-initial">—</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Cash</div>
-      <div class="card-value neu" id="c-cash">—</div>
-    </div>
-    <div class="card">
-      <div class="card-label">In Positions</div>
-      <div class="card-value neu" id="c-pos-val">—</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Total P&amp;L</div>
-      <div class="card-value" id="c-pnl">—</div>
-      <div class="card-sub" id="c-pnl-pct">—</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Open Positions</div>
-      <div class="card-value neu" id="c-open">—</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Total Trades</div>
-      <div class="card-value neu" id="c-trades">—</div>
-    </div>
-    <div class="card" id="regime-card" style="display:none">
-      <div class="card-label">Market Regime</div>
-      <div class="card-value" id="c-regime">—</div>
-      <div class="card-sub" id="c-regime-sub">—</div>
+    <div class="cards">
+      <div class="card">
+        <div class="card-label">Total Value</div>
+        <div class="card-value neu" id="c-total">—</div>
+        <div class="card-sub" id="c-initial">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Cash</div>
+        <div class="card-value neu" id="c-cash">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">In Positions</div>
+        <div class="card-value neu" id="c-pos-val">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Total P&amp;L</div>
+        <div class="card-value" id="c-pnl">—</div>
+        <div class="card-sub" id="c-pnl-pct">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Open Positions</div>
+        <div class="card-value neu" id="c-open">—</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Total Trades</div>
+        <div class="card-value neu" id="c-trades">—</div>
+      </div>
+      <div class="card" id="regime-card" style="display:none">
+        <div class="card-label">Market Regime</div>
+        <div class="card-value" id="c-regime">—</div>
+        <div class="card-sub" id="c-regime-sub">—</div>
+      </div>
     </div>
   </div>
 
-  <!-- VOO 200-week MA monitor -->
-  <div class="voo-panel" id="voo-panel">
-    <div class="voo-header">
-      <span class="voo-title">VOO — 200-Week Moving Average Monitor</span>
-      <span class="voo-checked" id="voo-checked">—</span>
-      <button class="btn-voo" onclick="refreshVOO()">Refresh VOO</button>
+  <!-- ══ Positions tab ══ -->
+  <div id="tab-positions" class="tab-section">
+    <div class="panel grid1" id="sector-pie-panel" style="display:none">
+      <div class="panel-title">Sector Allocation
+        <span class="count" id="sector-pie-count">0</span>
+      </div>
+      <div class="sector-chart-wrap">
+        <div id="sector-pie-plot" style="height:280px"></div>
+      </div>
     </div>
-    <div id="voo-body"><div class="voo-loading">Waiting for first cycle… click Refresh VOO to load now.</div></div>
-  </div>
-
-  <!-- sector breakdown pie chart — only shown when positions are open -->
-  <div class="panel grid1" id="sector-pie-panel" style="display:none">
-    <div class="panel-title">Sector Allocation
-      <span class="count" id="sector-pie-count">0</span>
-    </div>
-    <div class="sector-chart-wrap">
-      <div id="sector-pie-plot" style="height:280px"></div>
-    </div>
-  </div>
-
-  <!-- watchlist scan -->
-  <div class="panel grid1" id="scan-panel">
-    <div class="panel-title">
-      Watchlist
-      <span class="count" id="wl-count">0</span>
-      <span id="scan-meta" style="font-size:11px;color:#475569;margin-left:8px">—</span>
-      <span id="fund-badge" style="display:none;margin-left:auto;font-size:11px;padding:2px 10px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600"></span>
-    </div>
-    <div id="fund-bar" style="display:none;padding:8px 16px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text1);gap:16px;flex-wrap:wrap"></div>
-    <div style="display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px" id="wl-chips"></div>
-  </div>
-
-  <!-- after-hours / pre-market panel -->
-  <div class="panel grid1" id="ext-hours-panel" style="display:none">
-    <div class="panel-title">Pre / Post-Market
-      <span style="font-size:11px;color:#475569;margin-left:8px" id="ext-hours-note">2-min cache</span>
-    </div>
-    <div class="tbl-wrap"><table>
-      <thead><tr>
-        <th>Ticker</th><th>Regular Close</th><th>Pre-Market</th><th>Pre Chg</th><th>Post-Market</th><th>Post Chg</th>
-      </tr></thead>
-      <tbody id="ext-hours-body"><tr><td colspan="6" class="empty">No data</td></tr></tbody>
-    </table></div>
-  </div>
-
-  <!-- signal analysis -->
-  <div class="panel grid1">
-    <div class="panel-title">Signal Analysis <span class="count" id="sig-count">0</span>
-      <span id="mtf-badge" style="display:none;margin-left:6px;font-size:10px;padding:2px 8px;border-radius:99px;background:#1e3a5f;color:#93c5fd;font-weight:600">MTF ON · 1d 50% · 1h 30% · 15m 20%</span>
-      <span id="mr-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600">MR ON</span>
-      <span id="corr-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#1e3a5f;color:#93c5fd;font-weight:600">CORR FILTER ON</span>
-      <span id="sizing-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#451a03;color:#fdba74;font-weight:600">ADAPTIVE SIZE</span>
-      <span id="ml-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#312e81;color:#a5b4fc;font-weight:600">ML RANKING</span>
-    </div>
-    <div class="tbl-wrap"><table>
-      <thead><tr>
-        <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="z-col">Z-Score</th><th class="vol-col">Volume</th><th></th>
-      </tr></thead>
-      <tbody id="sig-body"><tr><td colspan="9" class="empty">No data yet — click Refresh</td></tr></tbody>
-    </table></div>
-  </div>
-
-  <!-- watchlist heat map -->
-  <div class="panel grid1" id="heatmap-panel" style="display:none">
-    <div class="panel-title">Watchlist Heat Map
-      <span style="font-size:11px;color:#475569;margin-left:6px">daily % change</span>
-    </div>
-    <div class="hm-grid" id="hm-grid"></div>
-  </div>
-
-  <!-- news feed panel -->
-  <div class="panel grid1" id="news-panel" style="display:none">
-    <div class="panel-title">
-      Market News
-      <span id="news-count" class="count">0</span>
-      <span style="font-size:11px;color:#475569;margin-left:8px" id="news-note">15-min cache · watchlist only</span>
-      <button id="btn-news-refresh" onclick="loadNews(true)" class="tab-btn" style="margin-left:auto">↻ Refresh</button>
-    </div>
-    <div id="news-body"><div class="news-loading">Loading headlines…</div></div>
-  </div>
-
-  <!-- positions + trades -->
-  <div class="grid2">
     <div class="panel">
       <div class="panel-title">Positions <span class="count" id="pos-count">0</span>
         <span id="trail-badge" style="display:none;margin-left:auto;font-size:10px;padding:2px 8px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600">TRAILING STOP ON</span>
@@ -2850,6 +2733,90 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
         <tbody id="pos-body"><tr><td colspan="8" class="empty">No open positions</td></tr></tbody>
       </table></div>
     </div>
+  </div>
+
+  <!-- ══ Watchlist tab ══ -->
+  <div id="tab-watchlist" class="tab-section">
+    <div class="panel grid1" id="search-panel" style="margin-bottom:14px">
+      <div class="panel-title" style="justify-content:space-between;flex-wrap:wrap;gap:6px">
+        <span>🔍 Stock Search &amp; Favorites</span>
+        <span style="font-size:11px;color:var(--text2);font-weight:400">type any ticker · Enter to search · ⭐ pin to save</span>
+      </div>
+      <div class="search-bar">
+        <input type="text" id="search-input" placeholder="e.g. AAPL, TSLA, SPY, QQQ…" maxlength="6"
+               oninput="this.value=this.value.toUpperCase()"
+               onkeydown="if(event.key==='Enter')searchStock()" autocomplete="off" spellcheck="false"/>
+        <button class="btn-search" onclick="searchStock()">Search</button>
+      </div>
+      <div id="search-result" style="display:none"></div>
+    </div>
+    <div class="panel grid1" id="pinned-panel" style="display:none">
+      <div class="panel-title">
+        ⭐ Pinned Favorites
+        <span id="pin-count" class="count">0</span>
+        <span style="font-size:11px;color:#475569;margin-left:8px">saved between restarts</span>
+      </div>
+      <div class="pin-grid" id="pin-grid"></div>
+    </div>
+    <div class="panel grid1" id="scan-panel">
+      <div class="panel-title">
+        Watchlist
+        <span class="count" id="wl-count">0</span>
+        <span id="scan-meta" style="font-size:11px;color:#475569;margin-left:8px">—</span>
+        <span id="fund-badge" style="display:none;margin-left:auto;font-size:11px;padding:2px 10px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600"></span>
+      </div>
+      <div id="fund-bar" style="display:none;padding:8px 16px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text1);gap:16px;flex-wrap:wrap"></div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px" id="wl-chips"></div>
+    </div>
+    <div class="panel grid1" id="heatmap-panel" style="display:none">
+      <div class="panel-title">Watchlist Heat Map
+        <span style="font-size:11px;color:#475569;margin-left:6px">daily % change</span>
+      </div>
+      <div class="hm-grid" id="hm-grid"></div>
+    </div>
+    <div class="panel grid1" id="news-panel" style="display:none">
+      <div class="panel-title">
+        Market News
+        <span id="news-count" class="count">0</span>
+        <span style="font-size:11px;color:#475569;margin-left:8px" id="news-note">15-min cache · watchlist only</span>
+        <button id="btn-news-refresh" onclick="loadNews(true)" class="tab-btn" style="margin-left:auto">↻ Refresh</button>
+      </div>
+      <div id="news-body"><div class="news-loading">Loading headlines…</div></div>
+    </div>
+  </div>
+
+  <!-- ══ Signals tab ══ -->
+  <div id="tab-signals" class="tab-section">
+    <div class="panel grid1" id="ext-hours-panel" style="display:none">
+      <div class="panel-title">Pre / Post-Market
+        <span style="font-size:11px;color:#475569;margin-left:8px" id="ext-hours-note">2-min cache</span>
+      </div>
+      <div class="tbl-wrap"><table>
+        <thead><tr>
+          <th>Ticker</th><th>Regular Close</th><th>Pre-Market</th><th>Pre Chg</th><th>Post-Market</th><th>Post Chg</th>
+        </tr></thead>
+        <tbody id="ext-hours-body"><tr><td colspan="6" class="empty">No data</td></tr></tbody>
+      </table></div>
+    </div>
+    <div class="panel grid1">
+      <div class="panel-title">Signal Analysis <span class="count" id="sig-count">0</span>
+        <span id="mtf-badge" style="display:none;margin-left:6px;font-size:10px;padding:2px 8px;border-radius:99px;background:#1e3a5f;color:#93c5fd;font-weight:600">MTF ON · 1d 50% · 1h 30% · 15m 20%</span>
+        <span id="mr-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600">MR ON</span>
+        <span id="corr-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#1e3a5f;color:#93c5fd;font-weight:600">CORR FILTER ON</span>
+        <span id="sizing-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#451a03;color:#fdba74;font-weight:600">ADAPTIVE SIZE</span>
+        <span id="ml-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#312e81;color:#a5b4fc;font-weight:600">ML RANKING</span>
+      </div>
+      <div class="tbl-wrap"><table>
+        <thead><tr>
+          <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="z-col">Z-Score</th><th class="vol-col">Volume</th><th></th>
+        </tr></thead>
+        <tbody id="sig-body"><tr><td colspan="9" class="empty">No data yet — run a cycle</td></tr></tbody>
+      </table></div>
+    </div>
+  </div>
+
+  <!-- ══ Trades tab ══ -->
+  <div id="tab-trades" class="tab-section">
     <div class="panel">
       <div class="panel-title">Trades <span class="count" id="trade-count">0</span></div>
       <div class="tbl-wrap"><table>
@@ -2860,6 +2827,7 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
       </table></div>
     </div>
   </div>
+
 </main>
 
 <script>
@@ -2893,11 +2861,6 @@ function applyState(s) {
   } else {
     dot.className = 'market-dot market-unknown'; lbl.textContent = 'Market —';
   }
-
-  document.getElementById('last-ts').textContent = s.timestamp;
-  _nextCycleAt = s.next_cycle_at ? new Date(s.next_cycle_at) : null;
-  _lastCycleAt = s.last_cycle_at ? new Date(s.last_cycle_at) : null;
-  updateCycleInfo();
 
   // cards
   document.getElementById('c-total').textContent = '$' + fmt(p.total_value);
@@ -3044,6 +3007,7 @@ function applyState(s) {
 
   // signals
   document.getElementById('sig-count').textContent = signals.length;
+  {const nb=document.getElementById('ntab-sig-count');if(nb){nb.textContent=signals.length;nb.style.display=signals.length?'':'none';}}
   const sb = document.getElementById('sig-body');
   if (!signals.length) {
     sb.innerHTML = '<tr><td colspan="9" class="empty">No signals — click Refresh</td></tr>';
@@ -3149,6 +3113,7 @@ function applyState(s) {
 
   // positions — Ticker, Sector, Entry, Current, Stop/Trail, Qty, Unrealized P&L
   document.getElementById('pos-count').textContent = positions.length;
+  {const nb=document.getElementById('ntab-pos-count');if(nb){nb.textContent=positions.length;nb.style.display=positions.length?'':'none';}}
   const pb = document.getElementById('pos-body');
   if (!positions.length) {
     pb.innerHTML = '<tr><td colspan="8" class="empty">No open positions</td></tr>';
@@ -3183,6 +3148,7 @@ function applyState(s) {
 
   // trades — columns: Time, Ticker, Side, Qty, Price, Realized P&L
   document.getElementById('trade-count').textContent = trades.length;
+  {const nb=document.getElementById('ntab-trade-count');if(nb){nb.textContent=trades.length;nb.style.display=trades.length?'':'none';}}
   const tb = document.getElementById('trade-body');
   if (!trades.length) {
     tb.innerHTML = '<tr><td colspan="6" class="empty">No trades yet</td></tr>';
@@ -3212,9 +3178,6 @@ function applyState(s) {
     bell.style.opacity = '.35';
     bell.title = 'Notifications OFF — click for setup';
   }
-
-  // VOO panel
-  renderVOO(s.voo);
 
   // public URL
   if (s.public_url) updatePublicUrl(s.public_url);
@@ -3335,67 +3298,6 @@ function renderExtHours(rows, marketOpen) {
   ).join('');
 }
 
-function renderVOO(voo) {
-  const body = document.getElementById('voo-body');
-  const checked = document.getElementById('voo-checked');
-  if (!voo) {
-    body.innerHTML = '<div class="voo-loading">Waiting for first cycle… click Refresh VOO to load now.</div>';
-    checked.textContent = '—';
-    return;
-  }
-  checked.textContent = 'Updated ' + voo.checked_at;
-
-  const gapSign = voo.gap_pct >= 0 ? '+' : '';
-  const gapCol  = voo.above_ma ? '#4ade80' : '#f87171';
-  const alertBar = voo.above_ma
-    ? `<div class="voo-alert-bar voo-above">
-         <span style="font-size:16px">✓</span>
-         VOO is <strong>ABOVE</strong> the 200-Week MA — broad market in long-term uptrend
-       </div>`
-    : `<div class="voo-alert-bar voo-below">
-         <span style="font-size:18px">🟢</span>
-         BUY ALERT — VOO is <strong>BELOW</strong> the 200-Week MA — rare long-term buying opportunity
-       </div>`;
-
-  body.innerHTML = `
-    <div class="voo-stats">
-      <div class="voo-stat">
-        <div class="voo-stat-label">VOO Price</div>
-        <div class="voo-stat-value neu">$${fmt(voo.price)}</div>
-      </div>
-      <div class="voo-stat">
-        <div class="voo-stat-label">200-Week MA</div>
-        <div class="voo-stat-value neu">$${fmt(voo.ma200w)}</div>
-      </div>
-      <div class="voo-stat">
-        <div class="voo-stat-label">Gap vs MA</div>
-        <div class="voo-stat-value" style="color:${gapCol}">${gapSign}${fmt(voo.gap_pct, 1)}%</div>
-      </div>
-    </div>
-    ${alertBar}`;
-}
-
-async function refreshVOO() {
-  const btn = document.querySelector('.btn-voo');
-  btn.disabled = true;
-  btn.textContent = 'Loading…';
-  try {
-    const res  = await fetch('/api/voo', {method: 'POST'});
-    const data = await res.json();
-    if (data.ok) renderVOO(data.voo);
-    else {
-      document.getElementById('err-banner').textContent = 'VOO fetch error: ' + data.error;
-      document.getElementById('err-banner').style.display = 'block';
-    }
-  } catch(e) {
-    document.getElementById('err-banner').textContent = 'VOO fetch failed: ' + e;
-    document.getElementById('err-banner').style.display = 'block';
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Refresh VOO';
-  }
-}
-
 function renderSparkline(equity) {
   const svg = document.getElementById('today-spark');
   if (!svg || !equity || equity.length < 2) {
@@ -3471,75 +3373,14 @@ async function refresh() {
     const data = await res.json();
     applyState(data);
     loadHeatmap();
+    _lastRefreshAt = Date.now();
+    updateLastUpdated();
   } catch(e) {
     document.getElementById('err-banner').textContent = 'Failed to fetch state: ' + e;
     document.getElementById('err-banner').style.display = 'block';
   }
 }
 
-async function rescan() {
-  const btn = document.getElementById('btn-rescan');
-  const overlay = document.getElementById('overlay');
-  document.getElementById('overlay-msg').textContent = 'Scanning S&P 500 universe…';
-  btn.disabled = true;
-  overlay.classList.add('active');
-  const timer = setTimeout(() => {
-    overlay.classList.remove('active');
-    document.getElementById('overlay-msg').textContent = 'Running cycle…';
-    btn.disabled = false;
-    document.getElementById('err-banner').textContent = 'Scan timed out — yfinance may be slow. Try again shortly.';
-    document.getElementById('err-banner').style.display = 'block';
-  }, 120000);
-  try {
-    const res = await fetch('/api/rescan', {method:'POST'});
-    clearTimeout(timer);
-    const data = await res.json();
-    if (data.ok) applyState(data.state);
-    else {
-      document.getElementById('err-banner').textContent = 'Scan error: ' + data.error;
-      document.getElementById('err-banner').style.display = 'block';
-    }
-  } catch(e) {
-    clearTimeout(timer);
-    document.getElementById('err-banner').textContent = 'Scan failed: ' + e;
-    document.getElementById('err-banner').style.display = 'block';
-  } finally {
-    btn.disabled = false;
-    overlay.classList.remove('active');
-    document.getElementById('overlay-msg').textContent = 'Running cycle…';
-  }
-}
-
-async function runCycle() {
-  const btn = document.getElementById('btn-cycle');
-  const overlay = document.getElementById('overlay');
-  btn.disabled = true;
-  document.getElementById('overlay-msg').textContent = 'Running cycle — scanning universe & fetching quotes… (60-90 s)';
-  overlay.classList.add('active');
-  const timer = setTimeout(() => {
-    overlay.classList.remove('active');
-    btn.disabled = false;
-    document.getElementById('err-banner').textContent = 'Cycle timed out — yfinance may be slow (market closed?). Click Refresh to check status.';
-    document.getElementById('err-banner').style.display = 'block';
-  }, 120000);
-  try {
-    const res = await fetch('/api/cycle', {method:'POST'});
-    clearTimeout(timer);
-    const data = await res.json();
-    if (data.ok) applyState(data.state);
-    else {
-      document.getElementById('err-banner').textContent = 'Cycle error: ' + data.error;
-      document.getElementById('err-banner').style.display = 'block';
-    }
-  } catch(e) {
-    clearTimeout(timer);
-    document.getElementById('err-banner').textContent = 'Cycle failed: ' + e;
-    document.getElementById('err-banner').style.display = 'block';
-  } finally {
-    btn.disabled = false;
-    overlay.classList.remove('active');
-  }
-}
 
 // ── Dark / light theme ────────────────────────────────────────────────────────
 function toggleTheme() {
@@ -3588,24 +3429,36 @@ async function pollPnl() {
 setInterval(pollPnl, 5000);
 pollPnl();
 
-// Countdown ticker — updates every second without a server round-trip
-let _nextCycleAt = null;
-let _lastCycleAt = null;
-function updateCycleInfo() {
-  const el = document.getElementById('cycle-info');
-  if (!_nextCycleAt) { el.textContent = ''; return; }
-  const secsLeft = Math.max(0, Math.round((_nextCycleAt - Date.now()) / 1000));
-  let parts = [];
-  if (_lastCycleAt) {
-    const ago = Math.round((Date.now() - _lastCycleAt) / 1000);
-    parts.push('Last cycle ' + (ago < 60 ? ago + 's ago' : Math.round(ago/60) + 'm ago'));
-  }
-  parts.push('Next in ' + secsLeft + 's');
-  el.textContent = parts.join('  ·  ');
+// Last-updated indicator — updates every second without a server round-trip
+let _lastRefreshAt = null;
+function updateLastUpdated() {
+  const el = document.getElementById('last-updated-text');
+  if (!el) return;
+  if (!_lastRefreshAt) { el.textContent = ''; return; }
+  const ago = Math.round((Date.now() - _lastRefreshAt) / 1000);
+  el.textContent = ago < 5 ? 'Just updated' : 'Updated ' + (ago < 60 ? ago + 's ago' : Math.round(ago/60) + 'm ago');
 }
-setInterval(updateCycleInfo, 1000);
+setInterval(updateLastUpdated, 1000);
 
-// Initial load + auto-refresh every 5s (picks up background cycle results quickly)
+// Tab switching — persists active tab in localStorage
+const _TAB_IDS = ['dashboard','positions','watchlist','signals','trades'];
+function switchTab(name) {
+  if (!_TAB_IDS.includes(name)) return;
+  _TAB_IDS.forEach(id => {
+    const sec = document.getElementById('tab-' + id);
+    const btn = document.getElementById('ntab-' + id);
+    if (sec) sec.classList.toggle('active', id === name);
+    if (btn) btn.classList.toggle('active', id === name);
+  });
+  localStorage.setItem('activeTab', name);
+}
+(function restoreTab() {
+  const saved = localStorage.getItem('activeTab');
+  if (saved && _TAB_IDS.includes(saved)) switchTab(saved);
+  else switchTab('dashboard');
+})();
+
+// Initial load + auto-refresh every 5s (picks up background engine-cycle results quickly)
 refresh();
 setInterval(refresh, 5000);
 // Heat map refreshes on each full state refresh (called inside refresh()) — also once on init
@@ -4152,7 +4005,7 @@ LEADERBOARD_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Performance Leaderboard — NYSE Trading Engine</title>
+<title>Performance Leaderboard — Automatic Trading Engine</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -4247,7 +4100,7 @@ tr:hover td{background:rgba(18,26,46,.6)}
 <nav>
   <div class="nav-brand">
     <div class="nav-dot"></div>
-    <span class="nav-name">NYSE Trading Engine</span>
+    <span class="nav-name">Automatic Trading Engine</span>
   </div>
   <div class="nav-right">
     <a href="/" class="btn-nav-ghost">Home</a>
@@ -4447,7 +4300,7 @@ SETTINGS_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Settings — NYSE Trading Engine</title>
+<title>Settings — Automatic Trading Engine</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -4835,7 +4688,7 @@ JOURNAL_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Trade Journal — NYSE Trading Engine</title>
+<title>Trade Journal — Automatic Trading Engine</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -5116,7 +4969,7 @@ STATS_HTML = """<!doctype html>
 <meta name="theme-color" content="#1e293b"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <link rel="manifest" href="/manifest.json"/>
-<title>Performance — NYSE Trading Engine</title>
+<title>Performance — Automatic Trading Engine</title>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -5889,7 +5742,7 @@ if __name__ == "__main__":
     import argparse
     import sys
 
-    parser = argparse.ArgumentParser(description="NYSE Trading Engine Dashboard")
+    parser = argparse.ArgumentParser(description="Automatic Trading Engine Dashboard")
     parser.add_argument(
         "--tunnel", action="store_true",
         help="Open a public ngrok tunnel so you can access the dashboard from anywhere",
