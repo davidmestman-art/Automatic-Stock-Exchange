@@ -2637,11 +2637,10 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
 
 <nav class="nav-tabs-bar">
   <button class="nav-tab active" id="ntab-dashboard" onclick="switchTab('dashboard')">Dashboard</button>
-  <button class="nav-tab" id="ntab-positions" onclick="switchTab('positions')">Positions <span class="count" id="ntab-pos-count" style="display:none"></span></button>
+  <button class="nav-tab" id="ntab-positions" onclick="switchTab('positions')">Positions</button>
   <button class="nav-tab" id="ntab-watchlist" onclick="switchTab('watchlist')">Watchlist</button>
-  <button class="nav-tab" id="ntab-signals" onclick="switchTab('signals')">Signals <span class="count" id="ntab-sig-count" style="display:none"></span></button>
-  <button class="nav-tab" id="ntab-trades" onclick="switchTab('trades')">Trades <span class="count" id="ntab-trade-count" style="display:none"></span></button>
-  <button class="nav-tab" onclick="window.location='/journal'">Journal</button>
+  <button class="nav-tab" id="ntab-signals" onclick="switchTab('signals')">Signals</button>
+  <button class="nav-tab" id="ntab-trades" onclick="switchTab('trades')">Trades</button>
   <button class="nav-tab" onclick="window.location='/settings'">Settings</button>
   {% if auth %}<button class="nav-tab nav-tab-logout" onclick="window.location='/logout'">Logout</button>{% endif %}
 </nav>
@@ -2818,7 +2817,28 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
   <!-- ══ Trades tab ══ -->
   <div id="tab-trades" class="tab-section">
     <div class="panel">
-      <div class="panel-title">Trades <span class="count" id="trade-count">0</span></div>
+      <div class="panel-title" style="flex-wrap:wrap;gap:8px">
+        Trades <span class="count" id="trade-count">0</span>
+        <input type="text" id="trade-search" placeholder="Filter by ticker…" maxlength="6"
+               oninput="this.value=this.value.toUpperCase();renderTrades()"
+               style="margin-left:auto;width:130px;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text0);font-size:12px;font-family:inherit;outline:none"/>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 16px;border-top:1px solid var(--border)">
+        <div class="tab-btns" id="trade-period-btns">
+          <button class="tab-btn" onclick="setTradePeriod('today',this)">Today</button>
+          <button class="tab-btn" onclick="setTradePeriod('7d',this)">7 Days</button>
+          <button class="tab-btn active" onclick="setTradePeriod('30d',this)">30 Days</button>
+          <button class="tab-btn" onclick="setTradePeriod('60d',this)">60 Days</button>
+          <button class="tab-btn" onclick="setTradePeriod('90d',this)">90 Days</button>
+          <button class="tab-btn" onclick="setTradePeriod('180d',this)">180 Days</button>
+          <button class="tab-btn" onclick="setTradePeriod('all',this)">All</button>
+        </div>
+        <div class="tab-btns" id="trade-side-btns" style="margin-left:8px">
+          <button class="tab-btn active" onclick="setTradeSide('all',this)">All</button>
+          <button class="tab-btn" onclick="setTradeSide('BUY',this)">Buy</button>
+          <button class="tab-btn" onclick="setTradeSide('SELL',this)">Sell</button>
+        </div>
+      </div>
       <div class="tbl-wrap"><table>
         <thead><tr>
           <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>P&amp;L</th>
@@ -3007,7 +3027,6 @@ function applyState(s) {
 
   // signals
   document.getElementById('sig-count').textContent = signals.length;
-  {const nb=document.getElementById('ntab-sig-count');if(nb){nb.textContent=signals.length;nb.style.display=signals.length?'':'none';}}
   const sb = document.getElementById('sig-body');
   if (!signals.length) {
     sb.innerHTML = '<tr><td colspan="9" class="empty">No signals — click Refresh</td></tr>';
@@ -3113,7 +3132,6 @@ function applyState(s) {
 
   // positions — Ticker, Sector, Entry, Current, Stop/Trail, Qty, Unrealized P&L
   document.getElementById('pos-count').textContent = positions.length;
-  {const nb=document.getElementById('ntab-pos-count');if(nb){nb.textContent=positions.length;nb.style.display=positions.length?'':'none';}}
   const pb = document.getElementById('pos-body');
   if (!positions.length) {
     pb.innerHTML = '<tr><td colspan="8" class="empty">No open positions</td></tr>';
@@ -3144,23 +3162,6 @@ function applyState(s) {
         <td class="${cls(p.pnl)}">${p.pnl >= 0 ? '+' : ''}$${fmt(Math.abs(p.pnl))} (${p.pnl_pct >= 0 ? '+' : ''}${fmt(p.pnl_pct)}%)</td>
       </tr>`;
     }).join('');
-  }
-
-  // trades — columns: Time, Ticker, Side, Qty, Price, Realized P&L
-  document.getElementById('trade-count').textContent = trades.length;
-  {const nb=document.getElementById('ntab-trade-count');if(nb){nb.textContent=trades.length;nb.style.display=trades.length?'':'none';}}
-  const tb = document.getElementById('trade-body');
-  if (!trades.length) {
-    tb.innerHTML = '<tr><td colspan="6" class="empty">No trades yet</td></tr>';
-  } else {
-    tb.innerHTML = trades.map(t => `<tr>
-      <td style="color:#64748b;font-size:12px">${t.timestamp}</td>
-      <td style="font-weight:600">${t.symbol}</td>
-      <td><span class="pill pill-${t.action}">${t.action}</span></td>
-      <td>${t.shares}</td>
-      <td>$${fmt(t.price)}</td>
-      <td class="${t.pnl != null ? cls(t.pnl) : 'neu'}">${t.pnl != null ? (t.pnl >= 0 ? '+' : '') + '$' + fmt(Math.abs(t.pnl)) + ' (' + (t.pnl_pct >= 0 ? '+' : '') + fmt(t.pnl_pct) + '%)' : '—'}</td>
-    </tr>`).join('');
   }
 
   // sector allocation pie
@@ -3373,6 +3374,7 @@ async function refresh() {
     const data = await res.json();
     applyState(data);
     loadHeatmap();
+    loadJournalTrades();
     _lastRefreshAt = Date.now();
     updateLastUpdated();
   } catch(e) {
@@ -3441,6 +3443,74 @@ function updateLastUpdated() {
 setInterval(updateLastUpdated, 1000);
 
 // Tab switching — persists active tab in localStorage
+// ── Trades tab filters ────────────────────────────────────────────────────────
+let _allTrades = [];
+let _tradePeriod = '30d';
+let _tradeSide = 'all';
+
+function setTradePeriod(p, btn) {
+  _tradePeriod = p;
+  document.querySelectorAll('#trade-period-btns .tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTrades();
+}
+
+function setTradeSide(s, btn) {
+  _tradeSide = s;
+  document.querySelectorAll('#trade-side-btns .tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTrades();
+}
+
+function renderTrades() {
+  const now = new Date();
+  const ticker = (document.getElementById('trade-search')?.value || '').trim().toUpperCase();
+  let cutoff = null;
+  if (_tradePeriod === 'today') {
+    cutoff = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  } else if (_tradePeriod !== 'all') {
+    const days = parseInt(_tradePeriod);
+    cutoff = new Date(now - days * 86400000);
+  }
+  const filtered = _allTrades.filter(t => {
+    if (_tradeSide !== 'all' && t.action !== _tradeSide) return false;
+    if (ticker && !t.symbol.startsWith(ticker)) return false;
+    if (cutoff && t.timestamp) {
+      const d = new Date(t.timestamp);
+      if (!isNaN(d.getTime()) && d < cutoff) return false;
+    }
+    return true;
+  });
+  const tb = document.getElementById('trade-body');
+  document.getElementById('trade-count').textContent = filtered.length;
+  if (!filtered.length) {
+    tb.innerHTML = '<tr><td colspan="6" class="empty">No trades for this period</td></tr>';
+  } else {
+    tb.innerHTML = filtered.map(t => {
+      const pnlPct = t.pnl_pct != null ? t.pnl_pct * 100 : null;
+      return `<tr>
+      <td style="color:#64748b;font-size:12px">${t.timestamp}</td>
+      <td style="font-weight:600">${t.symbol}</td>
+      <td><span class="pill pill-${t.action}">${t.action}</span></td>
+      <td>${t.shares}</td>
+      <td>$${fmt(t.price)}</td>
+      <td class="${t.pnl != null ? cls(t.pnl) : 'neu'}">${t.pnl != null ? (t.pnl >= 0 ? '+' : '') + '$' + fmt(Math.abs(t.pnl)) + (pnlPct != null ? ' (' + (pnlPct >= 0 ? '+' : '') + fmt(Math.abs(pnlPct)) + '%)' : '') : '—'}</td>
+    </tr>`;
+    }).join('');
+  }
+}
+
+async function loadJournalTrades() {
+  try {
+    const res = await fetch('/api/journal');
+    const data = await res.json();
+    if (data.ok && data.entries) {
+      _allTrades = data.entries;
+      renderTrades();
+    }
+  } catch(e) {}
+}
+
 const _TAB_IDS = ['dashboard','positions','watchlist','signals','trades'];
 function switchTab(name) {
   if (!_TAB_IDS.includes(name)) return;
@@ -3451,6 +3521,7 @@ function switchTab(name) {
     if (btn) btn.classList.toggle('active', id === name);
   });
   localStorage.setItem('activeTab', name);
+  if (name === 'trades') loadJournalTrades();
 }
 (function restoreTab() {
   const saved = localStorage.getItem('activeTab');
