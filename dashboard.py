@@ -2424,6 +2424,16 @@ body.light .btn-icon-refresh:hover{color:#1e293b;background:#e2e8f0}
 body.light .hm-sym{color:#0f172a}
 body.light .hm-cell{border-color:rgba(0,0,0,0.08)}
 body.light .hm-price{color:rgba(0,0,0,0.4)}
+.hm-cell{cursor:pointer}
+.hm-cell.hm-selected{outline:2px solid #3b82f6;outline-offset:-1px}
+.wl-controls{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 14px;background:var(--bg1);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:14px}
+.wl-filter-input{flex:1 1 120px;max-width:200px;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text0);font-size:12px;font-family:inherit;outline:none}
+.sort-hdr{cursor:pointer;user-select:none;white-space:nowrap}
+.sort-hdr:hover{color:var(--text0)}
+.sort-hdr.sort-asc::after{content:' ▲';font-size:9px;opacity:.7}
+.sort-hdr.sort-desc::after{content:' ▼';font-size:9px;opacity:.7}
+.wl-row-sel{background:rgba(59,130,246,0.08)!important}
+body.light .wl-filter-input{background:#f8fafc;color:#0f172a;border-color:#e2e8f0}
 
 /* ── Period P&L tab buttons ──────────────────────────────────────────────── */
 .tab-btns{display:flex;gap:5px}
@@ -2831,7 +2841,45 @@ body.light .simple-verdict strong{color:#0f172a}
 
   <!-- ══ Watchlist tab ══ -->
   <div id="tab-watchlist" class="tab-section">
-    <div class="panel grid1" id="search-panel" style="margin-bottom:14px">
+    <!-- controls: search filter + sector buttons -->
+    <div class="wl-controls">
+      <input type="text" id="wl-filter" class="wl-filter-input" placeholder="Filter tickers…"
+             maxlength="6" oninput="this.value=this.value.toUpperCase();applyWlFilters()"
+             autocomplete="off" spellcheck="false"/>
+      <div class="tab-btns" id="wl-sector-btns">
+        <button class="tab-btn active" onclick="setWlSector('all',this)">All</button>
+      </div>
+    </div>
+    <!-- heat map — primary visual -->
+    <div class="panel grid1" id="heatmap-panel">
+      <div class="panel-title">Heat Map
+        <span style="font-size:11px;color:#475569;margin-left:6px">daily % change · click to highlight</span>
+      </div>
+      <div class="hm-grid" id="hm-grid"></div>
+    </div>
+    <!-- unified watchlist table -->
+    <div class="panel grid1" id="wl-table-panel">
+      <div class="panel-title" style="flex-wrap:wrap;gap:6px">
+        Watchlist <span class="count" id="wl-count">0</span>
+        <span id="scan-meta" style="font-size:11px;color:#475569;margin-left:8px">—</span>
+        <span id="fund-badge" style="display:none;margin-left:auto;font-size:11px;padding:2px 10px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600"></span>
+      </div>
+      <div id="fund-bar" style="display:none;padding:8px 16px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text1);gap:16px;flex-wrap:wrap"></div>
+      <div class="tbl-wrap"><table>
+        <thead><tr>
+          <th class="sort-hdr" data-col="symbol" onclick="sortWl('symbol')" id="wlh-symbol">Ticker</th>
+          <th class="sort-hdr" data-col="sector" onclick="sortWl('sector')" id="wlh-sector">Sector</th>
+          <th class="sort-hdr" data-col="price" onclick="sortWl('price')" id="wlh-price">Price</th>
+          <th class="sort-hdr" data-col="change_pct" onclick="sortWl('change_pct')" id="wlh-change_pct">Day %</th>
+          <th class="sort-hdr" data-col="volume_ratio" onclick="sortWl('volume_ratio')" id="wlh-volume_ratio">Volume</th>
+          <th class="sort-hdr sort-desc" data-col="score" onclick="sortWl('score')" id="wlh-score">Score</th>
+          <th>Signal</th>
+        </tr></thead>
+        <tbody id="wl-body"><tr><td colspan="7" class="empty">No watchlist data yet — run a cycle</td></tr></tbody>
+      </table></div>
+    </div>
+    <!-- stock search & favorites -->
+    <div class="panel grid1" id="search-panel">
       <div class="panel-title" style="justify-content:space-between;flex-wrap:wrap;gap:6px">
         <span>🔍 Stock Search &amp; Favorites</span>
         <span style="font-size:11px;color:var(--text2);font-weight:400">type any ticker · Enter to search · ⭐ pin to save</span>
@@ -2852,22 +2900,7 @@ body.light .simple-verdict strong{color:#0f172a}
       </div>
       <div class="pin-grid" id="pin-grid"></div>
     </div>
-    <div class="panel grid1" id="scan-panel">
-      <div class="panel-title">
-        Watchlist
-        <span class="count" id="wl-count">0</span>
-        <span id="scan-meta" style="font-size:11px;color:#475569;margin-left:8px">—</span>
-        <span id="fund-badge" style="display:none;margin-left:auto;font-size:11px;padding:2px 10px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600"></span>
-      </div>
-      <div id="fund-bar" style="display:none;padding:8px 16px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text1);gap:16px;flex-wrap:wrap"></div>
-      <div style="display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px" id="wl-chips"></div>
-    </div>
-    <div class="panel grid1" id="heatmap-panel" style="display:none">
-      <div class="panel-title">Watchlist Heat Map
-        <span style="font-size:11px;color:#475569;margin-left:6px">daily % change</span>
-      </div>
-      <div class="hm-grid" id="hm-grid"></div>
-    </div>
+    <!-- news -->
     <div class="panel grid1" id="news-panel" style="display:none">
       <div class="panel-title">
         Market News
@@ -2949,6 +2982,15 @@ body.light .simple-verdict strong{color:#0f172a}
 const fmt = (n, dec=2) => n == null ? '—' : n.toLocaleString('en-US',{minimumFractionDigits:dec,maximumFractionDigits:dec});
 const fmtD = n => n == null ? '—' : (n>=0?'+':'')+fmt(n);
 const cls = n => n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu';
+
+// ── Watchlist unified view state ──────────────────────────────────────────
+let _hmData     = {};   // sym → {price, change_pct, volume_ratio}
+let _wlSigData  = {};   // sym → signal row from state
+let _wlSymbols  = [];   // ordered watchlist
+let _wlSelected = null;
+let _wlSortCol  = 'score';
+let _wlSortAsc  = false;
+let _wlSector   = 'all';
 
 function applyState(s) {
   if (!s || typeof s !== 'object') return;
@@ -3095,15 +3137,14 @@ function applyState(s) {
     detail.textContent = `Limit −${dl.limit_pct}%  ·  Today: ${sign}${dl.current_pct}%${dl.triggered ? '  — NEW BUYS HALTED' : ''}`;
   }
 
-  // watchlist chips
+  // watchlist + unified view
   const wl = s.watchlist || [];
+  _wlSymbols = wl;
   document.getElementById('wl-count').textContent = wl.length;
   const scan = s.scan;
   if (scan) {
     document.getElementById('scan-meta').textContent =
       `scanned ${scan.scanned_at}  ·  volume top ${scan.volume_candidates_count}  ·  signal ranked to ${wl.length}`;
-
-    // fundamental filter badge + bar
     const fundBadge = document.getElementById('fund-badge');
     const fundBar   = document.getElementById('fund-bar');
     if (scan.fund_enabled) {
@@ -3119,24 +3160,22 @@ function applyState(s) {
       fundBar.style.display   = 'none';
     }
   }
-  const chips = document.getElementById('wl-chips');
-  if (!wl.length) {
-    chips.innerHTML = '<span style="color:#475569;font-size:12px">No watchlist yet — waiting for session scan</span>';
-  } else {
-    chips.innerHTML = wl.map(sym => {
-      const action = scan && scan.actions ? scan.actions[sym] : null;
-      const score  = scan && scan.scores  ? scan.scores[sym]  : null;
-      const col = action === 'BUY' ? '#22c55e' : action === 'SELL' ? '#ef4444' : '#94a3b8';
-      const scoreStr = score != null ? ` ${score >= 0 ? '+' : ''}${score}` : '';
-      const earnDays = s.earnings_warnings && s.earnings_warnings[sym] != null ? s.earnings_warnings[sym] : null;
-      const earnBadge = earnDays != null
-        ? `<span style="color:#f97316;font-size:10px;margin-left:4px" title="Earnings in ${earnDays}d — buys blocked">⚠ ${earnDays}d</span>`
-        : '';
-      return `<span style="background:rgba(26,37,64,.7);border:1px solid ${earnDays != null ? 'rgba(146,64,14,.6)' : 'rgba(255,255,255,0.08)'};border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600">
-        <span style="color:${col}">${sym}</span><span style="color:#475569;font-size:11px">${scoreStr}</span>${earnBadge}
-      </span>`;
-    }).join('');
+  // build _wlSigData from signals array
+  _wlSigData = {};
+  (s.signals || []).forEach(r => { _wlSigData[r.symbol] = r; });
+  // fill in watchlist symbols that have no signal yet
+  if (scan && wl.length) {
+    wl.forEach(sym => {
+      if (!_wlSigData[sym]) _wlSigData[sym] = {
+        symbol: sym, sector: null, price: null,
+        score:  scan.scores  ? (scan.scores[sym]  ?? null) : null,
+        action: scan.actions ? (scan.actions[sym] || 'HOLD') : 'HOLD',
+        volume_ratio: null,
+      };
+    });
   }
+  _buildSectorButtons();
+  renderWatchlistTable();
 
   // MTF badge
   const mtfBadge = document.getElementById('mtf-badge');
@@ -3381,16 +3420,26 @@ function renderSectorPie(positions) {
 
 // ── Watchlist heat map ────────────────────────────────────────────────────────
 function renderHeatmap(items) {
-  const panel = document.getElementById('heatmap-panel');
-  const grid  = document.getElementById('hm-grid');
-  if (!items || !items.length) { panel.style.display = 'none'; return; }
-  panel.style.display = '';
+  const grid = document.getElementById('hm-grid');
+  if (!items || !items.length) return;
   const isLight = document.body.classList.contains('light');
+  const filter  = (document.getElementById('wl-filter')?.value || '').trim();
 
-  grid.innerHTML = items.map(item => {
+  // cache & apply sector filter
+  items.forEach(it => { _hmData[it.symbol] = it; });
+  let visible = items;
+  if (filter) visible = visible.filter(it => it.symbol.includes(filter));
+  if (_wlSector !== 'all') visible = visible.filter(it => {
+    const sig = _wlSigData[it.symbol];
+    return sig && sig.sector === _wlSector;
+  });
+
+  if (!visible.length) { grid.innerHTML = '<div style="padding:14px;color:var(--text2);font-size:12px">No matches</div>'; return; }
+
+  grid.innerHTML = visible.map(item => {
     const pct  = item.change_pct;
     const abs  = Math.abs(pct);
-    const intensity = Math.min(1, abs / 2.5);   // saturates at ±2.5%
+    const intensity = Math.min(1, abs / 2.5);
     const alpha = 0.12 + intensity * 0.55;
     const isUp  = pct >= 0;
     const bgCol = isUp
@@ -3399,8 +3448,9 @@ function renderHeatmap(items) {
     const pctCol = isUp
       ? (intensity > 0.35 ? '#4ade80' : '#22c55e')
       : (intensity > 0.35 ? '#f87171' : '#ef4444');
-    const sign  = pct >= 0 ? '+' : '';
-    return `<div class="hm-cell" style="background:${bgCol}">
+    const sign   = pct >= 0 ? '+' : '';
+    const selCls = _wlSelected === item.symbol ? ' hm-selected' : '';
+    return `<div class="hm-cell${selCls}" style="background:${bgCol}" onclick="highlightWlTicker('${item.symbol}')">
       <div class="hm-sym">${item.symbol}</div>
       <div class="hm-pct" style="color:${pctCol}">${sign}${pct.toFixed(2)}%</div>
       <div class="hm-price">$${item.price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
@@ -3412,8 +3462,125 @@ async function loadHeatmap() {
   try {
     const res  = await fetch('/api/heatmap');
     const data = await res.json();
-    if (data.ok) renderHeatmap(data.items);
+    if (data.ok) {
+      renderHeatmap(data.items);
+      renderWatchlistTable();
+    }
   } catch(_) {}
+}
+
+// ── Unified watchlist helpers ─────────────────────────────────────────────────
+function _buildSectorButtons() {
+  const bar = document.getElementById('wl-sector-btns');
+  if (!bar) return;
+  const sectors = new Set();
+  Object.values(_wlSigData).forEach(r => { if (r.sector) sectors.add(r.sector); });
+  let html = `<button class="tab-btn${_wlSector === 'all' ? ' active' : ''}" onclick="setWlSector('all',this)">All</button>`;
+  [...sectors].sort().forEach(sec => {
+    const esc = sec.replace(/'/g, "\\'");
+    html += `<button class="tab-btn${_wlSector === sec ? ' active' : ''}" onclick="setWlSector('${esc}',this)">${sec}</button>`;
+  });
+  bar.innerHTML = html;
+}
+
+function setWlSector(sec, btn) {
+  _wlSector = sec;
+  document.querySelectorAll('#wl-sector-btns .tab-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  renderWatchlistTable();
+  renderHeatmap(Object.values(_hmData));
+}
+
+function applyWlFilters() {
+  renderWatchlistTable();
+  const items = Object.values(_hmData);
+  if (items.length) renderHeatmap(items);
+}
+
+function highlightWlTicker(sym) {
+  _wlSelected = _wlSelected === sym ? null : sym;
+  renderHeatmap(Object.values(_hmData));
+  document.querySelectorAll('#wl-body tr[data-sym]').forEach(row => {
+    row.classList.toggle('wl-row-sel', row.dataset.sym === _wlSelected);
+  });
+  if (_wlSelected) {
+    const sel = document.querySelector(`#wl-body tr[data-sym="${_wlSelected}"]`);
+    if (sel) sel.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+  }
+}
+
+function sortWl(col) {
+  if (_wlSortCol === col) {
+    _wlSortAsc = !_wlSortAsc;
+  } else {
+    _wlSortCol = col;
+    _wlSortAsc = (col === 'symbol' || col === 'sector');
+  }
+  document.querySelectorAll('#wl-table-panel .sort-hdr').forEach(th => {
+    th.classList.remove('sort-asc', 'sort-desc');
+  });
+  const activeHdr = document.getElementById('wlh-' + col);
+  if (activeHdr) activeHdr.classList.add(_wlSortAsc ? 'sort-asc' : 'sort-desc');
+  renderWatchlistTable();
+}
+
+function renderWatchlistTable() {
+  const body = document.getElementById('wl-body');
+  if (!body) return;
+  const filter  = (document.getElementById('wl-filter')?.value || '').trim();
+  const allSyms = _wlSymbols.length ? _wlSymbols : Object.keys(_wlSigData);
+
+  let rows = allSyms.map(sym => {
+    const sig = _wlSigData[sym] || {};
+    const hm  = _hmData[sym]    || {};
+    return {
+      symbol:       sym,
+      sector:       sig.sector || '—',
+      price:        sig.price  ?? hm.price  ?? null,
+      change_pct:   hm.change_pct ?? null,
+      volume_ratio: hm.volume_ratio ?? sig.volume_ratio ?? null,
+      score:        sig.score  ?? null,
+      action:       sig.action || 'HOLD',
+    };
+  });
+
+  if (filter) rows = rows.filter(r => r.symbol.includes(filter));
+  if (_wlSector !== 'all') rows = rows.filter(r => r.sector === _wlSector);
+
+  rows.sort((a, b) => {
+    let va = a[_wlSortCol], vb = b[_wlSortCol];
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    if (typeof va === 'string') { va = va.toLowerCase(); vb = String(vb).toLowerCase(); }
+    const cmp = va < vb ? -1 : va > vb ? 1 : 0;
+    return _wlSortAsc ? cmp : -cmp;
+  });
+
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">No watchlist data yet — run a cycle</td></tr>';
+    return;
+  }
+
+  body.innerHTML = rows.map(r => {
+    const pctCol = r.change_pct == null ? '#475569' : r.change_pct > 0 ? '#22c55e' : r.change_pct < 0 ? '#ef4444' : '#94a3b8';
+    const pctStr = r.change_pct == null ? '—' : (r.change_pct >= 0 ? '+' : '') + r.change_pct.toFixed(2) + '%';
+    const vr     = r.volume_ratio;
+    const vrCol  = vr == null ? '#475569' : vr >= 3 ? '#f97316' : vr >= 2 ? '#fb923c' : vr >= 1.5 ? '#fbbf24' : '#475569';
+    const vrStr  = vr == null ? '—' : vr.toFixed(1) + '×';
+    const scCol  = r.score == null ? '#475569' : r.action === 'BUY' ? '#22c55e' : r.action === 'SELL' ? '#ef4444' : '#94a3b8';
+    const scStr  = r.score == null ? '—' : (r.score >= 0 ? '+' : '') + fmt(r.score, 3);
+    const isSel  = r.symbol === _wlSelected;
+    return `<tr data-sym="${r.symbol}" class="${isSel ? 'wl-row-sel' : ''}" style="cursor:pointer" onclick="highlightWlTicker('${r.symbol}')">
+      <td style="font-weight:700;color:var(--text0)">${r.symbol}</td>
+      <td style="color:var(--text2);font-size:12px">${r.sector}</td>
+      <td>${r.price != null ? '$' + fmt(r.price) : '—'}</td>
+      <td style="color:${pctCol};font-weight:600">${pctStr}</td>
+      <td style="color:${vrCol}">${vrStr}</td>
+      <td style="color:${scCol};font-weight:600">${scStr}</td>
+      <td><span class="pill pill-${r.action}">${r.action}</span></td>
+    </tr>`;
+  }).join('');
 }
 
 function renderExtHours(rows, marketOpen) {
