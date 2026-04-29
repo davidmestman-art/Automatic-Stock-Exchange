@@ -2599,6 +2599,26 @@ body.light .explain-val{color:#0f172a}
 body.light .explain-reasons{border-top-color:#e2e8f0}
 body.light .explain-reason{color:#64748b;border-bottom-color:#f1f5f9}
 body.light .explain-close{border-color:#e2e8f0;color:#64748b}
+
+/* ── Explain modal — Simple / Technical tabs ─────────────────────────────── */
+.explain-tabs{display:flex;gap:3px;margin-bottom:16px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:3px}
+.explain-tab-btn{flex:1;padding:6px 12px;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;background:none;color:var(--text2);transition:all .15s;min-height:unset;letter-spacing:.2px}
+.explain-tab-btn.active{background:var(--bg1);color:var(--text0);box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.explain-section{display:none}
+.explain-section.active{display:block}
+.simple-explain{line-height:1.7;font-size:14px}
+.simple-explain p{margin:0 0 11px;color:#c8d4e8}
+.simple-explain p:last-child{margin-bottom:0}
+.simple-explain strong{color:#f1f5f9}
+.simple-closing{font-style:italic;color:#94a3b8 !important;font-size:13px}
+.simple-verdict{background:var(--bg2);border-left:3px solid var(--blue);padding:10px 14px;border-radius:0 6px 6px 0;margin-bottom:14px;font-size:14px;color:#c8d4e8;line-height:1.55}
+.simple-verdict strong{color:#f1f5f9}
+body.light .explain-tab-btn.active{background:#fff;color:#0f172a;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+body.light .simple-explain p{color:#374151}
+body.light .simple-explain strong{color:#0f172a}
+body.light .simple-closing{color:#64748b !important}
+body.light .simple-verdict{background:#f8fafc;border-left-color:#3b82f6;color:#374151}
+body.light .simple-verdict strong{color:#0f172a}
 </style>
 </head>
 <body>
@@ -3915,35 +3935,103 @@ function explainSignal(sym) {
   }
 
   // ── Sector Momentum ─────────────────────────────────────────────────────────
+  // Note: r.sector_mom is already in percentage units (e.g. 3.5 = 3.5%)
   if (r.sector_mom != null) {
     const sm = r.sector_mom;
-    const smPct = (sm * 100).toFixed(1);
+    const smPct = Math.abs(sm).toFixed(1);
     let tone, label, detail;
-    if (sm >= 0.03) {
+    if (sm >= 3) {
       tone = 'bull'; label = 'Strong Sector Outperformance';
       detail = `This stock is outperforming its sector by <span class="explain-val">+${smPct}%</span> over the last 5 days — strong relative strength signals leadership. Institutions favor sector leaders.`;
-    } else if (sm >= 0.01) {
+    } else if (sm >= 1) {
       tone = 'bull'; label = 'Mild Sector Outperformance';
       detail = `This stock is outperforming its sector by <span class="explain-val">+${smPct}%</span> over 5 days — slight relative strength advantage.`;
-    } else if (sm > -0.01) {
+    } else if (sm > -1) {
       tone = 'neu'; label = 'In Line With Sector';
-      detail = `This stock is moving in line with its sector (relative performance: <span class="explain-val">${smPct}%</span> over 5 days). No standout relative strength.`;
-    } else if (sm > -0.03) {
+      detail = `This stock is moving in line with its sector (relative performance: <span class="explain-val">${sm.toFixed(1)}%</span> over 5 days). No standout relative strength.`;
+    } else if (sm > -3) {
       tone = 'bear'; label = 'Mild Sector Underperformance';
-      detail = `This stock is underperforming its sector by <span class="explain-val">${Math.abs(smPct)}%</span> over 5 days — slight relative weakness.`;
+      detail = `This stock is underperforming its sector by <span class="explain-val">${smPct}%</span> over 5 days — slight relative weakness.`;
     } else {
       tone = 'bear'; label = 'Strong Sector Underperformance';
-      detail = `This stock is underperforming its sector by <span class="explain-val">${Math.abs(smPct)}%</span> over the last 5 days — a laggard within its sector. Consider why it's being left behind.`;
+      detail = `This stock is underperforming its sector by <span class="explain-val">${smPct}%</span> over the last 5 days — a laggard within its sector. Consider why it's being left behind.`;
     }
     items.push({icon: '🏭', tone, label, detail});
   }
 
-  // ── Build HTML ─────────────────────────────────────────────────────────────
-  const scoreOut10 = (Math.abs(r.score) * 10).toFixed(1);
+  // ── Build Simple Section ───────────────────────────────────────────────────
+  const bullItems = items.filter(i => i.tone === 'bull');
+  const bearItems = items.filter(i => i.tone === 'bear');
+  const confPct = Math.round(r.confidence * 100);
+
+  let verdictText;
+  if (r.action === 'BUY') {
+    verdictText = `The algorithm thinks <strong>${sym}</strong> looks like a <strong>buying opportunity</strong> right now (${confPct}% confidence).`;
+  } else if (r.action === 'SELL') {
+    verdictText = `The algorithm is flagging <strong>${sym}</strong> as a potential <strong>sell</strong> — conditions are turning unfavorable (${confPct}% confidence).`;
+  } else {
+    verdictText = `The algorithm says <strong>wait</strong> on <strong>${sym}</strong> — the signals aren't clear enough to act on yet.`;
+  }
+
+  const simpleReasons = [];
+  if (r.rsi != null) {
+    if (r.rsi < 30) simpleReasons.push("The stock has dropped heavily and looks oversold — like a sale where the price fell more than usual. Oversold stocks often bounce back.");
+    else if (r.rsi < 45) simpleReasons.push("Selling pressure has been easing off lately, suggesting the recent dip may be running out of steam.");
+    else if (r.rsi > 70) simpleReasons.push("The stock has been on a strong run and is looking stretched — lots of buyers have already piled in, making further gains harder to sustain.");
+    else if (r.rsi > 55) simpleReasons.push("Recent buying momentum has been healthy, but the stock isn't overextended yet.");
+  }
+  if (r.macd_hist != null) {
+    const h = r.macd_hist, hp = r.macd_hist_prev;
+    const crossed = hp != null && ((h > 0 && hp <= 0) || (h < 0 && hp >= 0));
+    if (h > 0 && crossed) simpleReasons.push("Momentum just shifted from negative to positive — like a car switching from reverse into drive. This is often an early buy signal.");
+    else if (h > 0 && hp != null && h > hp) simpleReasons.push("Buying momentum is building and growing stronger each day — the move looks like it has room to continue.");
+    else if (h < 0 && crossed) simpleReasons.push("Momentum just shifted from positive to negative — the upward drive is gone and sellers are taking over.");
+    else if (h < 0 && hp != null && h < hp) simpleReasons.push("Selling pressure is intensifying — the stock has been going down and the pace is accelerating.");
+  }
+  if (r.bb_upper != null && r.bb_lower != null && r.price) {
+    if (r.price < r.bb_lower) simpleReasons.push("The price has dropped outside its normal range — like a rubber band stretched to its limit. It doesn't always snap back instantly, but this level has historically attracted buyers.");
+    else if (r.price > r.bb_upper) simpleReasons.push("The price has risen outside its normal range — like a rubber band stretched upward. Extended runs like this tend to slow down or pull back.");
+  }
+  if (r.ema_fast != null && r.ema_slow != null) {
+    if (r.ema_fast > r.ema_slow) simpleReasons.push("The short-term price trend is above the longer-term average — the stock is in an uptrend and buyers have been in control recently.");
+    else simpleReasons.push("The short-term price trend has fallen below the longer-term average — the stock is in a downtrend and sellers have been in control.");
+  }
+  if (r.vwap != null && r.price != null) {
+    const dev = (r.price - r.vwap) / r.vwap;
+    if (dev <= -0.03) simpleReasons.push(`The stock is trading ${(Math.abs(dev)*100).toFixed(1)}% below what most people paid for it today — you'd be buying at a discount to the day's fair value.`);
+    else if (dev >= 0.03) simpleReasons.push(`The stock is trading ${(dev*100).toFixed(1)}% above what most people paid for it today — it's already at a premium, making a profitable entry harder.`);
+  }
+  if (r.volume_ratio != null && r.volume_ratio >= 2) {
+    simpleReasons.push(`There's ${r.volume_ratio.toFixed(1)}× the usual trading activity today — heavy volume often means big investors are making moves, which can amplify a signal's reliability.`);
+  }
+  if (r.sector_mom != null) {
+    if (r.sector_mom >= 3) simpleReasons.push(`It's outperforming other stocks in its industry by ${r.sector_mom.toFixed(1)}% this week — sector leaders often continue to lead.`);
+    else if (r.sector_mom <= -3) simpleReasons.push(`It's lagging other stocks in its industry by ${Math.abs(r.sector_mom).toFixed(1)}% this week — a stock falling behind its peers is a warning sign.`);
+  }
+  if (r.adx != null && r.adx < 20) simpleReasons.push("The stock is in a choppy, sideways phase right now — there's no strong trend in either direction, which makes signals less reliable.");
+
+  const topReasons = simpleReasons.slice(0, 3);
+  let closingLine;
+  if (r.action === 'BUY') {
+    closingLine = `In short: ${bullItems.length} of ${items.length} indicators are pointing bullish. The algorithm sees more reasons to buy than not — but no trade is guaranteed.`;
+  } else if (r.action === 'SELL') {
+    closingLine = `In short: ${bearItems.length} of ${items.length} indicators are pointing bearish. The algorithm sees more reasons to reduce than hold.`;
+  } else {
+    closingLine = `In short: the signals are mixed. Waiting for a clearer setup is often the right call.`;
+  }
+
+  const simpleHtml = `<div class="simple-explain">
+    <div class="simple-verdict">${verdictText}</div>
+    ${topReasons.map(txt => `<p>• ${txt}</p>`).join('')}
+    ${topReasons.length === 0 ? '<p>Not enough indicator data to generate a full explanation.</p>' : ''}
+    <p class="simple-closing">${closingLine}</p>
+  </div>`;
+
+  // ── Build Technical Section ────────────────────────────────────────────────
   const scoreHtml = `<div class="explain-score">
-    Overall composite score: <strong>${r.score >= 0 ? '+' : ''}${r.score} / ±1.0</strong>
-    &nbsp;·&nbsp; Confidence: <strong>${Math.round(r.confidence * 100)}%</strong>
-    ${r.ml_mult != null ? `&nbsp;·&nbsp; ML rank multiplier: <strong>${r.ml_mult.toFixed(2)}×</strong>` : ''}
+    Composite score: <strong>${r.score >= 0 ? '+' : ''}${r.score} / ±1.0</strong>
+    &nbsp;·&nbsp; Confidence: <strong>${confPct}%</strong>
+    ${r.ml_mult != null ? `&nbsp;·&nbsp; ML multiplier: <strong>${r.ml_mult.toFixed(2)}×</strong>` : ''}
   </div>`;
 
   const itemsHtml = items.map(it => `
@@ -3962,13 +4050,33 @@ function explainSignal(sym) {
        </div>`
     : '';
 
+  const techHtml = scoreHtml + itemsHtml + reasonsHtml;
+
+  // ── Assemble tabbed modal ──────────────────────────────────────────────────
+  const modalHtml = `
+    <div class="explain-tabs">
+      <button class="explain-tab-btn active" onclick="switchExplainTab('simple',this)">Simple</button>
+      <button class="explain-tab-btn" onclick="switchExplainTab('technical',this)">Technical</button>
+    </div>
+    <div class="explain-section active" id="explain-sec-simple">${simpleHtml}</div>
+    <div class="explain-section" id="explain-sec-technical">${techHtml}</div>`;
+
   // Update modal
   document.getElementById('explain-sym').textContent = sym;
   const pill = document.getElementById('explain-pill');
   pill.className = `pill pill-${r.action}`;
   pill.textContent = r.action + ' SIGNAL';
-  document.getElementById('explain-body').innerHTML = scoreHtml + itemsHtml + reasonsHtml;
+  document.getElementById('explain-body').innerHTML = modalHtml;
   document.getElementById('explain-modal').classList.add('active');
+}
+
+function switchExplainTab(tab, btn) {
+  ['simple', 'technical'].forEach(id => {
+    const sec = document.getElementById('explain-sec-' + id);
+    if (sec) sec.classList.toggle('active', id === tab);
+  });
+  document.querySelectorAll('.explain-tab-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
 }
 
 function closeExplain() {
