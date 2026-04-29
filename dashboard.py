@@ -1730,6 +1730,130 @@ def api_chart(symbol):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/bars/<symbol>")
+def api_bars(symbol):
+    """Simple OHLCV data for the stock detail modal chart (multiple periods)."""
+    symbol = symbol.upper()
+    period = request.args.get("period", "3m")
+    period_map = {
+        "1d": ("1d",  "5m"),
+        "1w": ("5d",  "1h"),
+        "1m": ("1mo", "1d"),
+        "3m": ("3mo", "1d"),
+        "6m": ("6mo", "1d"),
+        "1y": ("1y",  "1d"),
+    }
+    yf_period, yf_interval = period_map.get(period, ("3mo", "1d"))
+    try:
+        import math
+        import yfinance as yf
+        df = yf.Ticker(symbol).history(period=yf_period, interval=yf_interval)
+        if df is None or df.empty:
+            return jsonify({"ok": False, "error": f"No data for {symbol}"}), 404
+        if df.index.tz is not None:
+            df.index = df.index.tz_convert("UTC").tz_localize(None)
+        def to_list(s):
+            return [None if (v is None or (isinstance(v, float) and math.isnan(v))) else round(float(v), 4) for v in s]
+        is_intraday = yf_interval in ("5m", "1h")
+        date_fmt = "%Y-%m-%d %H:%M" if is_intraday else "%Y-%m-%d"
+        return jsonify({
+            "ok":      True,
+            "symbol":  symbol,
+            "period":  period,
+            "dates":   df.index.strftime(date_fmt).tolist(),
+            "open":    to_list(df["Open"]),
+            "high":    to_list(df["High"]),
+            "low":     to_list(df["Low"]),
+            "close":   to_list(df["Close"]),
+            "volume":  [int(v) if v is not None else None for v in to_list(df["Volume"])],
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/detail/<symbol>")
+def api_detail(symbol):
+    """Combined stock detail: company info, OHLCV stats, signal, position, news."""
+    symbol = symbol.upper()
+    try:
+        import yfinance as yf
+        info = {}
+        try:
+            info = yf.Ticker(symbol).info or {}
+        except Exception:
+            pass
+
+        name       = info.get("longName") or info.get("shortName") or symbol
+        price      = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
+        prev_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
+        change_val = change_pct = None
+        if price and prev_close:
+            change_val = round(float(price) - float(prev_close), 2)
+            change_pct = round((float(price) / float(prev_close) - 1) * 100, 2)
+
+        week52_high = info.get("fiftyTwoWeekHigh")
+        week52_low  = info.get("fiftyTwoWeekLow")
+        volume      = info.get("regularMarketVolume") or info.get("volume")
+
+        # Signal from last cached state (fast — no recompute)
+        with _lock:
+            sig_list = _last_state.get("signals", [])
+            pos_list = _last_state.get("positions", [])
+        sig_row = next((s for s in sig_list if s.get("symbol") == symbol), None)
+        signal_data = None
+        if sig_row:
+            signal_data = {k: sig_row.get(k) for k in (
+                "action", "score", "rsi", "adx", "vwap_dev", "sector_mom",
+                "macd_hist", "macd_hist_prev", "bb_pct", "ema_gap",
+                "tf_1d", "tf_1h", "tf_15m", "mtf_agreement",
+                "volume_ratio", "atr_pct", "est_size_pct", "ml_mult",
+            )}
+
+        pos_row = next((p for p in pos_list if p.get("symbol") == symbol), None)
+        position_data = None
+        if pos_row:
+            position_data = {k: pos_row.get(k) for k in (
+                "shares", "entry_price", "current_price", "pnl", "pnl_pct",
+                "stop_loss", "highest_price", "take_profit",
+            )}
+
+        # Stock-specific news (fresh fetch, small TTL)
+        now = datetime.now()
+        news_items = []
+        cached = _news_cache.get(symbol)
+        if cached and (now - cached["fetched_at"]).total_seconds() < _NEWS_CACHE_TTL:
+            news_items = cached["items"]
+        else:
+            try:
+                raw_news = yf.Ticker(symbol).news or []
+                news_items = [_parse_news_item(n, symbol) for n in raw_news[:6] if n]
+                news_items = [it for it in news_items if it.get("title")]
+                _news_cache[symbol] = {"items": news_items, "fetched_at": now}
+            except Exception:
+                pass
+
+        return jsonify({
+            "ok":         True,
+            "symbol":     symbol,
+            "name":       name,
+            "price":      round(float(price), 2) if price else None,
+            "change_val": change_val,
+            "change_pct": change_pct,
+            "open":       round(float(info["regularMarketOpen"]),    2) if info.get("regularMarketOpen")    else None,
+            "high":       round(float(info["regularMarketDayHigh"]), 2) if info.get("regularMarketDayHigh") else None,
+            "low":        round(float(info["regularMarketDayLow"]),  2) if info.get("regularMarketDayLow")  else None,
+            "close":      round(float(price), 2) if price else None,
+            "volume":     int(volume) if volume else None,
+            "week52_high": round(float(week52_high), 2) if week52_high else None,
+            "week52_low":  round(float(week52_low),  2) if week52_low  else None,
+            "signal":    signal_data,
+            "position":  position_data,
+            "news":      news_items,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/journal")
 def api_journal():
     try:
@@ -2353,18 +2477,55 @@ tr:hover td{background:var(--bg2)}
 .loading-overlay{display:none;position:fixed;inset:0;background:rgba(13,21,32,.8);z-index:50;align-items:center;justify-content:center;flex-direction:column;gap:12px}
 .loading-overlay.active{display:flex}
 
-/* ── Chart modal ─────────────────────────────────────────────────────────── */
-.chart-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:200;overflow:auto;padding:16px}
+/* ── Stock detail modal ──────────────────────────────────────────────────── */
+.chart-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:200;overflow-y:auto;padding:20px 16px}
 .chart-modal.active{display:block}
-.chart-box{max-width:1120px;margin:0 auto;background:var(--bg1);border-radius:10px;border:1px solid var(--border);overflow:hidden}
-.chart-hdr{padding:11px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--border)}
-.chart-sym{font-weight:700;font-size:15px;color:var(--text0)}
-.chart-meta{font-size:12px;color:var(--text2)}
-.chart-close{margin-left:auto;background:var(--bg3);color:var(--text1);border:1px solid var(--border);padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600}
+.chart-box{max-width:1080px;margin:0 auto;background:var(--bg1);border-radius:12px;border:1px solid var(--border);overflow:hidden}
+.chart-hdr{padding:14px 18px 12px;display:flex;flex-wrap:wrap;align-items:flex-start;gap:10px;border-bottom:1px solid var(--border);background:var(--bg1)}
+.chart-sym{font-weight:800;font-size:20px;color:var(--text0);letter-spacing:-.3px}
+.chart-name{font-size:13px;color:var(--text2);font-weight:400;margin-top:1px}
+.chart-price{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text0)}
+.chart-chg{font-size:13px;font-weight:600;margin-top:3px}
+.chart-close{margin-left:auto;background:var(--bg3);color:var(--text1);border:1px solid var(--border);padding:5px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;align-self:center}
 .chart-close:hover{color:var(--text0)}
+.chart-period-bar{display:flex;gap:5px;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--bg0)}
+.chart-period-btn{padding:3px 12px;border-radius:99px;border:1px solid var(--border);background:none;color:var(--text2);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit}
+.chart-period-btn.active{background:var(--bg3);color:var(--text0);border-color:var(--border-strong)}
 .chart-body{padding:8px;background:var(--bg0)}
+.detail-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:1px;background:var(--border);border-top:1px solid var(--border)}
+.detail-stat{background:var(--bg1);padding:10px 14px}
+.detail-stat-lbl{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
+.detail-stat-val{font-size:14px;font-weight:600;color:var(--text0);font-variant-numeric:tabular-nums}
+.detail-52w-bar-wrap{padding:10px 18px 12px;border-top:1px solid var(--border);background:var(--bg1)}
+.detail-52w-label{font-size:11px;color:var(--text2);display:flex;justify-content:space-between;margin-bottom:5px}
+.detail-52w-track{height:4px;background:var(--bg3);border-radius:2px;position:relative}
+.detail-52w-fill{height:100%;background:linear-gradient(90deg,#ef4444,#eab308,#22c55e);border-radius:2px}
+.detail-52w-pin{position:absolute;top:-3px;width:10px;height:10px;background:#3b82f6;border:2px solid var(--bg1);border-radius:50%;transform:translateX(-50%)}
+.detail-section{padding:14px 18px;border-top:1px solid var(--border)}
+.detail-section-title{font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+.detail-signal-row{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.detail-pos-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.detail-pos-item{background:var(--bg2);border-radius:6px;padding:8px 12px}
+.detail-pos-lbl{font-size:10px;color:var(--text2);text-transform:uppercase;margin-bottom:2px}
+.detail-pos-val{font-size:13px;font-weight:600;color:var(--text0)}
+.detail-news-item{padding:9px 0;border-bottom:1px solid var(--border);font-size:12px}
+.detail-news-item:last-child{border-bottom:none}
+.detail-news-title{color:var(--text0);font-weight:500;line-height:1.4}
+.detail-news-title a{color:inherit;text-decoration:none}
+.detail-news-title a:hover{text-decoration:underline}
+.detail-news-meta{color:var(--text2);font-size:10px;margin-top:3px}
+.chart-sym{font-weight:800;font-size:20px;color:var(--text0)}
 .sym-link{cursor:pointer;color:#93c5fd}
 .sym-link:hover{text-decoration:underline}
+body.light .chart-box{background:#fff}
+body.light .chart-hdr{background:#fff}
+body.light .chart-period-bar{background:#f8fafc}
+body.light .chart-body{background:#f8fafc}
+body.light .detail-stats{background:#e2e8f0}
+body.light .detail-stat{background:#fff}
+body.light .detail-52w-bar-wrap{background:#fff}
+body.light .detail-section{border-top-color:#e2e8f0}
+body.light .detail-pos-item{background:#f1f5f9}
 
 /* ── Tab navigation bar ──────────────────────────────────────────────────── */
 .nav-tabs-bar{background:var(--bg1);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9}
@@ -2633,16 +2794,68 @@ body.light .simple-verdict strong{color:#0f172a}
 </head>
 <body>
 
-<!-- Chart modal — click any ticker in Signal Analysis to open -->
+<!-- Stock detail modal -->
 <div class="chart-modal" id="chart-modal" onclick="if(event.target===this)closeChart()">
   <div class="chart-box">
+    <!-- Header: ticker, name, price, change -->
     <div class="chart-hdr">
-      <span class="chart-sym" id="chart-sym">—</span>
-      <span class="chart-meta" id="chart-meta">90-day daily</span>
+      <div>
+        <div class="chart-sym" id="chart-sym">—</div>
+        <div class="chart-name" id="chart-name"></div>
+      </div>
+      <div style="margin-left:16px">
+        <div class="chart-price" id="chart-price">—</div>
+        <div class="chart-chg" id="chart-chg"></div>
+      </div>
       <button class="chart-close" onclick="closeChart()">✕ Close</button>
     </div>
+    <!-- Period buttons -->
+    <div class="chart-period-bar" id="chart-period-bar">
+      <button class="chart-period-btn" onclick="loadDetailBars(_detailSym,'1d',this)">1D</button>
+      <button class="chart-period-btn" onclick="loadDetailBars(_detailSym,'1w',this)">1W</button>
+      <button class="chart-period-btn" onclick="loadDetailBars(_detailSym,'1m',this)">1M</button>
+      <button class="chart-period-btn active" onclick="loadDetailBars(_detailSym,'3m',this)">3M</button>
+      <button class="chart-period-btn" onclick="loadDetailBars(_detailSym,'6m',this)">6M</button>
+      <button class="chart-period-btn" onclick="loadDetailBars(_detailSym,'1y',this)">1Y</button>
+    </div>
+    <!-- Chart -->
     <div class="chart-body">
-      <div id="chart-plotly" style="height:540px"></div>
+      <div id="chart-plotly" style="height:280px"></div>
+    </div>
+    <!-- Key stats grid -->
+    <div class="detail-stats" id="detail-stats"></div>
+    <!-- 52-Week range bar -->
+    <div class="detail-52w-bar-wrap" id="detail-52w-wrap" style="display:none">
+      <div class="detail-52w-label">
+        <span id="detail-52w-low">—</span>
+        <span style="color:var(--text1);font-weight:600">52-Week Range</span>
+        <span id="detail-52w-high">—</span>
+      </div>
+      <div class="detail-52w-track">
+        <div class="detail-52w-fill" id="detail-52w-fill"></div>
+        <div class="detail-52w-pin" id="detail-52w-pin"></div>
+      </div>
+    </div>
+    <!-- Signal section -->
+    <div class="detail-section" id="detail-signal-section" style="display:none">
+      <div class="detail-section-title">Algo Signal</div>
+      <div class="detail-signal-row" id="detail-signal-row"></div>
+      <div class="explain-tabs" id="detail-explain-tabs">
+        <button class="explain-tab-btn active" onclick="switchDetailTab('simple',this)">Simple</button>
+        <button class="explain-tab-btn" onclick="switchDetailTab('technical',this)">Technical</button>
+      </div>
+      <div class="explain-section active" id="detail-explain-simple"></div>
+      <div class="explain-section" id="detail-explain-technical"></div>
+    </div>
+    <!-- Position section -->
+    <div class="detail-section" id="detail-pos-section" style="display:none">
+      <div class="detail-section-title">Your Position</div>
+      <div class="detail-pos-grid" id="detail-pos-grid"></div>
+    </div>
+    <!-- News section -->
+    <div class="detail-section" id="detail-news-section" style="display:none">
+      <div class="detail-section-title">News</div>
+      <div id="detail-news-body"></div>
     </div>
   </div>
 </div>
@@ -3342,7 +3555,7 @@ function applyState(s) {
         dayHtml = `<span class="${cls(p.change_today)}">${sign}$${fmt(Math.abs(p.change_today))}${pctStr}</span>`;
       }
       return `<tr>
-        <td style="font-weight:600">${p.symbol}</td>
+        <td class="sym-link" style="font-weight:600" onclick="openChart('${p.symbol}')" title="Click for detail">${p.symbol}</td>
         <td style="color:#64748b;font-size:12px">${p.sector||'—'}</td>
         <td>$${fmt(p.entry_price)}</td>
         <td>$${fmt(p.current_price)}</td>
@@ -3450,7 +3663,7 @@ function renderHeatmap(items) {
       : (intensity > 0.35 ? '#f87171' : '#ef4444');
     const sign   = pct >= 0 ? '+' : '';
     const selCls = _wlSelected === item.symbol ? ' hm-selected' : '';
-    return `<div class="hm-cell${selCls}" style="background:${bgCol}" onclick="highlightWlTicker('${item.symbol}')">
+    return `<div class="hm-cell${selCls}" style="background:${bgCol}" onclick="openChart('${item.symbol}')" title="${item.symbol} — click for detail">
       <div class="hm-sym">${item.symbol}</div>
       <div class="hm-pct" style="color:${pctCol}">${sign}${pct.toFixed(2)}%</div>
       <div class="hm-price">$${item.price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
@@ -3571,8 +3784,8 @@ function renderWatchlistTable() {
     const scCol  = r.score == null ? '#475569' : r.action === 'BUY' ? '#22c55e' : r.action === 'SELL' ? '#ef4444' : '#94a3b8';
     const scStr  = r.score == null ? '—' : (r.score >= 0 ? '+' : '') + fmt(r.score, 3);
     const isSel  = r.symbol === _wlSelected;
-    return `<tr data-sym="${r.symbol}" class="${isSel ? 'wl-row-sel' : ''}" style="cursor:pointer" onclick="highlightWlTicker('${r.symbol}')">
-      <td style="font-weight:700;color:var(--text0)">${r.symbol}</td>
+    return `<tr data-sym="${r.symbol}" class="${isSel ? 'wl-row-sel' : ''}" onclick="highlightWlTicker('${r.symbol}')">
+      <td class="sym-link" style="font-weight:700" onclick="event.stopPropagation();openChart('${r.symbol}')" title="Click for detail">${r.symbol}</td>
       <td style="color:var(--text2);font-size:12px">${r.sector}</td>
       <td>${r.price != null ? '$' + fmt(r.price) : '—'}</td>
       <td style="color:${pctCol};font-weight:600">${pctStr}</td>
@@ -3853,29 +4066,295 @@ setInterval(refresh, 5000);
 // Heat map refreshes on each full state refresh (called inside refresh()) — also once on init
 loadHeatmap();
 
-// ── Chart modal ───────────────────────────────────────────────────────────────
+// ── Stock detail modal ────────────────────────────────────────────────────────
+let _detailSym = null;
+
 async function openChart(symbol) {
+  _detailSym = symbol;
   const modal = document.getElementById('chart-modal');
   modal.classList.add('active');
-  document.getElementById('chart-sym').textContent = symbol;
-  document.getElementById('chart-meta').textContent = 'Loading…';
-  document.getElementById('chart-plotly').innerHTML = '';
+  document.body.style.overflow = 'hidden';
+
+  // Reset
+  document.getElementById('chart-sym').textContent   = symbol;
+  document.getElementById('chart-name').textContent  = '';
+  document.getElementById('chart-price').textContent = 'Loading…';
+  document.getElementById('chart-chg').textContent   = '';
+  document.getElementById('chart-plotly').innerHTML  = '';
+  document.getElementById('detail-stats').innerHTML  = '';
+  document.getElementById('detail-52w-wrap').style.display   = 'none';
+  document.getElementById('detail-signal-section').style.display = 'none';
+  document.getElementById('detail-pos-section').style.display    = 'none';
+  document.getElementById('detail-news-section').style.display   = 'none';
+
+  // Set 3M as default active period button
+  document.querySelectorAll('.chart-period-btn').forEach(b => b.classList.remove('active'));
+  const defaultBtn = document.querySelector('.chart-period-bar button:nth-child(4)');
+  if (defaultBtn) defaultBtn.classList.add('active');
+
+  // Load static detail and chart data in parallel
+  Promise.all([
+    fetch('/api/detail/' + symbol).then(r => r.json()),
+    fetch('/api/bars/' + symbol + '?period=3m').then(r => r.json()),
+  ]).then(([detail, bars]) => {
+    if (symbol !== _detailSym) return;  // stale if user opened another
+    _applyDetailInfo(detail);
+    if (bars.ok) _renderDetailChart(bars);
+    else document.getElementById('chart-plotly').innerHTML =
+      '<div style="color:#f87171;padding:24px;text-align:center">Chart unavailable</div>';
+  }).catch(e => {
+    document.getElementById('chart-price').textContent = 'Error: ' + e.message;
+  });
+}
+
+function _applyDetailInfo(d) {
+  if (!d.ok) { document.getElementById('chart-price').textContent = d.error || 'Error'; return; }
+
+  document.getElementById('chart-name').textContent = d.name || '';
+  document.getElementById('chart-price').textContent = d.price != null ? '$' + fmt(d.price) : '—';
+
+  const chgEl = document.getElementById('chart-chg');
+  if (d.change_val != null) {
+    const sign = d.change_val >= 0 ? '+' : '';
+    chgEl.textContent = `${sign}$${fmt(Math.abs(d.change_val))} (${sign}${fmt(d.change_pct)}%)`;
+    chgEl.style.color = d.change_val >= 0 ? '#22c55e' : '#ef4444';
+  } else { chgEl.textContent = ''; }
+
+  // Stats grid
+  const vol = d.volume;
+  const volStr = vol == null ? '—' : vol >= 1e9 ? (vol/1e9).toFixed(2)+'B' : vol >= 1e6 ? (vol/1e6).toFixed(1)+'M' : vol >= 1e3 ? (vol/1e3).toFixed(0)+'K' : vol;
+  const stats = [
+    {l:'Open',   v: d.open  != null ? '$'+fmt(d.open)  : '—'},
+    {l:'High',   v: d.high  != null ? '$'+fmt(d.high)  : '—'},
+    {l:'Low',    v: d.low   != null ? '$'+fmt(d.low)   : '—'},
+    {l:'Close',  v: d.close != null ? '$'+fmt(d.close) : '—'},
+    {l:'Volume', v: volStr},
+  ];
+  document.getElementById('detail-stats').innerHTML = stats.map(s =>
+    `<div class="detail-stat"><div class="detail-stat-lbl">${s.l}</div><div class="detail-stat-val">${s.v}</div></div>`
+  ).join('');
+
+  // 52-Week range bar
+  if (d.week52_low != null && d.week52_high != null && d.price != null) {
+    const wrap = document.getElementById('detail-52w-wrap');
+    wrap.style.display = '';
+    document.getElementById('detail-52w-low').textContent  = '$' + fmt(d.week52_low);
+    document.getElementById('detail-52w-high').textContent = '$' + fmt(d.week52_high);
+    const range = d.week52_high - d.week52_low;
+    const pct = range > 0 ? Math.min(100, Math.max(0, ((d.price - d.week52_low) / range) * 100)) : 50;
+    document.getElementById('detail-52w-fill').style.width = pct + '%';
+    document.getElementById('detail-52w-pin').style.left   = pct + '%';
+  }
+
+  // Signal section
+  if (d.signal) {
+    const sec = document.getElementById('detail-signal-section');
+    sec.style.display = '';
+    const sig = d.signal;
+    const row = document.getElementById('detail-signal-row');
+    const scCol = sig.action === 'BUY' ? '#22c55e' : sig.action === 'SELL' ? '#ef4444' : '#94a3b8';
+    row.innerHTML =
+      `<span class="pill pill-${sig.action||'HOLD'}">${sig.action||'HOLD'}</span>` +
+      (sig.score != null ? `<span style="color:${scCol};font-weight:700;font-size:16px">${sig.score>=0?'+':''}${fmt(sig.score,3)}</span>` : '') +
+      (sig.rsi   != null ? `<span style="color:var(--text2);font-size:12px">RSI ${fmt(sig.rsi,1)}</span>` : '') +
+      (sig.adx   != null ? `<span style="color:var(--text2);font-size:12px">ADX ${fmt(sig.adx,0)}</span>` : '');
+    // Build explain content using the signal row
+    const explainContent = _buildDetailExplain(sig);
+    document.getElementById('detail-explain-simple').innerHTML    = explainContent.simple;
+    document.getElementById('detail-explain-technical').innerHTML = explainContent.technical;
+    // Reset to simple tab
+    document.querySelectorAll('#detail-explain-tabs .explain-tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector('#detail-explain-tabs .explain-tab-btn').classList.add('active');
+    document.getElementById('detail-explain-simple').classList.add('active');
+    document.getElementById('detail-explain-technical').classList.remove('active');
+  }
+
+  // Position section
+  if (d.position) {
+    const sec = document.getElementById('detail-pos-section');
+    sec.style.display = '';
+    const p = d.position;
+    const pnlCol = (p.pnl || 0) >= 0 ? '#22c55e' : '#ef4444';
+    const pnlSign = (p.pnl || 0) >= 0 ? '+' : '';
+    const grid = document.getElementById('detail-pos-grid');
+    const items = [
+      {l:'Quantity',    v: p.shares},
+      {l:'Entry Price', v: p.entry_price != null ? '$'+fmt(p.entry_price) : '—'},
+      {l:'Current',     v: p.current_price != null ? '$'+fmt(p.current_price) : '—'},
+      {l:'Unrealized P&L', v: p.pnl != null ? `${pnlSign}$${fmt(Math.abs(p.pnl))} (${pnlSign}${fmt(p.pnl_pct)}%)` : '—', col: pnlCol},
+      {l:'Trail Stop',  v: p.stop_loss != null ? '$'+fmt(p.stop_loss) : '—'},
+      {l:'Take Profit', v: p.take_profit != null ? '$'+fmt(p.take_profit) : '—'},
+    ];
+    grid.innerHTML = items.map(it =>
+      `<div class="detail-pos-item">
+        <div class="detail-pos-lbl">${it.l}</div>
+        <div class="detail-pos-val" style="${it.col ? 'color:'+it.col : ''}">${it.v}</div>
+      </div>`
+    ).join('');
+  }
+
+  // News section
+  if (d.news && d.news.length) {
+    const sec = document.getElementById('detail-news-section');
+    sec.style.display = '';
+    const body = document.getElementById('detail-news-body');
+    body.innerHTML = d.news.map(n => {
+      const ago = n.published_at ? _timeAgo(n.published_at) : '';
+      return `<div class="detail-news-item">
+        <div class="detail-news-title"><a href="${n.url||'#'}" target="_blank" rel="noopener">${n.title}</a></div>
+        <div class="detail-news-meta">${n.publisher||''}${ago ? '  ·  '+ago : ''}</div>
+      </div>`;
+    }).join('');
+  }
+}
+
+function _timeAgo(ts) {
+  const diff = Math.floor(Date.now() / 1000) - ts;
+  if (diff < 3600)  return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  return Math.floor(diff/86400) + 'd ago';
+}
+
+async function loadDetailBars(symbol, period, btn) {
+  if (!symbol) return;
+  document.querySelectorAll('.chart-period-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  document.getElementById('chart-plotly').innerHTML =
+    '<div style="padding:40px;text-align:center;color:var(--text2)">Loading…</div>';
   try {
-    const res  = await fetch('/api/chart/' + symbol);
+    const res  = await fetch('/api/bars/' + symbol + '?period=' + period);
     const data = await res.json();
-    if (!data.ok) throw new Error(data.error);
-    document.getElementById('chart-meta').textContent = '90-day daily  ·  EMA ' + data.ema_fast_period + '/' + data.ema_slow_period + '  ·  BB  ·  RSI';
-    renderChart(data);
+    if (!data.ok) throw new Error(data.error || 'No data');
+    _renderDetailChart(data);
   } catch(e) {
     document.getElementById('chart-plotly').innerHTML =
-      '<div style="color:#f87171;padding:32px;text-align:center">Chart error: ' + e + '</div>';
-    document.getElementById('chart-meta').textContent = '';
+      `<div style="color:#f87171;padding:24px;text-align:center">${e.message}</div>`;
   }
+}
+
+function _renderDetailChart(data) {
+  if (!window.Plotly) return;
+  const isLight = document.body.classList.contains('light');
+  const fg = isLight ? '#1e293b' : '#e2e8f0';
+  const grid = isLight ? 'rgba(0,0,0,0.07)' : 'rgba(255,255,255,0.05)';
+  const bg   = isLight ? '#f8fafc' : '#0d1520';
+  const close = data.close;
+  const up    = close[close.length-1] >= close[0];
+  const lineCol = up ? '#22c55e' : '#ef4444';
+  const fillCol = up ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)';
+
+  const traces = [{
+    x: data.dates, y: close, type: 'scatter', mode: 'lines',
+    line: {color: lineCol, width: 2},
+    fill: 'tozeroy', fillcolor: fillCol,
+    name: 'Price', hovertemplate: '%{x}<br>$%{y:.2f}<extra></extra>',
+  }];
+
+  if (data.volume) {
+    traces.push({
+      x: data.dates, y: data.volume, type: 'bar',
+      name: 'Volume', yaxis: 'y2', marker: {color: 'rgba(100,116,139,0.35)'},
+      hovertemplate: '%{y:,.0f}<extra></extra>',
+    });
+  }
+
+  Plotly.newPlot('chart-plotly', traces, {
+    paper_bgcolor: bg, plot_bgcolor: bg,
+    margin: {l:48, r:12, t:8, b:36},
+    font: {color: fg, size: 11},
+    xaxis: {gridcolor: grid, showgrid: true, tickfont: {size:10}},
+    yaxis: {gridcolor: grid, showgrid: true, tickfont: {size:10}, tickprefix: '$', side:'left'},
+    yaxis2: {overlaying:'y', side:'right', showgrid:false, tickfont:{size:9}, showticklabels:true, fixedrange:true, range:[0, Math.max(...data.volume)*5]},
+    showlegend: false,
+    hovermode: 'x unified',
+  }, {responsive: true, displayModeBar: false});
+}
+
+function switchDetailTab(tab, btn) {
+  document.querySelectorAll('#detail-explain-tabs .explain-tab-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  document.getElementById('detail-explain-simple').classList.toggle('active', tab === 'simple');
+  document.getElementById('detail-explain-technical').classList.toggle('active', tab === 'technical');
 }
 
 function closeChart() {
   document.getElementById('chart-modal').classList.remove('active');
+  document.body.style.overflow = '';
+  _detailSym = null;
   if (window.Plotly) Plotly.purge('chart-plotly');
+}
+
+function _buildDetailExplain(r) {
+  if (!r) return {simple: '<p style="color:var(--text2)">No signal data</p>', technical: ''};
+  const fmtN = (v, d=1) => v == null ? null : Number(v).toFixed(d);
+  const items = [];
+
+  if (r.rsi != null) {
+    const v = r.rsi;
+    let tone, label, detail;
+    if (v < 30)      { tone='bull'; label='Oversold (RSI)'; detail=`RSI ${fmtN(v)} — below 30, potential bounce`; }
+    else if (v < 45) { tone='bull'; label='Mildly Oversold'; detail=`RSI ${fmtN(v)} — below 45, selling easing`; }
+    else if (v < 55) { tone='neu';  label='RSI Neutral';     detail=`RSI ${fmtN(v)} — no directional bias`; }
+    else if (v < 70) { tone='bear'; label='Mildly Overbought'; detail=`RSI ${fmtN(v)} — buying strong, watch pullback`; }
+    else             { tone='bear'; label='Overbought (RSI)'; detail=`RSI ${fmtN(v)} — above 70, correction risk`; }
+    items.push({tone, label, detail});
+  }
+  if (r.macd_hist != null) {
+    const h = r.macd_hist, hp = r.macd_hist_prev;
+    const crossed = hp != null && ((h>0&&hp<=0)||(h<0&&hp>=0));
+    let tone, label, detail;
+    if      (h>0&&crossed)            { tone='bull'; label='MACD Bullish Cross'; detail='Histogram crossed above zero — fresh bullish momentum'; }
+    else if (h>0&&hp!=null&&h>hp)     { tone='bull'; label='MACD Bullish & Rising'; detail='Positive and rising — momentum building'; }
+    else if (h>0)                     { tone='bull'; label='MACD Bullish (Fading)'; detail='Positive but declining — momentum slowing'; }
+    else if (h<0&&crossed)            { tone='bear'; label='MACD Bearish Cross'; detail='Histogram crossed below zero — fresh bearish signal'; }
+    else if (h<0&&hp!=null&&h<hp)     { tone='bear'; label='MACD Bearish & Falling'; detail='Negative and falling — momentum weakening'; }
+    else                              { tone='bear'; label='MACD Bearish (Recovering)'; detail='Negative but improving'; }
+    items.push({tone, label, detail});
+  }
+  if (r.ema_gap != null) {
+    const g = r.ema_gap;
+    const tone = g>0.02?'bull':g<-0.02?'bear':'neu';
+    const label = g>0.02?'Above EMA — Uptrend':g<-0.02?'Below EMA — Downtrend':'Near EMA';
+    items.push({tone, label, detail:`Price is ${(g*100).toFixed(1)}% ${g>=0?'above':'below'} the slow EMA`});
+  }
+  if (r.bb_pct != null) {
+    const b = r.bb_pct;
+    const tone = b<0.2?'bull':b>0.8?'bear':'neu';
+    const label = b<0.2?'Near Lower Band':'Near Upper Band';
+    if (b<0.2||b>0.8) items.push({tone, label, detail:`Bollinger %B = ${(b*100).toFixed(0)}% — ${b<0.2?'potential support':'potential resistance'}`});
+  }
+  if (r.vwap_dev != null) {
+    const v = r.vwap_dev;
+    const tone = v<0?'bull':'bear';
+    items.push({tone, label:`${v<0?'Below':'Above'} VWAP`, detail:`Price ${Math.abs(v).toFixed(1)}% ${v<0?'below':'above'} VWAP — ${v<0?'potential buy zone':'selling pressure'}`});
+  }
+  if (r.adx != null) {
+    const a = r.adx;
+    const tone = a>=25?'bull':'neu';
+    items.push({tone, label:`ADX ${fmtN(a,0)} — ${a>=25?'Trending':'Choppy'}`, detail:`ADX ${a>=30?'strong':'moderate'} trend; ${a<20?'avoid trading in choppy market':'clear trend present'}`});
+  }
+  if (r.sector_mom != null) {
+    const s = r.sector_mom;
+    const tone = s>0?'bull':s<0?'bear':'neu';
+    items.push({tone, label:`Sector Momentum ${s>=0?'+':''}${s.toFixed(1)}%`, detail:`Stock ${s>=0?'outperforming':'underperforming'} sector by ${Math.abs(s).toFixed(1)}% over 5 days`});
+  }
+
+  const toneIcon = t => t==='bull'?'▲':t==='bear'?'▼':'●';
+  const toneCol  = t => t==='bull'?'#22c55e':t==='bear'?'#ef4444':'#94a3b8';
+
+  const simpleHtml = `<div style="padding:4px 0">${items.length ? items.map(it =>
+    `<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="color:${toneCol(it.tone)};font-size:11px;margin-top:2px">${toneIcon(it.tone)}</span>
+      <span style="color:var(--text0);font-size:12px">${it.detail}</span>
+    </div>`).join('') : '<p style="color:var(--text2);font-size:12px">No indicators available</p>'}</div>`;
+
+  const techHtml = `<div style="padding:4px 0">${items.length ? items.map(it =>
+    `<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="color:${toneCol(it.tone)};font-size:11px;font-weight:700;min-width:60px">${it.label.split('—')[0].trim()}</span>
+      <span style="color:var(--text1);font-size:12px">${it.detail}</span>
+    </div>`).join('') : '<p style="color:var(--text2);font-size:12px">No indicators available</p>'}</div>`;
+
+  return {simple: simpleHtml, technical: techHtml};
 }
 
 // ── Explain Trade modal ───────────────────────────────────────────────────────
