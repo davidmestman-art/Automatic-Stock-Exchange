@@ -12,7 +12,7 @@ from ..signals.indicators import TechnicalIndicators
 from ..utils.emailer import TradeEmailer
 from ..utils.journal import TradeJournal
 from ..utils.notifications import Notifier
-from ..utils.sectors import sector_position_count
+from ..utils.sectors import SECTOR_ETFS, get_sector, sector_position_count
 from .executor import PaperExecutor
 from .portfolio import Portfolio
 from .risk import RiskManager
@@ -55,6 +55,7 @@ class TradingEngine:
             take_profit_pct=config.take_profit_pct,
             daily_loss_limit_pct=config.daily_loss_limit_pct,
             max_positions_per_sector=config.max_positions_per_sector,
+            max_sector_exposure_pct=getattr(config, "max_sector_exposure_pct", 0.30),
             use_trailing_stop=config.use_trailing_stop,
             trailing_stop_pct=config.trailing_stop_pct,
         )
@@ -143,6 +144,9 @@ class TradingEngine:
         self._voo_alert_sent_date: Optional[str] = None  # send at most one VOO alert per day
         self.watchlist: List[str] = list(config.symbols)
         self.dynamic_universe = DynamicUniverse()
+        # Sector ETF 5-day returns — refreshed once per calendar day
+        self._sector_returns: Dict[str, float] = {}
+        self._sector_returns_date: Optional[str] = None
         # BUY signals waiting for next-candle confirmation (symbol → {signal_price, queued_at})
         self._pending_signals: Dict[str, dict] = {}
         # Symbols blocked by correlation filter in the most recent signal pass
@@ -163,6 +167,7 @@ class TradingEngine:
             return {}
 
         self._maybe_refresh_watchlist()
+        self._refresh_sector_returns()
 
         # Refresh market regime (cached; fetches at most once every 4 h)
         if self._regime_detector is not None:
@@ -229,6 +234,12 @@ class TradingEngine:
             current_price = prices[symbol]
 
             ind = self.indicators.compute(df)
+            # Inject sector momentum (stock 5d return vs sector ETF 5d return)
+            if len(df) >= 6:
+                stock_5d = float(df["Close"].iloc[-1]) / float(df["Close"].iloc[-6]) - 1
+                sec_name = get_sector(symbol)
+                if sec_name and sec_name in self._sector_returns:
+                    ind.sector_mom = stock_5d - self._sector_returns[sec_name]
             ind.close = current_price
 
             signal = self._compute_signal(symbol, ind)
@@ -252,12 +263,12 @@ class TradingEngine:
                     logger.debug(f"  Earnings protection: skipping BUY {symbol}")
                     continue
 
-                # Correlation filter
-                if symbol in self._last_corr_blocked:
+                # Correlation filter — high correlation halves position size (doesn't block)
+                corr_reduced = symbol in self._last_corr_blocked
+                if corr_reduced:
                     logger.info(
-                        f"  Correlation blocked {symbol}: {self._last_corr_blocked[symbol]}"
+                        f"  Correlation reduced {symbol} (0.5×): {self._last_corr_blocked[symbol]}"
                     )
-                    continue
 
                 # In BEAR regime, only trade if signal is strong enough
                 if self._regime_result is not None and self._regime_result.regime == "BEAR":
@@ -280,9 +291,13 @@ class TradingEngine:
                     daily_pnl_pct=daily_pnl,
                     signal_confidence=signal.confidence,
                     sector_positions=sector_position_count(symbol, self.portfolio.positions),
+                    sector_value_pct=self._sector_value_pct(symbol, prices),
                     atr_pct=ind.atr_pct,
                 )
                 if rc.approved:
+                    # Correlation-reduced: halve position size for correlated entries
+                    if corr_reduced:
+                        rc.max_shares = rc.max_shares * 0.5
                     # Apply regime-based position-size multiplier
                     if self._regime_result is not None:
                         cfg = self.config
@@ -489,15 +504,18 @@ class TradingEngine:
     @staticmethod
     def _indicator_snapshot(ind, signal: SignalResult) -> dict:
         return {
-            "rsi": round(ind.rsi, 2) if ind.rsi is not None else None,
-            "macd_hist": round(ind.macd_hist, 4) if ind.macd_hist is not None else None,
-            "ema_fast": round(ind.ema_fast, 2) if ind.ema_fast is not None else None,
-            "ema_slow": round(ind.ema_slow, 2) if ind.ema_slow is not None else None,
-            "z_score": round(ind.z_score, 4) if getattr(ind, "z_score", None) is not None else None,
-            "atr_pct": round(ind.atr_pct, 4) if getattr(ind, "atr_pct", None) is not None else None,
-            "roc_10": round(ind.roc_10, 4) if getattr(ind, "roc_10", None) is not None else None,
-            "stoch_rsi": round(ind.stoch_rsi, 2) if getattr(ind, "stoch_rsi", None) is not None else None,
-            "score": round(signal.score, 4),
+            "rsi":        round(ind.rsi,        2) if ind.rsi        is not None else None,
+            "macd_hist":  round(ind.macd_hist,  4) if ind.macd_hist  is not None else None,
+            "ema_fast":   round(ind.ema_fast,   2) if ind.ema_fast   is not None else None,
+            "ema_slow":   round(ind.ema_slow,   2) if ind.ema_slow   is not None else None,
+            "z_score":    round(ind.z_score,    4) if getattr(ind, "z_score",    None) is not None else None,
+            "atr_pct":    round(ind.atr_pct,    4) if getattr(ind, "atr_pct",    None) is not None else None,
+            "roc_10":     round(ind.roc_10,     4) if getattr(ind, "roc_10",     None) is not None else None,
+            "stoch_rsi":  round(ind.stoch_rsi,  2) if getattr(ind, "stoch_rsi",  None) is not None else None,
+            "vwap":       round(ind.vwap,        2) if getattr(ind, "vwap",       None) is not None else None,
+            "adx":        round(ind.adx,         1) if getattr(ind, "adx",        None) is not None else None,
+            "sector_mom": round(ind.sector_mom,  4) if getattr(ind, "sector_mom", None) is not None else None,
+            "score":      round(signal.score,    4),
             "confidence": round(signal.confidence, 4),
         }
 
@@ -539,6 +557,26 @@ class TradingEngine:
             except Exception as e:
                 logger.warning(f"  ML training failed: {e}")
 
+    def _refresh_sector_returns(self) -> None:
+        """Fetch and cache 5-day returns for all sector ETFs. Runs once per calendar day."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._sector_returns_date == today and self._sector_returns:
+            return
+        etfs = list(set(SECTOR_ETFS.values()))
+        try:
+            data = self.fetcher.fetch_many(etfs, force_refresh=False)
+            returns: Dict[str, float] = {}
+            for sector, etf in SECTOR_ETFS.items():
+                df_etf = data.get(etf)
+                if df_etf is not None and len(df_etf) >= 6:
+                    ret = float(df_etf["Close"].iloc[-1]) / float(df_etf["Close"].iloc[-6]) - 1
+                    returns[sector] = ret
+            self._sector_returns = returns
+            self._sector_returns_date = today
+            logger.info(f"  Sector returns updated: {len(returns)} sectors")
+        except Exception as exc:
+            logger.warning(f"  Sector returns fetch failed: {exc}")
+
     def _market_is_open(self) -> bool:
         clock = self.executor.get_clock_info()
         if clock["is_open"]:
@@ -563,6 +601,72 @@ class TradingEngine:
     def last_corr_blocked(self) -> Dict[str, str]:
         """Symbols blocked by correlation filter in the last signal pass {sym: reason}."""
         return dict(self._last_corr_blocked)
+
+    def _sector_value_pct(self, symbol: str, prices: Dict[str, float]) -> float:
+        """Fraction of portfolio value already in the same sector as symbol."""
+        sec = get_sector(symbol)
+        if not sec or not self.portfolio.positions:
+            return 0.0
+        pv = self.portfolio.total_value_at(prices)
+        if not pv:
+            return 0.0
+        sector_val = sum(
+            prices.get(s, pos.entry_price) * pos.shares
+            for s, pos in self.portfolio.positions.items()
+            if get_sector(s) == sec
+        )
+        return sector_val / pv
+
+    def risk_rules_status(self, prices: Dict[str, float]) -> dict:
+        """Return current status of every active risk rule for the dashboard."""
+        portfolio_value = self.portfolio.total_value_at(prices) or 1.0
+        daily_pnl = self.portfolio.daily_pnl_pct(prices)
+        daily_limit = self.risk.daily_loss_limit_pct
+
+        sector_values: Dict[str, float] = {}
+        for sym, pos in self.portfolio.positions.items():
+            sec = get_sector(sym) or "Other"
+            val = prices.get(sym, pos.entry_price) * pos.shares
+            sector_values[sec] = sector_values.get(sec, 0.0) + val
+
+        sector_pcts = {
+            sec: round(val / portfolio_value * 100, 1)
+            for sec, val in sector_values.items()
+        }
+        max_sector_pct = max(sector_pcts.values()) if sector_pcts else 0.0
+        sector_limit_pct = self.risk.max_sector_exposure_pct * 100
+
+        return {
+            "signal_sizing": {
+                "active": self.risk.use_adaptive_sizing,
+            },
+            "correlation": {
+                "active": self.config.use_correlation_filter,
+                "threshold": self.config.correlation_threshold,
+                "reduced_count": len(self._last_corr_blocked),
+                "status": "REDUCED" if self._last_corr_blocked else "OK",
+            },
+            "sector_exposure": {
+                "limit_pct": round(sector_limit_pct, 0),
+                "sector_pcts": sector_pcts,
+                "max_sector_pct": round(max_sector_pct, 1),
+                "status": (
+                    "LIMIT" if max_sector_pct >= sector_limit_pct
+                    else "WARNING" if max_sector_pct >= sector_limit_pct * 0.8
+                    else "OK"
+                ),
+            },
+            "daily_loss": {
+                "limit_pct": round(daily_limit * 100, 1),
+                "current_pct": round(daily_pnl * 100, 2),
+                "triggered": daily_pnl <= -daily_limit,
+                "status": (
+                    "TRIGGERED" if daily_pnl <= -daily_limit
+                    else "WARNING" if daily_pnl <= -daily_limit * 0.7
+                    else "OK"
+                ),
+            },
+        }
 
     def _compute_corr_blocks(self, market_data: dict) -> Dict[str, str]:
         """Return {symbol: reason} for watchlist symbols too correlated with open positions."""

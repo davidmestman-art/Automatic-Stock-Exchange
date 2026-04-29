@@ -772,6 +772,7 @@ RISK_PROFILES = {
             "take_profit_pct": 0.10,
             "trailing_stop_pct": 0.03,
             "daily_loss_limit_pct": 0.02,
+            "max_sector_exposure_pct": 0.25,
             "buy_threshold": 0.35,
             "sell_threshold": -0.35,
         },
@@ -788,7 +789,8 @@ RISK_PROFILES = {
             "stop_loss_pct": 0.05,
             "take_profit_pct": 0.15,
             "trailing_stop_pct": 0.05,
-            "daily_loss_limit_pct": 0.03,
+            "daily_loss_limit_pct": 0.02,
+            "max_sector_exposure_pct": 0.30,
             "buy_threshold": 0.20,
             "sell_threshold": -0.20,
         },
@@ -806,6 +808,7 @@ RISK_PROFILES = {
             "take_profit_pct": 0.25,
             "trailing_stop_pct": 0.08,
             "daily_loss_limit_pct": 0.05,
+            "max_sector_exposure_pct": 0.35,
             "buy_threshold": 0.10,
             "sell_threshold": -0.10,
         },
@@ -838,6 +841,9 @@ def _apply_risk_profile(name: str) -> bool:
     for key, val in profile["overrides"].items():
         if hasattr(_engine.config, key):
             setattr(_engine.config, key, val)
+        # Mirror risk-manager fields that can be updated live
+        if hasattr(_engine.risk, key):
+            setattr(_engine.risk, key, val)
     _current_profile = name
     log.info(f"[SETTINGS] Risk profile applied: {name}")
     return True
@@ -953,6 +959,7 @@ def _safe_empty_state(error: str = "") -> dict:
         "alpaca_connected": None,
         "next_close": None,
         "today": {"pnl": None, "pnl_pct": None, "trades": 0, "sparkline": []},
+        "risk_rules": {},
     }
 
 
@@ -1111,6 +1118,13 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "bb_lower":       round(ind.bb_lower, 2)       if ind and ind.bb_lower       else None,
                 "roc_10":         round(ind.roc_10, 4)         if ind and getattr(ind, "roc_10",    None) is not None else None,
                 "stoch_rsi":      round(ind.stoch_rsi, 1)      if ind and getattr(ind, "stoch_rsi", None) is not None else None,
+                "vwap":           round(ind.vwap, 2)            if ind and getattr(ind, "vwap",       None) is not None else None,
+                "vwap_dev":       round((ind.close - ind.vwap) / ind.vwap * 100, 2)
+                                  if ind and getattr(ind, "vwap", None) and ind.close else None,
+                "adx":            round(ind.adx, 1)             if ind and getattr(ind, "adx",        None) is not None else None,
+                "adx_plus_di":    round(ind.adx_plus_di, 1)     if ind and getattr(ind, "adx_plus_di",  None) is not None else None,
+                "adx_minus_di":   round(ind.adx_minus_di, 1)    if ind and getattr(ind, "adx_minus_di", None) is not None else None,
+                "sector_mom":     round(ind.sector_mom * 100, 2) if ind and getattr(ind, "sector_mom", None) is not None else None,
                 "tf_1d":  round(iscores["1d"],  3) if "1d"  in iscores else None,
                 "tf_1h":  round(iscores["1h"],  3) if "1h"  in iscores else None,
                 "tf_15m": round(iscores["15m"], 3) if "15m" in iscores else None,
@@ -1216,6 +1230,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "personal_watchlist": _personal_watchlist,
         "alpaca_connected": eng.config.use_alpaca,
         "next_close": next_close,
+        "risk_rules": eng.risk_rules_status(price_lookup) if price_lookup else {},
         "today": {
             "pnl": today_perf.get("today_pnl"),
             "pnl_pct": today_perf.get("today_pnl_pct"),
@@ -2304,6 +2319,19 @@ tr:hover td{background:var(--bg2)}
 .sector-chip.near-limit{background:rgba(69,26,3,.5);color:#fdba74;border-color:rgba(146,64,14,.5)}
 .sector-chip.at-limit{background:rgba(127,29,29,.5);color:#fca5a5;border-color:rgba(185,28,28,.5)}
 
+/* ── Risk rules panel ────────────────────────────────────────────────────── */
+.risk-rules-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;padding:12px 14px}
+.risk-rule{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px}
+.risk-rule-icon{font-size:18px;line-height:1;flex-shrink:0;margin-top:1px}
+.risk-rule-body{flex:1;min-width:0}
+.risk-rule-title{font-size:11px;font-weight:600;color:var(--text1);margin-bottom:2px}
+.risk-rule-detail{font-size:11px;color:var(--text2);line-height:1.4}
+.risk-rule-badge{display:inline-block;font-size:9px;font-weight:700;letter-spacing:.4px;padding:1px 6px;border-radius:99px;margin-left:5px;vertical-align:middle}
+.rrb-ok{background:#14532d;color:#4ade80}
+.rrb-warn{background:#451a03;color:#fdba74}
+.rrb-triggered{background:#7f1d1d;color:#fca5a5}
+.rrb-reduced{background:#1e3a5f;color:#93c5fd}
+
 /* ── Regime card colours ─────────────────────────────────────────────────── */
 .regime-bull{color:var(--green)}
 .regime-bear{color:var(--red)}
@@ -2571,6 +2599,26 @@ body.light .explain-val{color:#0f172a}
 body.light .explain-reasons{border-top-color:#e2e8f0}
 body.light .explain-reason{color:#64748b;border-bottom-color:#f1f5f9}
 body.light .explain-close{border-color:#e2e8f0;color:#64748b}
+
+/* ── Explain modal — Simple / Technical tabs ─────────────────────────────── */
+.explain-tabs{display:flex;gap:3px;margin-bottom:16px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:3px}
+.explain-tab-btn{flex:1;padding:6px 12px;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;background:none;color:var(--text2);transition:all .15s;min-height:unset;letter-spacing:.2px}
+.explain-tab-btn.active{background:var(--bg1);color:var(--text0);box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.explain-section{display:none}
+.explain-section.active{display:block}
+.simple-explain{line-height:1.7;font-size:14px}
+.simple-explain p{margin:0 0 11px;color:#c8d4e8}
+.simple-explain p:last-child{margin-bottom:0}
+.simple-explain strong{color:#f1f5f9}
+.simple-closing{font-style:italic;color:#94a3b8 !important;font-size:13px}
+.simple-verdict{background:var(--bg2);border-left:3px solid var(--blue);padding:10px 14px;border-radius:0 6px 6px 0;margin-bottom:14px;font-size:14px;color:#c8d4e8;line-height:1.55}
+.simple-verdict strong{color:#f1f5f9}
+body.light .explain-tab-btn.active{background:#fff;color:#0f172a;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+body.light .simple-explain p{color:#374151}
+body.light .simple-explain strong{color:#0f172a}
+body.light .simple-closing{color:#64748b !important}
+body.light .simple-verdict{background:#f8fafc;border-left-color:#3b82f6;color:#374151}
+body.light .simple-verdict strong{color:#0f172a}
 </style>
 </head>
 <body>
@@ -2722,6 +2770,39 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
         <div class="card-sub" id="c-regime-sub">—</div>
       </div>
     </div>
+    <div class="panel" style="margin-bottom:12px">
+      <div class="panel-title">Risk Rules</div>
+      <div class="risk-rules-grid" id="risk-rules-grid">
+        <div class="risk-rule">
+          <div class="risk-rule-icon">📐</div>
+          <div class="risk-rule-body">
+            <div class="risk-rule-title">Signal-Strength Sizing <span class="risk-rule-badge rrb-ok" id="rr-sizing-badge">ON</span></div>
+            <div class="risk-rule-detail" id="rr-sizing-detail">Position size scales with signal confidence (0.5× – 1.5×)</div>
+          </div>
+        </div>
+        <div class="risk-rule">
+          <div class="risk-rule-icon">🔗</div>
+          <div class="risk-rule-body">
+            <div class="risk-rule-title">Correlation Filter <span class="risk-rule-badge rrb-ok" id="rr-corr-badge">OK</span></div>
+            <div class="risk-rule-detail" id="rr-corr-detail">ρ ≥ 0.70 with open position → half-size entry</div>
+          </div>
+        </div>
+        <div class="risk-rule">
+          <div class="risk-rule-icon">🏭</div>
+          <div class="risk-rule-body">
+            <div class="risk-rule-title">Sector Exposure <span class="risk-rule-badge rrb-ok" id="rr-sector-badge">OK</span></div>
+            <div class="risk-rule-detail" id="rr-sector-detail">Max 30% of portfolio in one sector</div>
+          </div>
+        </div>
+        <div class="risk-rule">
+          <div class="risk-rule-icon">🛑</div>
+          <div class="risk-rule-body">
+            <div class="risk-rule-title">Daily Loss Limit <span class="risk-rule-badge rrb-ok" id="rr-loss-badge">OK</span></div>
+            <div class="risk-rule-detail" id="rr-loss-detail">No new positions if day P&amp;L ≤ −2%</div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- ══ Positions tab ══ -->
@@ -2821,7 +2902,7 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
       </div>
       <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="z-col">Z-Score</th><th class="vol-col">Volume</th><th></th>
+          <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="z-col">ADX</th><th class="vol-col">Volume</th><th></th>
         </tr></thead>
         <tbody id="sig-body"><tr><td colspan="9" class="empty">No data yet — run a cycle</td></tr></tbody>
       </table></div>
@@ -2967,6 +3048,53 @@ function applyState(s) {
     regimeCard.style.display = 'none';
   }
 
+  // risk rules panel
+  const rr = s.risk_rules || {};
+  if (rr.signal_sizing) {
+    const active = rr.signal_sizing.active;
+    const badge = document.getElementById('rr-sizing-badge');
+    badge.textContent = active ? 'ON' : 'OFF';
+    badge.className = 'risk-rule-badge ' + (active ? 'rrb-ok' : 'rrb-warn');
+    document.getElementById('rr-sizing-detail').textContent =
+      active ? 'Position size scales with signal confidence (0.5× – 1.5×)' : 'Fixed position sizing active';
+  }
+  if (rr.correlation) {
+    const cr = rr.correlation;
+    const badge = document.getElementById('rr-corr-badge');
+    const detail = document.getElementById('rr-corr-detail');
+    if (!cr.active) {
+      badge.textContent = 'OFF'; badge.className = 'risk-rule-badge rrb-warn';
+      detail.textContent = 'Correlation filter disabled';
+    } else if (cr.reduced_count > 0) {
+      badge.textContent = `${cr.reduced_count} REDUCED`; badge.className = 'risk-rule-badge rrb-reduced';
+      detail.textContent = `ρ ≥ ${cr.threshold} → half-size  ·  ${cr.reduced_count} symbol${cr.reduced_count > 1 ? 's' : ''} reduced this cycle`;
+    } else {
+      badge.textContent = 'OK'; badge.className = 'risk-rule-badge rrb-ok';
+      detail.textContent = `ρ ≥ ${cr.threshold} with open position → half-size entry`;
+    }
+  }
+  if (rr.sector_exposure) {
+    const se = rr.sector_exposure;
+    const badge = document.getElementById('rr-sector-badge');
+    const detail = document.getElementById('rr-sector-detail');
+    const statusMap = { OK: ['OK', 'rrb-ok'], WARNING: ['WARNING', 'rrb-warn'], LIMIT: ['AT LIMIT', 'rrb-triggered'] };
+    const [txt, cls2] = statusMap[se.status] || ['OK', 'rrb-ok'];
+    badge.textContent = txt; badge.className = 'risk-rule-badge ' + cls2;
+    const sectorStr = Object.entries(se.sector_pcts || {}).sort((a,b) => b[1]-a[1])
+      .slice(0, 3).map(([sec, pct]) => `${sec.split(' ')[0]} ${pct}%`).join(' · ');
+    detail.textContent = `Max ${se.limit_pct}% per sector  ·  Highest: ${se.max_sector_pct}%${sectorStr ? '  (' + sectorStr + ')' : ''}`;
+  }
+  if (rr.daily_loss) {
+    const dl = rr.daily_loss;
+    const badge = document.getElementById('rr-loss-badge');
+    const detail = document.getElementById('rr-loss-detail');
+    const statusMap = { OK: ['OK', 'rrb-ok'], WARNING: ['WARNING', 'rrb-warn'], TRIGGERED: ['TRIGGERED', 'rrb-triggered'] };
+    const [txt, cls2] = statusMap[dl.status] || ['OK', 'rrb-ok'];
+    badge.textContent = txt; badge.className = 'risk-rule-badge ' + cls2;
+    const sign = dl.current_pct >= 0 ? '+' : '';
+    detail.textContent = `Limit −${dl.limit_pct}%  ·  Today: ${sign}${dl.current_pct}%${dl.triggered ? '  — NEW BUYS HALTED' : ''}`;
+  }
+
   // watchlist chips
   const wl = s.watchlist || [];
   document.getElementById('wl-count').textContent = wl.length;
@@ -3077,12 +3205,21 @@ function applyState(s) {
         ? `<span title="Blocked: correlated with ${corrBlock}" style="margin-left:5px;font-size:10px;color:#f87171;font-weight:700">ρ</span>`
         : '';
 
-      // Z-score column
-      const z = r.z_score;
-      const zCol = z == null ? '#475569' : z <= -1.5 ? '#22c55e' : z <= -1.0 ? '#4ade80'
-                 : z >= 1.5 ? '#ef4444' : z >= 1.0 ? '#f87171' : '#475569';
-      const zBold = z != null && Math.abs(z) >= 1.5 ? 'font-weight:600;' : '';
-      const zStr  = z == null ? '—' : (z >= 0 ? '+' : '') + z.toFixed(2);
+      // ADX column (replaces Z-score)
+      const adx = r.adx;
+      const adxCol  = adx == null ? '#475569' : adx >= 30 ? '#f59e0b' : adx >= 20 ? '#fbbf24' : '#64748b';
+      const adxBold = adx != null && adx >= 25 ? 'font-weight:600;' : '';
+      const adxStr  = adx == null ? '—' : adx.toFixed(0);
+      const zCol = adxCol; const zBold = adxBold; const zStr = adxStr;
+      // VWAP + sector momentum sub-lines in Score cell
+      const vwapDev = r.vwap_dev;
+      const sm      = r.sector_mom;
+      const extraRow = (vwapDev != null || sm != null)
+        ? `<div class="sig-sub">`
+          + (vwapDev != null ? `<span style="color:${vwapDev<=0?'#4ade80':'#f87171'}">VWAP ${vwapDev>=0?'+':''}${vwapDev.toFixed(1)}%</span>` : '')
+          + (sm != null ? `<span style="color:${sm>=0?'#4ade80':'#f87171'}">Sect ${sm>=0?'+':''}${sm.toFixed(1)}%</span>` : '')
+          + `</div>`
+        : '';
 
       // Adaptive size sub-line (shown for BUY signals when adaptive sizing is on)
       const sizeRow = s.adaptive_sizing_enabled && r.est_size_pct != null && r.action === 'BUY'
@@ -3108,7 +3245,7 @@ function applyState(s) {
             <span style="color:${barCol};font-weight:600">${r.score >= 0 ? '+' : ''}${fmt(r.score, 3)}</span>
             <div class="score-bar-bg"><div class="score-bar" style="width:${barPct}%;background:${barCol}"></div></div>
           </div>
-          ${mtfRow}${mlRow}
+          ${mtfRow}${mlRow}${extraRow}
         </td>
         <td>${r.rsi != null ? fmt(r.rsi, 1) : '—'}</td>
         <td class="z-col" style="color:${zCol};${zBold}">${zStr}</td>
@@ -3750,12 +3887,151 @@ function explainSignal(sym) {
     items.push({icon: '📦', tone, label, detail});
   }
 
-  // ── Build HTML ─────────────────────────────────────────────────────────────
-  const scoreOut10 = (Math.abs(r.score) * 10).toFixed(1);
+  // ── VWAP ───────────────────────────────────────────────────────────────────
+  if (r.vwap != null && r.price != null) {
+    const dev = (r.price - r.vwap) / r.vwap;
+    const devPct = (dev * 100).toFixed(1);
+    let tone, label, detail;
+    if (dev <= -0.03) {
+      tone = 'bull'; label = 'Well Below VWAP (Bullish)';
+      detail = `Price <span class="explain-val">$${fmtN(r.price,2)}</span> is <span class="explain-val">${Math.abs(devPct)}%</span> below VWAP (<span class="explain-val">$${fmtN(r.vwap,2)}</span>) — trading at a significant discount to fair value. Institutions often accumulate here.`;
+    } else if (dev < 0) {
+      tone = 'bull'; label = 'Below VWAP';
+      detail = `Price is <span class="explain-val">${Math.abs(devPct)}%</span> below VWAP (<span class="explain-val">$${fmtN(r.vwap,2)}</span>) — slight discount to the volume-weighted average. Mild bullish lean.`;
+    } else if (dev >= 0.03) {
+      tone = 'bear'; label = 'Well Above VWAP (Bearish)';
+      detail = `Price <span class="explain-val">$${fmtN(r.price,2)}</span> is <span class="explain-val">${devPct}%</span> above VWAP (<span class="explain-val">$${fmtN(r.vwap,2)}</span>) — trading at a premium to fair value. Extended moves above VWAP often revert.`;
+    } else {
+      tone = 'neu'; label = 'Near VWAP';
+      detail = `Price is <span class="explain-val">${devPct >= 0 ? '+' : ''}${devPct}%</span> relative to VWAP (<span class="explain-val">$${fmtN(r.vwap,2)}</span>) — essentially at fair value. No VWAP edge.`;
+    }
+    items.push({icon: '⚖️', tone, label, detail});
+  }
+
+  // ── ADX ────────────────────────────────────────────────────────────────────
+  if (r.adx != null) {
+    const adx = r.adx, pdi = r.adx_plus_di, mdi = r.adx_minus_di;
+    let tone, label, detail;
+    if (adx < 20) {
+      tone = 'neu'; label = 'No Clear Trend (ADX)';
+      detail = `ADX is <span class="explain-val">${fmtN(adx)}</span> — below 20, indicating a ranging, trendless market. Signals in this environment have lower reliability.`;
+    } else if (adx < 25) {
+      const dir = pdi != null && mdi != null ? (pdi > mdi ? 'emerging uptrend' : 'emerging downtrend') : 'weak trend';
+      tone = pdi != null && pdi > (mdi||0) ? 'bull' : 'bear';
+      label = 'Weak Trend (ADX)';
+      detail = `ADX is <span class="explain-val">${fmtN(adx)}</span> — a ${dir} is forming but not yet strong.${pdi != null && mdi != null ? ` +DI <span class="explain-val">${fmtN(pdi)}</span> vs -DI <span class="explain-val">${fmtN(mdi)}</span>.` : ''}`;
+    } else if (adx < 40) {
+      tone = pdi != null && pdi > (mdi||0) ? 'bull' : 'bear';
+      const dir = pdi != null && pdi > (mdi||0) ? 'uptrend' : 'downtrend';
+      label = `Strong ${dir.charAt(0).toUpperCase() + dir.slice(1)} (ADX)`;
+      detail = `ADX is <span class="explain-val">${fmtN(adx)}</span> — a strong ${dir} is in force.${pdi != null && mdi != null ? ` +DI <span class="explain-val">${fmtN(pdi)}</span> vs -DI <span class="explain-val">${fmtN(mdi)}</span>.` : ''} Trending signals are more reliable here.`;
+    } else {
+      tone = pdi != null && pdi > (mdi||0) ? 'bull' : 'bear';
+      const dir = pdi != null && pdi > (mdi||0) ? 'uptrend' : 'downtrend';
+      label = `Very Strong Trend (ADX)`;
+      detail = `ADX is <span class="explain-val">${fmtN(adx)}</span> — an extremely strong ${dir}. Momentum is dominant; mean-reversion strategies may be risky.`;
+    }
+    items.push({icon: '📡', tone, label, detail});
+  }
+
+  // ── Sector Momentum ─────────────────────────────────────────────────────────
+  // Note: r.sector_mom is already in percentage units (e.g. 3.5 = 3.5%)
+  if (r.sector_mom != null) {
+    const sm = r.sector_mom;
+    const smPct = Math.abs(sm).toFixed(1);
+    let tone, label, detail;
+    if (sm >= 3) {
+      tone = 'bull'; label = 'Strong Sector Outperformance';
+      detail = `This stock is outperforming its sector by <span class="explain-val">+${smPct}%</span> over the last 5 days — strong relative strength signals leadership. Institutions favor sector leaders.`;
+    } else if (sm >= 1) {
+      tone = 'bull'; label = 'Mild Sector Outperformance';
+      detail = `This stock is outperforming its sector by <span class="explain-val">+${smPct}%</span> over 5 days — slight relative strength advantage.`;
+    } else if (sm > -1) {
+      tone = 'neu'; label = 'In Line With Sector';
+      detail = `This stock is moving in line with its sector (relative performance: <span class="explain-val">${sm.toFixed(1)}%</span> over 5 days). No standout relative strength.`;
+    } else if (sm > -3) {
+      tone = 'bear'; label = 'Mild Sector Underperformance';
+      detail = `This stock is underperforming its sector by <span class="explain-val">${smPct}%</span> over 5 days — slight relative weakness.`;
+    } else {
+      tone = 'bear'; label = 'Strong Sector Underperformance';
+      detail = `This stock is underperforming its sector by <span class="explain-val">${smPct}%</span> over the last 5 days — a laggard within its sector. Consider why it's being left behind.`;
+    }
+    items.push({icon: '🏭', tone, label, detail});
+  }
+
+  // ── Build Simple Section ───────────────────────────────────────────────────
+  const bullItems = items.filter(i => i.tone === 'bull');
+  const bearItems = items.filter(i => i.tone === 'bear');
+  const confPct = Math.round(r.confidence * 100);
+
+  let verdictText;
+  if (r.action === 'BUY') {
+    verdictText = `The algorithm thinks <strong>${sym}</strong> looks like a <strong>buying opportunity</strong> right now (${confPct}% confidence).`;
+  } else if (r.action === 'SELL') {
+    verdictText = `The algorithm is flagging <strong>${sym}</strong> as a potential <strong>sell</strong> — conditions are turning unfavorable (${confPct}% confidence).`;
+  } else {
+    verdictText = `The algorithm says <strong>wait</strong> on <strong>${sym}</strong> — the signals aren't clear enough to act on yet.`;
+  }
+
+  const simpleReasons = [];
+  if (r.rsi != null) {
+    if (r.rsi < 30) simpleReasons.push("The stock has dropped heavily and looks oversold — like a sale where the price fell more than usual. Oversold stocks often bounce back.");
+    else if (r.rsi < 45) simpleReasons.push("Selling pressure has been easing off lately, suggesting the recent dip may be running out of steam.");
+    else if (r.rsi > 70) simpleReasons.push("The stock has been on a strong run and is looking stretched — lots of buyers have already piled in, making further gains harder to sustain.");
+    else if (r.rsi > 55) simpleReasons.push("Recent buying momentum has been healthy, but the stock isn't overextended yet.");
+  }
+  if (r.macd_hist != null) {
+    const h = r.macd_hist, hp = r.macd_hist_prev;
+    const crossed = hp != null && ((h > 0 && hp <= 0) || (h < 0 && hp >= 0));
+    if (h > 0 && crossed) simpleReasons.push("Momentum just shifted from negative to positive — like a car switching from reverse into drive. This is often an early buy signal.");
+    else if (h > 0 && hp != null && h > hp) simpleReasons.push("Buying momentum is building and growing stronger each day — the move looks like it has room to continue.");
+    else if (h < 0 && crossed) simpleReasons.push("Momentum just shifted from positive to negative — the upward drive is gone and sellers are taking over.");
+    else if (h < 0 && hp != null && h < hp) simpleReasons.push("Selling pressure is intensifying — the stock has been going down and the pace is accelerating.");
+  }
+  if (r.bb_upper != null && r.bb_lower != null && r.price) {
+    if (r.price < r.bb_lower) simpleReasons.push("The price has dropped outside its normal range — like a rubber band stretched to its limit. It doesn't always snap back instantly, but this level has historically attracted buyers.");
+    else if (r.price > r.bb_upper) simpleReasons.push("The price has risen outside its normal range — like a rubber band stretched upward. Extended runs like this tend to slow down or pull back.");
+  }
+  if (r.ema_fast != null && r.ema_slow != null) {
+    if (r.ema_fast > r.ema_slow) simpleReasons.push("The short-term price trend is above the longer-term average — the stock is in an uptrend and buyers have been in control recently.");
+    else simpleReasons.push("The short-term price trend has fallen below the longer-term average — the stock is in a downtrend and sellers have been in control.");
+  }
+  if (r.vwap != null && r.price != null) {
+    const dev = (r.price - r.vwap) / r.vwap;
+    if (dev <= -0.03) simpleReasons.push(`The stock is trading ${(Math.abs(dev)*100).toFixed(1)}% below what most people paid for it today — you'd be buying at a discount to the day's fair value.`);
+    else if (dev >= 0.03) simpleReasons.push(`The stock is trading ${(dev*100).toFixed(1)}% above what most people paid for it today — it's already at a premium, making a profitable entry harder.`);
+  }
+  if (r.volume_ratio != null && r.volume_ratio >= 2) {
+    simpleReasons.push(`There's ${r.volume_ratio.toFixed(1)}× the usual trading activity today — heavy volume often means big investors are making moves, which can amplify a signal's reliability.`);
+  }
+  if (r.sector_mom != null) {
+    if (r.sector_mom >= 3) simpleReasons.push(`It's outperforming other stocks in its industry by ${r.sector_mom.toFixed(1)}% this week — sector leaders often continue to lead.`);
+    else if (r.sector_mom <= -3) simpleReasons.push(`It's lagging other stocks in its industry by ${Math.abs(r.sector_mom).toFixed(1)}% this week — a stock falling behind its peers is a warning sign.`);
+  }
+  if (r.adx != null && r.adx < 20) simpleReasons.push("The stock is in a choppy, sideways phase right now — there's no strong trend in either direction, which makes signals less reliable.");
+
+  const topReasons = simpleReasons.slice(0, 3);
+  let closingLine;
+  if (r.action === 'BUY') {
+    closingLine = `In short: ${bullItems.length} of ${items.length} indicators are pointing bullish. The algorithm sees more reasons to buy than not — but no trade is guaranteed.`;
+  } else if (r.action === 'SELL') {
+    closingLine = `In short: ${bearItems.length} of ${items.length} indicators are pointing bearish. The algorithm sees more reasons to reduce than hold.`;
+  } else {
+    closingLine = `In short: the signals are mixed. Waiting for a clearer setup is often the right call.`;
+  }
+
+  const simpleHtml = `<div class="simple-explain">
+    <div class="simple-verdict">${verdictText}</div>
+    ${topReasons.map(txt => `<p>• ${txt}</p>`).join('')}
+    ${topReasons.length === 0 ? '<p>Not enough indicator data to generate a full explanation.</p>' : ''}
+    <p class="simple-closing">${closingLine}</p>
+  </div>`;
+
+  // ── Build Technical Section ────────────────────────────────────────────────
   const scoreHtml = `<div class="explain-score">
-    Overall composite score: <strong>${r.score >= 0 ? '+' : ''}${r.score} / ±1.0</strong>
-    &nbsp;·&nbsp; Confidence: <strong>${Math.round(r.confidence * 100)}%</strong>
-    ${r.ml_mult != null ? `&nbsp;·&nbsp; ML rank multiplier: <strong>${r.ml_mult.toFixed(2)}×</strong>` : ''}
+    Composite score: <strong>${r.score >= 0 ? '+' : ''}${r.score} / ±1.0</strong>
+    &nbsp;·&nbsp; Confidence: <strong>${confPct}%</strong>
+    ${r.ml_mult != null ? `&nbsp;·&nbsp; ML multiplier: <strong>${r.ml_mult.toFixed(2)}×</strong>` : ''}
   </div>`;
 
   const itemsHtml = items.map(it => `
@@ -3774,13 +4050,33 @@ function explainSignal(sym) {
        </div>`
     : '';
 
+  const techHtml = scoreHtml + itemsHtml + reasonsHtml;
+
+  // ── Assemble tabbed modal ──────────────────────────────────────────────────
+  const modalHtml = `
+    <div class="explain-tabs">
+      <button class="explain-tab-btn active" onclick="switchExplainTab('simple',this)">Simple</button>
+      <button class="explain-tab-btn" onclick="switchExplainTab('technical',this)">Technical</button>
+    </div>
+    <div class="explain-section active" id="explain-sec-simple">${simpleHtml}</div>
+    <div class="explain-section" id="explain-sec-technical">${techHtml}</div>`;
+
   // Update modal
   document.getElementById('explain-sym').textContent = sym;
   const pill = document.getElementById('explain-pill');
   pill.className = `pill pill-${r.action}`;
   pill.textContent = r.action + ' SIGNAL';
-  document.getElementById('explain-body').innerHTML = scoreHtml + itemsHtml + reasonsHtml;
+  document.getElementById('explain-body').innerHTML = modalHtml;
   document.getElementById('explain-modal').classList.add('active');
+}
+
+function switchExplainTab(tab, btn) {
+  ['simple', 'technical'].forEach(id => {
+    const sec = document.getElementById('explain-sec-' + id);
+    if (sec) sec.classList.toggle('active', id === tab);
+  });
+  document.querySelectorAll('.explain-tab-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
 }
 
 function closeExplain() {
@@ -4398,19 +4694,16 @@ SETTINGS_HTML = """<!doctype html>
 body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;
      -webkit-font-smoothing:antialiased;min-height:100vh}
 a{color:inherit;text-decoration:none}
-/* Nav */
-nav{display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:56px;
-    background:rgba(13,18,32,.98);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
-.nav-left{display:flex;align-items:center;gap:18px}
-.nav-logo{font-size:14px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
-.nav-dot{width:7px;height:7px;background:var(--accent2);border-radius:50%;box-shadow:0 0 8px var(--accent2)}
-.nav-link{font-size:13px;color:var(--text2);padding:5px 10px;border-radius:6px;transition:all .15s}
-.nav-link:hover{background:var(--surface2);color:var(--text)}
-.nav-link.active{background:var(--surface2);color:var(--text)}
-.btn-logout{padding:6px 14px;border-radius:6px;background:#7f1d1d;color:#fca5a5;font-size:12px;
-            font-weight:600;border:1px solid #991b1b}
+/* Unified nav */
+.unav-header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 20px;height:52px;display:flex;align-items:center;position:sticky;top:0;z-index:10}
+.unav-logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
+.unav-bar{background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9}
+.unav-tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--text2);font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center;transition:color .15s;font-family:inherit}
+.unav-tab:hover{color:var(--text)}
+.unav-tab.active{color:var(--text);border-bottom-color:var(--accent2)}
+.unav-logout{margin-left:auto;color:#fca5a5!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:#7f1d1d!important;border:1px solid #991b1b!important;text-decoration:none;display:inline-flex;align-items:center;height:28px;white-space:nowrap}
 /* Page */
-.page{max-width:860px;margin:0 auto;padding:48px 24px}
+.page{max-width:860px;margin:0 auto;padding:40px 24px}
 .page-title{font-size:26px;font-weight:700;letter-spacing:-.5px;margin-bottom:6px}
 .page-sub{font-size:14px;color:var(--text2);margin-bottom:40px}
 /* Profile cards */
@@ -4502,17 +4795,15 @@ td.diff-dn{color:#f87171}
 </style>
 </head>
 <body>
-<nav>
-  <div class="nav-left">
-    <div class="nav-dot"></div>
-    <span class="nav-logo">NYSE Engine</span>
-    <a href="/dashboard" class="nav-link">Dashboard</a>
-    <a href="/journal" class="nav-link">Journal</a>
-    <a href="/settings" class="nav-link active">Settings</a>
-  </div>
-  <div>
-    <a href="/logout" class="btn-logout">Logout</a>
-  </div>
+<div class="unav-header"><div class="unav-logo">Automatic Trading Engine</div></div>
+<nav class="unav-bar">
+  <a href="/dashboard" class="unav-tab">Dashboard</a>
+  <a href="/dashboard" class="unav-tab">Positions</a>
+  <a href="/dashboard" class="unav-tab">Watchlist</a>
+  <a href="/dashboard" class="unav-tab">Signals</a>
+  <a href="/dashboard" class="unav-tab">Trades</a>
+  <a href="/settings" class="unav-tab active">Settings</a>
+  {% if auth %}<a href="/logout" class="unav-logout">Logout</a>{% endif %}
 </nav>
 
 <div class="page">
@@ -4852,17 +5143,14 @@ JOURNAL_HTML = """<!doctype html>
 body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;
      font-size:14px;min-height:100vh;-webkit-font-smoothing:antialiased}
 a{color:inherit;text-decoration:none}
-/* ── Header ── */
-header{background:rgba(7,9,15,.95);border-bottom:1px solid var(--border);
-       padding:0 24px;height:56px;display:flex;align-items:center;gap:14px;
-       position:sticky;top:0;z-index:10;backdrop-filter:blur(12px)}
-.logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px;display:flex;align-items:center;gap:7px}
-.logo::before{content:'';display:inline-block;width:7px;height:7px;background:var(--accent2);
-              border-radius:50%;box-shadow:0 0 8px var(--accent2)}
-.hdr-right{margin-left:auto;display:flex;align-items:center;gap:8px}
-.btn-back{background:var(--surface2);color:var(--text2);border:1px solid var(--border);
-          border-radius:6px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer}
-.btn-back:hover{border-color:var(--accent2);color:var(--text)}
+/* ── Unified nav ── */
+.unav-header{background:rgba(7,9,15,.95);border-bottom:1px solid var(--border);padding:0 20px;height:52px;display:flex;align-items:center;position:sticky;top:0;z-index:10;backdrop-filter:blur(12px)}
+.unav-logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
+.unav-bar{background:rgba(7,9,15,.95);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9;backdrop-filter:blur(12px)}
+.unav-tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--text2);font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center;transition:color .15s;font-family:inherit}
+.unav-tab:hover{color:var(--text)}
+.unav-tab.active{color:var(--text);border-bottom-color:var(--accent2)}
+.unav-logout{margin-left:auto;color:#fca5a5!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:#7f1d1d!important;border:1px solid #991b1b!important;text-decoration:none;display:inline-flex;align-items:center;height:28px;white-space:nowrap}
 /* ── Layout ── */
 main{padding:24px;max-width:1400px;margin:0 auto}
 /* ── Stat cards ── */
@@ -4932,13 +5220,16 @@ tr:hover td{background:rgba(18,26,46,.8)}
 </style>
 </head>
 <body>
-<header>
-  <div class="logo">Trade Journal</div>
-  <div class="hdr-right">
-    <button class="btn-back" onclick="window.location='/stats'">Stats</button>
-    <button class="btn-back" onclick="window.location='/dashboard'">← Dashboard</button>
-  </div>
-</header>
+<div class="unav-header"><div class="unav-logo">Automatic Trading Engine</div></div>
+<nav class="unav-bar">
+  <a href="/dashboard" class="unav-tab">Dashboard</a>
+  <a href="/dashboard" class="unav-tab">Positions</a>
+  <a href="/dashboard" class="unav-tab">Watchlist</a>
+  <a href="/dashboard" class="unav-tab">Signals</a>
+  <a href="/dashboard" class="unav-tab active">Trades</a>
+  <a href="/settings" class="unav-tab">Settings</a>
+  {% if auth %}<a href="/logout" class="unav-logout">Logout</a>{% endif %}
+</nav>
 
 <main>
   <!-- ── Summary stats ── -->
@@ -5124,10 +5415,13 @@ STATS_HTML = """<!doctype html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
-header{background:#1e293b;border-bottom:1px solid #334155;padding:12px 20px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:10}
-.logo{font-size:17px;font-weight:700;color:#f1f5f9}
-.back{font-size:12px;color:#64748b;cursor:pointer;padding:5px 10px;border-radius:6px;background:#334155;border:none;font-weight:600}
-.back:hover{opacity:.8}
+.unav-header{background:#0f172a;border-bottom:1px solid #334155;padding:0 20px;height:52px;display:flex;align-items:center;position:sticky;top:0;z-index:10}
+.unav-logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
+.unav-bar{background:#0f172a;border-bottom:1px solid #334155;display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9}
+.unav-tab{background:none;border:none;border-bottom:2px solid transparent;color:#64748b;font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center;transition:color .15s;font-family:inherit}
+.unav-tab:hover{color:#e2e8f0}
+.unav-tab.active{color:#f1f5f9;border-bottom-color:#3b82f6}
+.unav-logout{margin-left:auto;color:#fca5a5!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:#7f1d1d!important;border:1px solid #991b1b!important;text-decoration:none;display:inline-flex;align-items:center;height:28px;white-space:nowrap}
 main{padding:16px 20px;max-width:1200px;margin:0 auto}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px}
 .card{background:#1e293b;border-radius:10px;padding:14px 16px;border:1px solid #334155}
@@ -5189,10 +5483,16 @@ tr:hover td{background:#263044}
 </style>
 </head>
 <body>
-<header>
-  <button class="back" onclick="window.location='/'">← Dashboard</button>
-  <div class="logo">Performance &amp; Notifications</div>
-</header>
+<div class="unav-header"><div class="unav-logo">Automatic Trading Engine</div></div>
+<nav class="unav-bar">
+  <a href="/dashboard" class="unav-tab">Dashboard</a>
+  <a href="/dashboard" class="unav-tab">Positions</a>
+  <a href="/dashboard" class="unav-tab">Watchlist</a>
+  <a href="/dashboard" class="unav-tab">Signals</a>
+  <a href="/dashboard" class="unav-tab">Trades</a>
+  <a href="/settings" class="unav-tab">Settings</a>
+  {% if auth %}<a href="/logout" class="unav-logout">Logout</a>{% endif %}
+</nav>
 <main>
   <!-- Summary cards -->
   <div class="cards">
@@ -5804,14 +6104,14 @@ def leaderboard_page():
 
 @app.route("/stats")
 def stats_page():
-    return render_template_string(STATS_HTML)
+    return render_template_string(STATS_HTML, auth=_AUTH_ENABLED)
 
 
 @app.route("/journal")
 def journal_page():
     if _AUTH_ENABLED and not session.get("logged_in"):
         return redirect("/login?next=/journal")
-    resp = make_response(render_template_string(JOURNAL_HTML))
+    resp = make_response(render_template_string(JOURNAL_HTML, auth=_AUTH_ENABLED))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp
 
@@ -5849,6 +6149,7 @@ def settings_page():
         notify_email=user_notify_email if _AUTH_ENABLED else eng.emailer.notify_email,
         alpaca_connected=alpaca_connected,
         alpaca_paper=alpaca_paper,
+        auth=_AUTH_ENABLED,
     ))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp

@@ -35,7 +35,7 @@ class TradingConfig:
     # ── Risk management ───────────────────────────────────────────────────────
     stop_loss_pct: float = 0.05
     take_profit_pct: float = 0.15
-    daily_loss_limit_pct: float = 0.03
+    daily_loss_limit_pct: float = 0.02
 
     # ── Trailing stop-loss ────────────────────────────────────────────────────
     use_trailing_stop: bool = True
@@ -91,6 +91,7 @@ class TradingConfig:
 
     # ── Sector diversification ────────────────────────────────────────────────
     max_positions_per_sector: int = 3
+    max_sector_exposure_pct: float = 0.30   # max 30% of portfolio value in one sector
 
     # ── Multiple timeframes ───────────────────────────────────────────────────
     use_multi_timeframe: bool = True       # blends 1d/1h/15m signals when True

@@ -39,6 +39,18 @@ class IndicatorValues:
     roc_20: Optional[float] = None         # 20-day rate of change
     stoch_rsi: Optional[float] = None      # Stochastic RSI [0, 100]
 
+    # VWAP — 20-day rolling volume-weighted average price
+    vwap: Optional[float] = None
+
+    # ADX — Average Directional Index (14-period)
+    adx: Optional[float] = None
+    adx_plus_di: Optional[float] = None    # +DI line (directional component)
+    adx_minus_di: Optional[float] = None   # -DI line (directional component)
+
+    # Sector momentum — set externally by the engine
+    # stock 5d return minus sector ETF 5d return (decimal, e.g. 0.03 = +3%)
+    sector_mom: Optional[float] = None
+
 
 class TechnicalIndicators:
     def __init__(
@@ -68,6 +80,8 @@ class TechnicalIndicators:
 
         close = df["Close"]
         volume = df["Volume"]
+        high = df["High"]
+        low = df["Low"]
 
         vals = IndicatorValues()
         vals.close = float(close.iloc[-1])
@@ -101,9 +115,7 @@ class TechnicalIndicators:
         z = (close - sma) / std.replace(0, np.nan)
         vals.z_score = float(z.iloc[-1]) if not np.isnan(z.iloc[-1]) else None
 
-        # ATR (14-day EMA of True Range) for volatility-based position sizing
-        high = df["High"]
-        low = df["Low"]
+        # True Range and ATR (14-day EMA) — shared base for ATR + ADX
         prev_close = close.shift(1)
         tr = pd.concat([
             high - low,
@@ -113,6 +125,30 @@ class TechnicalIndicators:
         atr_ser = tr.ewm(span=14, adjust=False).mean()
         vals.atr = float(atr_ser.iloc[-1])
         vals.atr_pct = float(vals.atr / vals.close) if vals.close else None
+
+        # VWAP — 20-day rolling volume-weighted average price
+        typical = (high + low + close) / 3
+        vwap_ser = (typical * volume).rolling(20).sum() / volume.rolling(20).sum()
+        v = vwap_ser.iloc[-1]
+        vals.vwap = float(v) if not pd.isna(v) else None
+
+        # ADX — 14-period Average Directional Index
+        up_move   = high.diff()
+        down_move = (-low.diff())
+        plus_dm_arr  = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm_arr = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm  = pd.Series(plus_dm_arr,  index=close.index, dtype=float)
+        minus_dm = pd.Series(minus_dm_arr, index=close.index, dtype=float)
+        atr14_safe = atr_ser.replace(0, np.nan)
+        plus_di_ser  = 100 * plus_dm.ewm(span=14, adjust=False).mean()  / atr14_safe
+        minus_di_ser = 100 * minus_dm.ewm(span=14, adjust=False).mean() / atr14_safe
+        di_sum = (plus_di_ser + minus_di_ser).replace(0, np.nan)
+        dx_ser = (plus_di_ser - minus_di_ser).abs() / di_sum * 100
+        adx_raw = dx_ser.ewm(span=14, adjust=False).mean()
+        adx_val = adx_raw.iloc[-1]
+        vals.adx          = float(adx_val)       if not np.isnan(adx_val)          else None
+        vals.adx_plus_di  = float(plus_di_ser.iloc[-1])  if not np.isnan(plus_di_ser.iloc[-1])  else None
+        vals.adx_minus_di = float(minus_di_ser.iloc[-1]) if not np.isnan(minus_di_ser.iloc[-1]) else None
 
         if len(close) > 11:
             vals.roc_10 = float(close.iloc[-1] / close.iloc[-11] - 1)
