@@ -3113,16 +3113,6 @@ body.light .simple-verdict strong{color:#0f172a}
       </div>
       <div class="pin-grid" id="pin-grid"></div>
     </div>
-    <!-- news -->
-    <div class="panel grid1" id="news-panel" style="display:none">
-      <div class="panel-title">
-        Market News
-        <span id="news-count" class="count">0</span>
-        <span style="font-size:11px;color:#475569;margin-left:8px" id="news-note">15-min cache · watchlist only</span>
-        <button id="btn-news-refresh" onclick="loadNews(true)" class="tab-btn" style="margin-left:auto">↻ Refresh</button>
-      </div>
-      <div id="news-body"><div class="news-loading">Loading headlines…</div></div>
-    </div>
   </div>
 
   <!-- ══ Signals tab ══ -->
@@ -4873,8 +4863,6 @@ function copyPublicUrl() {
 loadPinnedWatchlist();
 setInterval(loadPinnedWatchlist, 30000);
 
-// ── News feed ─────────────────────────────────────────────────────────────────
-let _newsLoaded = false;
 function _relTime(ts) {
   if (!ts) return '';
   const diff = Math.floor(Date.now() / 1000) - ts;
@@ -4882,46 +4870,6 @@ function _relTime(ts) {
   if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
   return Math.floor(diff / 86400) + 'd ago';
 }
-
-async function loadNews(force) {
-  const panel = document.getElementById('news-panel');
-  const body  = document.getElementById('news-body');
-  const count = document.getElementById('news-count');
-  const btn   = document.getElementById('btn-news-refresh');
-  if (!force && _newsLoaded) return;
-  if (btn) btn.disabled = true;
-  try {
-    const res  = await fetch('/api/news');
-    const data = await res.json();
-    if (!data.ok || !data.items || !data.items.length) {
-      body.innerHTML = '<div class="news-loading">No headlines available — watchlist may be empty or market closed.</div>';
-      panel.style.display = '';
-      return;
-    }
-    _newsLoaded = true;
-    panel.style.display = '';
-    count.textContent = data.items.length;
-    body.innerHTML = data.items.map(n => {
-      const urlAttr = n.url ? `href="${n.url}" target="_blank" rel="noopener"` : '';
-      const time = _relTime(n.published_at);
-      return `<div class="news-item">
-        <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:4px">
-          <span class="news-sym">${n.symbol}</span>
-          <a class="news-title" ${urlAttr}>${n.title || '(no title)'}</a>
-        </div>
-        <div class="news-meta">${n.publisher || ''}${n.publisher && time ? ' · ' : ''}${time}</div>
-      </div>`;
-    }).join('');
-  } catch(e) {
-    body.innerHTML = '<div class="news-loading" style="color:#f87171">News fetch failed: ' + e + '</div>';
-    panel.style.display = '';
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-// Load news once on init; auto-refresh every 15 min
-loadNews(false);
-setInterval(() => loadNews(true), 900000);
 
 function renderChart(d) {
   // Volume bar colours: spike = orange, normal = slate
