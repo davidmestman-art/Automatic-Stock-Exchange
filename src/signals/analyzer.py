@@ -5,6 +5,9 @@ from .indicators import IndicatorValues
 
 SignalAction = Literal["BUY", "SELL", "HOLD"]
 
+# Keys that participate in the composite score (in weight order)
+_WEIGHTED_KEYS = ["rsi", "macd", "ema_cross", "bollinger", "vwap", "adx", "sector_mom"]
+
 
 @dataclass
 class SignalResult:
@@ -16,6 +19,19 @@ class SignalResult:
 
 
 class SignalAnalyzer:
+    # New weight distribution per user specification:
+    #   RSI 25%, MACD 25%, EMA trend 20%, Bollinger 15%, new indicators 15%
+    #   New indicators split evenly: VWAP 5%, ADX 5%, sector_mom 5%
+    _WEIGHTS: Dict[str, float] = {
+        "rsi":        0.25,
+        "macd":       0.25,
+        "ema_cross":  0.20,
+        "bollinger":  0.15,
+        "vwap":       0.05,
+        "adx":        0.05,
+        "sector_mom": 0.05,
+    }
+
     def __init__(
         self,
         buy_threshold: float = 0.35,
@@ -28,47 +44,27 @@ class SignalAnalyzer:
         self.use_mean_reversion = use_mean_reversion
         self.use_momentum = use_momentum
 
-        raw = {
-            "rsi": 0.18,
-            "macd": 0.22,
-            "ema_cross": 0.18,
-            "bollinger": 0.12,
-            "mean_reversion": 0.18 if use_mean_reversion else 0.0,
-            "momentum": 0.12 if use_momentum else 0.0,
-        }
-        total = sum(raw.values())
-        self._weights = {k: v / total for k, v in raw.items()}
-
     def analyze(self, ind: IndicatorValues) -> SignalResult:
         scores: Dict[str, float] = {}
         reasons: List[str] = []
 
-        rsi_score, rsi_reasons = self._rsi_signal(ind)
-        scores["rsi"] = rsi_score
-        reasons.extend(rsi_reasons)
+        # Core signals (weighted)
+        scores["rsi"],        r = self._rsi_signal(ind);         reasons.extend(r)
+        scores["macd"],       r = self._macd_signal(ind);        reasons.extend(r)
+        scores["ema_cross"],  r = self._ema_cross_signal(ind);   reasons.extend(r)
+        scores["bollinger"],  r = self._bollinger_signal(ind);   reasons.extend(r)
+        scores["vwap"],       r = self._vwap_signal(ind);        reasons.extend(r)
+        scores["adx"],        r = self._adx_signal(ind);         reasons.extend(r)
+        scores["sector_mom"], r = self._sector_mom_signal(ind);  reasons.extend(r)
 
-        macd_score, macd_reasons = self._macd_signal(ind)
-        scores["macd"] = macd_score
-        reasons.extend(macd_reasons)
-
-        ema_score, ema_reasons = self._ema_cross_signal(ind)
-        scores["ema_cross"] = ema_score
-        reasons.extend(ema_reasons)
-
-        bb_score, bb_reasons = self._bollinger_signal(ind)
-        scores["bollinger"] = bb_score
-        reasons.extend(bb_reasons)
-
-        mr_score, mr_reasons = self._mean_reversion_signal(ind)
-        scores["mean_reversion"] = mr_score
+        # Supplemental signals — still computed for signal reasons but not weighted
+        _, mr_reasons  = self._mean_reversion_signal(ind)
+        _, mom_reasons = self._momentum_signal(ind)
         reasons.extend(mr_reasons)
-
-        mom_score, mom_reasons = self._momentum_signal(ind)
-        scores["momentum"] = mom_score
         reasons.extend(mom_reasons)
 
-        vol_mult = self._volume_multiplier(ind)
-        composite = sum(scores[k] * self._weights[k] for k in scores) * vol_mult
+        vol_mult  = self._volume_multiplier(ind)
+        composite = sum(scores.get(k, 0.0) * self._WEIGHTS[k] for k in _WEIGHTED_KEYS) * vol_mult
         composite = max(-1.0, min(1.0, composite))
 
         if composite >= self.buy_threshold:
@@ -85,6 +81,8 @@ class SignalAnalyzer:
             reasons=reasons,
             indicator_scores=scores,
         )
+
+    # ── Core weighted signals ──────────────────────────────────────────────────
 
     def _rsi_signal(self, ind: IndicatorValues):
         if ind.rsi is None:
@@ -141,7 +139,7 @@ class SignalAnalyzer:
             return 0.0, []
         reasons: List[str] = []
 
-        above_now = ind.ema_fast > ind.ema_slow
+        above_now  = ind.ema_fast > ind.ema_slow
         above_prev = ind.ema_fast_prev > ind.ema_slow_prev
 
         if above_now and not above_prev:
@@ -192,8 +190,80 @@ class SignalAnalyzer:
 
         return score, reasons
 
+    def _vwap_signal(self, ind: IndicatorValues):
+        """Price below VWAP is bullish (trading at a discount to fair value)."""
+        if ind.vwap is None or ind.close is None or ind.vwap == 0:
+            return 0.0, []
+        dev = (ind.close - ind.vwap) / ind.vwap
+        reasons: List[str] = []
+
+        if dev <= -0.03:
+            score = min(1.0, abs(dev) * 20)
+            reasons.append(f"Price {abs(dev)*100:.1f}% below VWAP (${ind.vwap:.2f})")
+        elif dev <= -0.01:
+            score = 0.4
+        elif dev < 0:
+            score = 0.2
+        elif dev >= 0.03:
+            score = -min(1.0, dev * 20)
+            reasons.append(f"Price {dev*100:.1f}% above VWAP (${ind.vwap:.2f})")
+        elif dev >= 0.01:
+            score = -0.4
+        else:
+            score = -0.2
+
+        return score, reasons
+
+    def _adx_signal(self, ind: IndicatorValues):
+        """ADX < 20 → ranging/no trend; use +DI vs -DI for direction when trending."""
+        if ind.adx is None or ind.adx_plus_di is None or ind.adx_minus_di is None:
+            return 0.0, []
+        adx = ind.adx
+        reasons: List[str] = []
+
+        if adx < 20:
+            # No established trend — signal suppressed
+            return 0.0, []
+
+        # Scale strength from 0 (ADX=20) to 1.0 (ADX=50+)
+        strength = min(1.0, (adx - 20) / 30)
+
+        if ind.adx_plus_di > ind.adx_minus_di:
+            score = strength
+            if adx >= 25:
+                reasons.append(f"ADX strong uptrend ({adx:.0f}, +DI>{ind.adx_minus_di:.0f})")
+        else:
+            score = -strength
+            if adx >= 25:
+                reasons.append(f"ADX strong downtrend ({adx:.0f}, -DI>{ind.adx_plus_di:.0f})")
+
+        return score, reasons
+
+    def _sector_mom_signal(self, ind: IndicatorValues):
+        """Stock outperforming its sector over 5 days is a bullish momentum signal."""
+        sm = getattr(ind, "sector_mom", None)
+        if sm is None:
+            return 0.0, []
+        reasons: List[str] = []
+
+        if sm >= 0.03:
+            score = min(1.0, sm * 20)
+            reasons.append(f"Outperforming sector by {sm*100:.1f}% (5d)")
+        elif sm >= 0.01:
+            score = 0.4
+        elif sm >= -0.01:
+            score = 0.0
+        elif sm >= -0.03:
+            score = -0.4
+        else:
+            score = max(-1.0, sm * 20)
+            reasons.append(f"Underperforming sector by {abs(sm)*100:.1f}% (5d)")
+
+        return score, reasons
+
+    # ── Supplemental signals (generate reasons but not weighted) ───────────────
+
     def _mean_reversion_signal(self, ind: IndicatorValues):
-        """Z-score of close vs 20-day SMA. Extreme deviations forecast reversion."""
         if ind.z_score is None or not self.use_mean_reversion:
             return 0.0, []
         z = ind.z_score
@@ -221,7 +291,6 @@ class SignalAnalyzer:
         return score, reasons
 
     def _momentum_signal(self, ind: IndicatorValues):
-        """10-day rate of change filtered by Stochastic RSI extreme zones."""
         if not self.use_momentum or ind.roc_10 is None:
             return 0.0, []
         roc = ind.roc_10
@@ -244,9 +313,8 @@ class SignalAnalyzer:
         elif roc <= -0.01:
             score = -0.2
         else:
-            score = roc * 20  # linear near zero
+            score = roc * 20
 
-        # StochRSI extreme zones nudge momentum score toward reversal
         if ind.stoch_rsi is not None:
             if ind.stoch_rsi < 20:
                 score = min(score + 0.25, 1.0)

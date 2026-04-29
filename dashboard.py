@@ -1111,6 +1111,13 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "bb_lower":       round(ind.bb_lower, 2)       if ind and ind.bb_lower       else None,
                 "roc_10":         round(ind.roc_10, 4)         if ind and getattr(ind, "roc_10",    None) is not None else None,
                 "stoch_rsi":      round(ind.stoch_rsi, 1)      if ind and getattr(ind, "stoch_rsi", None) is not None else None,
+                "vwap":           round(ind.vwap, 2)            if ind and getattr(ind, "vwap",       None) is not None else None,
+                "vwap_dev":       round((ind.close - ind.vwap) / ind.vwap * 100, 2)
+                                  if ind and getattr(ind, "vwap", None) and ind.close else None,
+                "adx":            round(ind.adx, 1)             if ind and getattr(ind, "adx",        None) is not None else None,
+                "adx_plus_di":    round(ind.adx_plus_di, 1)     if ind and getattr(ind, "adx_plus_di",  None) is not None else None,
+                "adx_minus_di":   round(ind.adx_minus_di, 1)    if ind and getattr(ind, "adx_minus_di", None) is not None else None,
+                "sector_mom":     round(ind.sector_mom * 100, 2) if ind and getattr(ind, "sector_mom", None) is not None else None,
                 "tf_1d":  round(iscores["1d"],  3) if "1d"  in iscores else None,
                 "tf_1h":  round(iscores["1h"],  3) if "1h"  in iscores else None,
                 "tf_15m": round(iscores["15m"], 3) if "15m" in iscores else None,
@@ -2821,7 +2828,7 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
       </div>
       <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="z-col">Z-Score</th><th class="vol-col">Volume</th><th></th>
+          <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="z-col">ADX</th><th class="vol-col">Volume</th><th></th>
         </tr></thead>
         <tbody id="sig-body"><tr><td colspan="9" class="empty">No data yet — run a cycle</td></tr></tbody>
       </table></div>
@@ -3077,12 +3084,21 @@ function applyState(s) {
         ? `<span title="Blocked: correlated with ${corrBlock}" style="margin-left:5px;font-size:10px;color:#f87171;font-weight:700">ρ</span>`
         : '';
 
-      // Z-score column
-      const z = r.z_score;
-      const zCol = z == null ? '#475569' : z <= -1.5 ? '#22c55e' : z <= -1.0 ? '#4ade80'
-                 : z >= 1.5 ? '#ef4444' : z >= 1.0 ? '#f87171' : '#475569';
-      const zBold = z != null && Math.abs(z) >= 1.5 ? 'font-weight:600;' : '';
-      const zStr  = z == null ? '—' : (z >= 0 ? '+' : '') + z.toFixed(2);
+      // ADX column (replaces Z-score)
+      const adx = r.adx;
+      const adxCol  = adx == null ? '#475569' : adx >= 30 ? '#f59e0b' : adx >= 20 ? '#fbbf24' : '#64748b';
+      const adxBold = adx != null && adx >= 25 ? 'font-weight:600;' : '';
+      const adxStr  = adx == null ? '—' : adx.toFixed(0);
+      const zCol = adxCol; const zBold = adxBold; const zStr = adxStr;
+      // VWAP + sector momentum sub-lines in Score cell
+      const vwapDev = r.vwap_dev;
+      const sm      = r.sector_mom;
+      const extraRow = (vwapDev != null || sm != null)
+        ? `<div class="sig-sub">`
+          + (vwapDev != null ? `<span style="color:${vwapDev<=0?'#4ade80':'#f87171'}">VWAP ${vwapDev>=0?'+':''}${vwapDev.toFixed(1)}%</span>` : '')
+          + (sm != null ? `<span style="color:${sm>=0?'#4ade80':'#f87171'}">Sect ${sm>=0?'+':''}${sm.toFixed(1)}%</span>` : '')
+          + `</div>`
+        : '';
 
       // Adaptive size sub-line (shown for BUY signals when adaptive sizing is on)
       const sizeRow = s.adaptive_sizing_enabled && r.est_size_pct != null && r.action === 'BUY'
@@ -3108,7 +3124,7 @@ function applyState(s) {
             <span style="color:${barCol};font-weight:600">${r.score >= 0 ? '+' : ''}${fmt(r.score, 3)}</span>
             <div class="score-bar-bg"><div class="score-bar" style="width:${barPct}%;background:${barCol}"></div></div>
           </div>
-          ${mtfRow}${mlRow}
+          ${mtfRow}${mlRow}${extraRow}
         </td>
         <td>${r.rsi != null ? fmt(r.rsi, 1) : '—'}</td>
         <td class="z-col" style="color:${zCol};${zBold}">${zStr}</td>
@@ -3748,6 +3764,77 @@ function explainSignal(sym) {
       detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> average — normal volume. The signal lacks volume confirmation.`;
     }
     items.push({icon: '📦', tone, label, detail});
+  }
+
+  // ── VWAP ───────────────────────────────────────────────────────────────────
+  if (r.vwap != null && r.price != null) {
+    const dev = (r.price - r.vwap) / r.vwap;
+    const devPct = (dev * 100).toFixed(1);
+    let tone, label, detail;
+    if (dev <= -0.03) {
+      tone = 'bull'; label = 'Well Below VWAP (Bullish)';
+      detail = `Price <span class="explain-val">$${fmtN(r.price,2)}</span> is <span class="explain-val">${Math.abs(devPct)}%</span> below VWAP (<span class="explain-val">$${fmtN(r.vwap,2)}</span>) — trading at a significant discount to fair value. Institutions often accumulate here.`;
+    } else if (dev < 0) {
+      tone = 'bull'; label = 'Below VWAP';
+      detail = `Price is <span class="explain-val">${Math.abs(devPct)}%</span> below VWAP (<span class="explain-val">$${fmtN(r.vwap,2)}</span>) — slight discount to the volume-weighted average. Mild bullish lean.`;
+    } else if (dev >= 0.03) {
+      tone = 'bear'; label = 'Well Above VWAP (Bearish)';
+      detail = `Price <span class="explain-val">$${fmtN(r.price,2)}</span> is <span class="explain-val">${devPct}%</span> above VWAP (<span class="explain-val">$${fmtN(r.vwap,2)}</span>) — trading at a premium to fair value. Extended moves above VWAP often revert.`;
+    } else {
+      tone = 'neu'; label = 'Near VWAP';
+      detail = `Price is <span class="explain-val">${devPct >= 0 ? '+' : ''}${devPct}%</span> relative to VWAP (<span class="explain-val">$${fmtN(r.vwap,2)}</span>) — essentially at fair value. No VWAP edge.`;
+    }
+    items.push({icon: '⚖️', tone, label, detail});
+  }
+
+  // ── ADX ────────────────────────────────────────────────────────────────────
+  if (r.adx != null) {
+    const adx = r.adx, pdi = r.adx_plus_di, mdi = r.adx_minus_di;
+    let tone, label, detail;
+    if (adx < 20) {
+      tone = 'neu'; label = 'No Clear Trend (ADX)';
+      detail = `ADX is <span class="explain-val">${fmtN(adx)}</span> — below 20, indicating a ranging, trendless market. Signals in this environment have lower reliability.`;
+    } else if (adx < 25) {
+      const dir = pdi != null && mdi != null ? (pdi > mdi ? 'emerging uptrend' : 'emerging downtrend') : 'weak trend';
+      tone = pdi != null && pdi > (mdi||0) ? 'bull' : 'bear';
+      label = 'Weak Trend (ADX)';
+      detail = `ADX is <span class="explain-val">${fmtN(adx)}</span> — a ${dir} is forming but not yet strong.${pdi != null && mdi != null ? ` +DI <span class="explain-val">${fmtN(pdi)}</span> vs -DI <span class="explain-val">${fmtN(mdi)}</span>.` : ''}`;
+    } else if (adx < 40) {
+      tone = pdi != null && pdi > (mdi||0) ? 'bull' : 'bear';
+      const dir = pdi != null && pdi > (mdi||0) ? 'uptrend' : 'downtrend';
+      label = `Strong ${dir.charAt(0).toUpperCase() + dir.slice(1)} (ADX)`;
+      detail = `ADX is <span class="explain-val">${fmtN(adx)}</span> — a strong ${dir} is in force.${pdi != null && mdi != null ? ` +DI <span class="explain-val">${fmtN(pdi)}</span> vs -DI <span class="explain-val">${fmtN(mdi)}</span>.` : ''} Trending signals are more reliable here.`;
+    } else {
+      tone = pdi != null && pdi > (mdi||0) ? 'bull' : 'bear';
+      const dir = pdi != null && pdi > (mdi||0) ? 'uptrend' : 'downtrend';
+      label = `Very Strong Trend (ADX)`;
+      detail = `ADX is <span class="explain-val">${fmtN(adx)}</span> — an extremely strong ${dir}. Momentum is dominant; mean-reversion strategies may be risky.`;
+    }
+    items.push({icon: '📡', tone, label, detail});
+  }
+
+  // ── Sector Momentum ─────────────────────────────────────────────────────────
+  if (r.sector_mom != null) {
+    const sm = r.sector_mom;
+    const smPct = (sm * 100).toFixed(1);
+    let tone, label, detail;
+    if (sm >= 0.03) {
+      tone = 'bull'; label = 'Strong Sector Outperformance';
+      detail = `This stock is outperforming its sector by <span class="explain-val">+${smPct}%</span> over the last 5 days — strong relative strength signals leadership. Institutions favor sector leaders.`;
+    } else if (sm >= 0.01) {
+      tone = 'bull'; label = 'Mild Sector Outperformance';
+      detail = `This stock is outperforming its sector by <span class="explain-val">+${smPct}%</span> over 5 days — slight relative strength advantage.`;
+    } else if (sm > -0.01) {
+      tone = 'neu'; label = 'In Line With Sector';
+      detail = `This stock is moving in line with its sector (relative performance: <span class="explain-val">${smPct}%</span> over 5 days). No standout relative strength.`;
+    } else if (sm > -0.03) {
+      tone = 'bear'; label = 'Mild Sector Underperformance';
+      detail = `This stock is underperforming its sector by <span class="explain-val">${Math.abs(smPct)}%</span> over 5 days — slight relative weakness.`;
+    } else {
+      tone = 'bear'; label = 'Strong Sector Underperformance';
+      detail = `This stock is underperforming its sector by <span class="explain-val">${Math.abs(smPct)}%</span> over the last 5 days — a laggard within its sector. Consider why it's being left behind.`;
+    }
+    items.push({icon: '🏭', tone, label, detail});
   }
 
   // ── Build HTML ─────────────────────────────────────────────────────────────

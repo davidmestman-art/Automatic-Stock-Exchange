@@ -1,5 +1,20 @@
 from typing import Dict, List, Optional
 
+# Sector ETF proxies for sector-momentum computation
+SECTOR_ETFS: Dict[str, str] = {
+    "Technology":             "XLK",
+    "Communication Services": "XLC",
+    "Consumer Discretionary": "XLY",
+    "Consumer Staples":       "XLP",
+    "Financials":             "XLF",
+    "Health Care":            "XLV",
+    "Industrials":            "XLI",
+    "Energy":                 "XLE",
+    "Materials":              "XLB",
+    "Utilities":              "XLU",
+    "Real Estate":            "XLRE",
+}
+
 # GICS sector assignments for every symbol in SP500_UNIVERSE
 SECTOR_MAP: Dict[str, str] = {
     # Technology

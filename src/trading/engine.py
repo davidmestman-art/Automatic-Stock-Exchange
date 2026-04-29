@@ -12,7 +12,7 @@ from ..signals.indicators import TechnicalIndicators
 from ..utils.emailer import TradeEmailer
 from ..utils.journal import TradeJournal
 from ..utils.notifications import Notifier
-from ..utils.sectors import sector_position_count
+from ..utils.sectors import SECTOR_ETFS, get_sector, sector_position_count
 from .executor import PaperExecutor
 from .portfolio import Portfolio
 from .risk import RiskManager
@@ -143,6 +143,9 @@ class TradingEngine:
         self._voo_alert_sent_date: Optional[str] = None  # send at most one VOO alert per day
         self.watchlist: List[str] = list(config.symbols)
         self.dynamic_universe = DynamicUniverse()
+        # Sector ETF 5-day returns — refreshed once per calendar day
+        self._sector_returns: Dict[str, float] = {}
+        self._sector_returns_date: Optional[str] = None
         # BUY signals waiting for next-candle confirmation (symbol → {signal_price, queued_at})
         self._pending_signals: Dict[str, dict] = {}
         # Symbols blocked by correlation filter in the most recent signal pass
@@ -163,6 +166,7 @@ class TradingEngine:
             return {}
 
         self._maybe_refresh_watchlist()
+        self._refresh_sector_returns()
 
         # Refresh market regime (cached; fetches at most once every 4 h)
         if self._regime_detector is not None:
@@ -229,6 +233,12 @@ class TradingEngine:
             current_price = prices[symbol]
 
             ind = self.indicators.compute(df)
+            # Inject sector momentum (stock 5d return vs sector ETF 5d return)
+            if len(df) >= 6:
+                stock_5d = float(df["Close"].iloc[-1]) / float(df["Close"].iloc[-6]) - 1
+                sec_name = get_sector(symbol)
+                if sec_name and sec_name in self._sector_returns:
+                    ind.sector_mom = stock_5d - self._sector_returns[sec_name]
             ind.close = current_price
 
             signal = self._compute_signal(symbol, ind)
@@ -489,15 +499,18 @@ class TradingEngine:
     @staticmethod
     def _indicator_snapshot(ind, signal: SignalResult) -> dict:
         return {
-            "rsi": round(ind.rsi, 2) if ind.rsi is not None else None,
-            "macd_hist": round(ind.macd_hist, 4) if ind.macd_hist is not None else None,
-            "ema_fast": round(ind.ema_fast, 2) if ind.ema_fast is not None else None,
-            "ema_slow": round(ind.ema_slow, 2) if ind.ema_slow is not None else None,
-            "z_score": round(ind.z_score, 4) if getattr(ind, "z_score", None) is not None else None,
-            "atr_pct": round(ind.atr_pct, 4) if getattr(ind, "atr_pct", None) is not None else None,
-            "roc_10": round(ind.roc_10, 4) if getattr(ind, "roc_10", None) is not None else None,
-            "stoch_rsi": round(ind.stoch_rsi, 2) if getattr(ind, "stoch_rsi", None) is not None else None,
-            "score": round(signal.score, 4),
+            "rsi":        round(ind.rsi,        2) if ind.rsi        is not None else None,
+            "macd_hist":  round(ind.macd_hist,  4) if ind.macd_hist  is not None else None,
+            "ema_fast":   round(ind.ema_fast,   2) if ind.ema_fast   is not None else None,
+            "ema_slow":   round(ind.ema_slow,   2) if ind.ema_slow   is not None else None,
+            "z_score":    round(ind.z_score,    4) if getattr(ind, "z_score",    None) is not None else None,
+            "atr_pct":    round(ind.atr_pct,    4) if getattr(ind, "atr_pct",    None) is not None else None,
+            "roc_10":     round(ind.roc_10,     4) if getattr(ind, "roc_10",     None) is not None else None,
+            "stoch_rsi":  round(ind.stoch_rsi,  2) if getattr(ind, "stoch_rsi",  None) is not None else None,
+            "vwap":       round(ind.vwap,        2) if getattr(ind, "vwap",       None) is not None else None,
+            "adx":        round(ind.adx,         1) if getattr(ind, "adx",        None) is not None else None,
+            "sector_mom": round(ind.sector_mom,  4) if getattr(ind, "sector_mom", None) is not None else None,
+            "score":      round(signal.score,    4),
             "confidence": round(signal.confidence, 4),
         }
 
@@ -538,6 +551,26 @@ class TradingEngine:
                 self._signal_ranker.maybe_train(self.journal)
             except Exception as e:
                 logger.warning(f"  ML training failed: {e}")
+
+    def _refresh_sector_returns(self) -> None:
+        """Fetch and cache 5-day returns for all sector ETFs. Runs once per calendar day."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._sector_returns_date == today and self._sector_returns:
+            return
+        etfs = list(set(SECTOR_ETFS.values()))
+        try:
+            data = self.fetcher.fetch_many(etfs, force_refresh=False)
+            returns: Dict[str, float] = {}
+            for sector, etf in SECTOR_ETFS.items():
+                df_etf = data.get(etf)
+                if df_etf is not None and len(df_etf) >= 6:
+                    ret = float(df_etf["Close"].iloc[-1]) / float(df_etf["Close"].iloc[-6]) - 1
+                    returns[sector] = ret
+            self._sector_returns = returns
+            self._sector_returns_date = today
+            logger.info(f"  Sector returns updated: {len(returns)} sectors")
+        except Exception as exc:
+            logger.warning(f"  Sector returns fetch failed: {exc}")
 
     def _market_is_open(self) -> bool:
         clock = self.executor.get_clock_info()
