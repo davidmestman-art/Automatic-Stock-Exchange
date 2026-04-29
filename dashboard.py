@@ -772,6 +772,7 @@ RISK_PROFILES = {
             "take_profit_pct": 0.10,
             "trailing_stop_pct": 0.03,
             "daily_loss_limit_pct": 0.02,
+            "max_sector_exposure_pct": 0.25,
             "buy_threshold": 0.35,
             "sell_threshold": -0.35,
         },
@@ -788,7 +789,8 @@ RISK_PROFILES = {
             "stop_loss_pct": 0.05,
             "take_profit_pct": 0.15,
             "trailing_stop_pct": 0.05,
-            "daily_loss_limit_pct": 0.03,
+            "daily_loss_limit_pct": 0.02,
+            "max_sector_exposure_pct": 0.30,
             "buy_threshold": 0.20,
             "sell_threshold": -0.20,
         },
@@ -806,6 +808,7 @@ RISK_PROFILES = {
             "take_profit_pct": 0.25,
             "trailing_stop_pct": 0.08,
             "daily_loss_limit_pct": 0.05,
+            "max_sector_exposure_pct": 0.35,
             "buy_threshold": 0.10,
             "sell_threshold": -0.10,
         },
@@ -838,6 +841,9 @@ def _apply_risk_profile(name: str) -> bool:
     for key, val in profile["overrides"].items():
         if hasattr(_engine.config, key):
             setattr(_engine.config, key, val)
+        # Mirror risk-manager fields that can be updated live
+        if hasattr(_engine.risk, key):
+            setattr(_engine.risk, key, val)
     _current_profile = name
     log.info(f"[SETTINGS] Risk profile applied: {name}")
     return True
@@ -953,6 +959,7 @@ def _safe_empty_state(error: str = "") -> dict:
         "alpaca_connected": None,
         "next_close": None,
         "today": {"pnl": None, "pnl_pct": None, "trades": 0, "sparkline": []},
+        "risk_rules": {},
     }
 
 
@@ -1223,6 +1230,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "personal_watchlist": _personal_watchlist,
         "alpaca_connected": eng.config.use_alpaca,
         "next_close": next_close,
+        "risk_rules": eng.risk_rules_status(price_lookup) if price_lookup else {},
         "today": {
             "pnl": today_perf.get("today_pnl"),
             "pnl_pct": today_perf.get("today_pnl_pct"),
@@ -2311,6 +2319,19 @@ tr:hover td{background:var(--bg2)}
 .sector-chip.near-limit{background:rgba(69,26,3,.5);color:#fdba74;border-color:rgba(146,64,14,.5)}
 .sector-chip.at-limit{background:rgba(127,29,29,.5);color:#fca5a5;border-color:rgba(185,28,28,.5)}
 
+/* ── Risk rules panel ────────────────────────────────────────────────────── */
+.risk-rules-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;padding:12px 14px}
+.risk-rule{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px}
+.risk-rule-icon{font-size:18px;line-height:1;flex-shrink:0;margin-top:1px}
+.risk-rule-body{flex:1;min-width:0}
+.risk-rule-title{font-size:11px;font-weight:600;color:var(--text1);margin-bottom:2px}
+.risk-rule-detail{font-size:11px;color:var(--text2);line-height:1.4}
+.risk-rule-badge{display:inline-block;font-size:9px;font-weight:700;letter-spacing:.4px;padding:1px 6px;border-radius:99px;margin-left:5px;vertical-align:middle}
+.rrb-ok{background:#14532d;color:#4ade80}
+.rrb-warn{background:#451a03;color:#fdba74}
+.rrb-triggered{background:#7f1d1d;color:#fca5a5}
+.rrb-reduced{background:#1e3a5f;color:#93c5fd}
+
 /* ── Regime card colours ─────────────────────────────────────────────────── */
 .regime-bull{color:var(--green)}
 .regime-bear{color:var(--red)}
@@ -2729,6 +2750,39 @@ body.light .explain-close{border-color:#e2e8f0;color:#64748b}
         <div class="card-sub" id="c-regime-sub">—</div>
       </div>
     </div>
+    <div class="panel" style="margin-bottom:12px">
+      <div class="panel-title">Risk Rules</div>
+      <div class="risk-rules-grid" id="risk-rules-grid">
+        <div class="risk-rule">
+          <div class="risk-rule-icon">📐</div>
+          <div class="risk-rule-body">
+            <div class="risk-rule-title">Signal-Strength Sizing <span class="risk-rule-badge rrb-ok" id="rr-sizing-badge">ON</span></div>
+            <div class="risk-rule-detail" id="rr-sizing-detail">Position size scales with signal confidence (0.5× – 1.5×)</div>
+          </div>
+        </div>
+        <div class="risk-rule">
+          <div class="risk-rule-icon">🔗</div>
+          <div class="risk-rule-body">
+            <div class="risk-rule-title">Correlation Filter <span class="risk-rule-badge rrb-ok" id="rr-corr-badge">OK</span></div>
+            <div class="risk-rule-detail" id="rr-corr-detail">ρ ≥ 0.70 with open position → half-size entry</div>
+          </div>
+        </div>
+        <div class="risk-rule">
+          <div class="risk-rule-icon">🏭</div>
+          <div class="risk-rule-body">
+            <div class="risk-rule-title">Sector Exposure <span class="risk-rule-badge rrb-ok" id="rr-sector-badge">OK</span></div>
+            <div class="risk-rule-detail" id="rr-sector-detail">Max 30% of portfolio in one sector</div>
+          </div>
+        </div>
+        <div class="risk-rule">
+          <div class="risk-rule-icon">🛑</div>
+          <div class="risk-rule-body">
+            <div class="risk-rule-title">Daily Loss Limit <span class="risk-rule-badge rrb-ok" id="rr-loss-badge">OK</span></div>
+            <div class="risk-rule-detail" id="rr-loss-detail">No new positions if day P&amp;L ≤ −2%</div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- ══ Positions tab ══ -->
@@ -2972,6 +3026,53 @@ function applyState(s) {
     regimeSubEl.textContent = `SPY $${fmt(r.spy_price)} · SMA200 $${fmt(r.sma200)}${vixStr}`;
   } else {
     regimeCard.style.display = 'none';
+  }
+
+  // risk rules panel
+  const rr = s.risk_rules || {};
+  if (rr.signal_sizing) {
+    const active = rr.signal_sizing.active;
+    const badge = document.getElementById('rr-sizing-badge');
+    badge.textContent = active ? 'ON' : 'OFF';
+    badge.className = 'risk-rule-badge ' + (active ? 'rrb-ok' : 'rrb-warn');
+    document.getElementById('rr-sizing-detail').textContent =
+      active ? 'Position size scales with signal confidence (0.5× – 1.5×)' : 'Fixed position sizing active';
+  }
+  if (rr.correlation) {
+    const cr = rr.correlation;
+    const badge = document.getElementById('rr-corr-badge');
+    const detail = document.getElementById('rr-corr-detail');
+    if (!cr.active) {
+      badge.textContent = 'OFF'; badge.className = 'risk-rule-badge rrb-warn';
+      detail.textContent = 'Correlation filter disabled';
+    } else if (cr.reduced_count > 0) {
+      badge.textContent = `${cr.reduced_count} REDUCED`; badge.className = 'risk-rule-badge rrb-reduced';
+      detail.textContent = `ρ ≥ ${cr.threshold} → half-size  ·  ${cr.reduced_count} symbol${cr.reduced_count > 1 ? 's' : ''} reduced this cycle`;
+    } else {
+      badge.textContent = 'OK'; badge.className = 'risk-rule-badge rrb-ok';
+      detail.textContent = `ρ ≥ ${cr.threshold} with open position → half-size entry`;
+    }
+  }
+  if (rr.sector_exposure) {
+    const se = rr.sector_exposure;
+    const badge = document.getElementById('rr-sector-badge');
+    const detail = document.getElementById('rr-sector-detail');
+    const statusMap = { OK: ['OK', 'rrb-ok'], WARNING: ['WARNING', 'rrb-warn'], LIMIT: ['AT LIMIT', 'rrb-triggered'] };
+    const [txt, cls2] = statusMap[se.status] || ['OK', 'rrb-ok'];
+    badge.textContent = txt; badge.className = 'risk-rule-badge ' + cls2;
+    const sectorStr = Object.entries(se.sector_pcts || {}).sort((a,b) => b[1]-a[1])
+      .slice(0, 3).map(([sec, pct]) => `${sec.split(' ')[0]} ${pct}%`).join(' · ');
+    detail.textContent = `Max ${se.limit_pct}% per sector  ·  Highest: ${se.max_sector_pct}%${sectorStr ? '  (' + sectorStr + ')' : ''}`;
+  }
+  if (rr.daily_loss) {
+    const dl = rr.daily_loss;
+    const badge = document.getElementById('rr-loss-badge');
+    const detail = document.getElementById('rr-loss-detail');
+    const statusMap = { OK: ['OK', 'rrb-ok'], WARNING: ['WARNING', 'rrb-warn'], TRIGGERED: ['TRIGGERED', 'rrb-triggered'] };
+    const [txt, cls2] = statusMap[dl.status] || ['OK', 'rrb-ok'];
+    badge.textContent = txt; badge.className = 'risk-rule-badge ' + cls2;
+    const sign = dl.current_pct >= 0 ? '+' : '';
+    detail.textContent = `Limit −${dl.limit_pct}%  ·  Today: ${sign}${dl.current_pct}%${dl.triggered ? '  — NEW BUYS HALTED' : ''}`;
   }
 
   // watchlist chips

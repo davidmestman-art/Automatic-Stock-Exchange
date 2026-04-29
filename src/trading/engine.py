@@ -55,6 +55,7 @@ class TradingEngine:
             take_profit_pct=config.take_profit_pct,
             daily_loss_limit_pct=config.daily_loss_limit_pct,
             max_positions_per_sector=config.max_positions_per_sector,
+            max_sector_exposure_pct=getattr(config, "max_sector_exposure_pct", 0.30),
             use_trailing_stop=config.use_trailing_stop,
             trailing_stop_pct=config.trailing_stop_pct,
         )
@@ -262,12 +263,12 @@ class TradingEngine:
                     logger.debug(f"  Earnings protection: skipping BUY {symbol}")
                     continue
 
-                # Correlation filter
-                if symbol in self._last_corr_blocked:
+                # Correlation filter — high correlation halves position size (doesn't block)
+                corr_reduced = symbol in self._last_corr_blocked
+                if corr_reduced:
                     logger.info(
-                        f"  Correlation blocked {symbol}: {self._last_corr_blocked[symbol]}"
+                        f"  Correlation reduced {symbol} (0.5×): {self._last_corr_blocked[symbol]}"
                     )
-                    continue
 
                 # In BEAR regime, only trade if signal is strong enough
                 if self._regime_result is not None and self._regime_result.regime == "BEAR":
@@ -290,9 +291,13 @@ class TradingEngine:
                     daily_pnl_pct=daily_pnl,
                     signal_confidence=signal.confidence,
                     sector_positions=sector_position_count(symbol, self.portfolio.positions),
+                    sector_value_pct=self._sector_value_pct(symbol, prices),
                     atr_pct=ind.atr_pct,
                 )
                 if rc.approved:
+                    # Correlation-reduced: halve position size for correlated entries
+                    if corr_reduced:
+                        rc.max_shares = rc.max_shares * 0.5
                     # Apply regime-based position-size multiplier
                     if self._regime_result is not None:
                         cfg = self.config
@@ -596,6 +601,72 @@ class TradingEngine:
     def last_corr_blocked(self) -> Dict[str, str]:
         """Symbols blocked by correlation filter in the last signal pass {sym: reason}."""
         return dict(self._last_corr_blocked)
+
+    def _sector_value_pct(self, symbol: str, prices: Dict[str, float]) -> float:
+        """Fraction of portfolio value already in the same sector as symbol."""
+        sec = get_sector(symbol)
+        if not sec or not self.portfolio.positions:
+            return 0.0
+        pv = self.portfolio.total_value_at(prices)
+        if not pv:
+            return 0.0
+        sector_val = sum(
+            prices.get(s, pos.entry_price) * pos.shares
+            for s, pos in self.portfolio.positions.items()
+            if get_sector(s) == sec
+        )
+        return sector_val / pv
+
+    def risk_rules_status(self, prices: Dict[str, float]) -> dict:
+        """Return current status of every active risk rule for the dashboard."""
+        portfolio_value = self.portfolio.total_value_at(prices) or 1.0
+        daily_pnl = self.portfolio.daily_pnl_pct(prices)
+        daily_limit = self.risk.daily_loss_limit_pct
+
+        sector_values: Dict[str, float] = {}
+        for sym, pos in self.portfolio.positions.items():
+            sec = get_sector(sym) or "Other"
+            val = prices.get(sym, pos.entry_price) * pos.shares
+            sector_values[sec] = sector_values.get(sec, 0.0) + val
+
+        sector_pcts = {
+            sec: round(val / portfolio_value * 100, 1)
+            for sec, val in sector_values.items()
+        }
+        max_sector_pct = max(sector_pcts.values()) if sector_pcts else 0.0
+        sector_limit_pct = self.risk.max_sector_exposure_pct * 100
+
+        return {
+            "signal_sizing": {
+                "active": self.risk.use_adaptive_sizing,
+            },
+            "correlation": {
+                "active": self.config.use_correlation_filter,
+                "threshold": self.config.correlation_threshold,
+                "reduced_count": len(self._last_corr_blocked),
+                "status": "REDUCED" if self._last_corr_blocked else "OK",
+            },
+            "sector_exposure": {
+                "limit_pct": round(sector_limit_pct, 0),
+                "sector_pcts": sector_pcts,
+                "max_sector_pct": round(max_sector_pct, 1),
+                "status": (
+                    "LIMIT" if max_sector_pct >= sector_limit_pct
+                    else "WARNING" if max_sector_pct >= sector_limit_pct * 0.8
+                    else "OK"
+                ),
+            },
+            "daily_loss": {
+                "limit_pct": round(daily_limit * 100, 1),
+                "current_pct": round(daily_pnl * 100, 2),
+                "triggered": daily_pnl <= -daily_limit,
+                "status": (
+                    "TRIGGERED" if daily_pnl <= -daily_limit
+                    else "WARNING" if daily_pnl <= -daily_limit * 0.7
+                    else "OK"
+                ),
+            },
+        }
 
     def _compute_corr_blocks(self, market_data: dict) -> Dict[str, str]:
         """Return {symbol: reason} for watchlist symbols too correlated with open positions."""

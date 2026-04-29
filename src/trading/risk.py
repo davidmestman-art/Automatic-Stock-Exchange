@@ -16,8 +16,9 @@ class RiskManager:
         max_open_positions: int = 8,
         stop_loss_pct: float = 0.05,
         take_profit_pct: float = 0.15,
-        daily_loss_limit_pct: float = 0.03,
+        daily_loss_limit_pct: float = 0.02,
         max_positions_per_sector: int = 3,
+        max_sector_exposure_pct: float = 0.30,
         use_trailing_stop: bool = True,
         trailing_stop_pct: float = 0.05,
     ):
@@ -27,6 +28,7 @@ class RiskManager:
         self.take_profit_pct = take_profit_pct
         self.daily_loss_limit_pct = daily_loss_limit_pct
         self.max_positions_per_sector = max_positions_per_sector
+        self.max_sector_exposure_pct = max_sector_exposure_pct
         self.use_trailing_stop = use_trailing_stop
         self.trailing_stop_pct = trailing_stop_pct
         # Adaptive position sizing is wired in via check_buy / compute_position_pct
@@ -66,6 +68,7 @@ class RiskManager:
         daily_pnl_pct: float,
         signal_confidence: float,
         sector_positions: int = 0,
+        sector_value_pct: float = 0.0,
         atr_pct: float = None,
     ) -> RiskCheck:
         if daily_pnl_pct <= -self.daily_loss_limit_pct:
@@ -84,6 +87,12 @@ class RiskManager:
             return RiskCheck(
                 False,
                 f"Sector limit ({self.max_positions_per_sector}) reached",
+            )
+
+        if sector_value_pct >= self.max_sector_exposure_pct:
+            return RiskCheck(
+                False,
+                f"Sector exposure limit reached ({sector_value_pct * 100:.1f}% ≥ {self.max_sector_exposure_pct * 100:.0f}%)",
             )
 
         position_pct = self.compute_position_pct(signal_confidence, atr_pct)
