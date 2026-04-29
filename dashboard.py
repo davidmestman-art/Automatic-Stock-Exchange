@@ -4694,19 +4694,16 @@ SETTINGS_HTML = """<!doctype html>
 body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;
      -webkit-font-smoothing:antialiased;min-height:100vh}
 a{color:inherit;text-decoration:none}
-/* Nav */
-nav{display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:56px;
-    background:rgba(13,18,32,.98);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
-.nav-left{display:flex;align-items:center;gap:18px}
-.nav-logo{font-size:14px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
-.nav-dot{width:7px;height:7px;background:var(--accent2);border-radius:50%;box-shadow:0 0 8px var(--accent2)}
-.nav-link{font-size:13px;color:var(--text2);padding:5px 10px;border-radius:6px;transition:all .15s}
-.nav-link:hover{background:var(--surface2);color:var(--text)}
-.nav-link.active{background:var(--surface2);color:var(--text)}
-.btn-logout{padding:6px 14px;border-radius:6px;background:#7f1d1d;color:#fca5a5;font-size:12px;
-            font-weight:600;border:1px solid #991b1b}
+/* Unified nav */
+.unav-header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 20px;height:52px;display:flex;align-items:center;position:sticky;top:0;z-index:10}
+.unav-logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
+.unav-bar{background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9}
+.unav-tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--text2);font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center;transition:color .15s;font-family:inherit}
+.unav-tab:hover{color:var(--text)}
+.unav-tab.active{color:var(--text);border-bottom-color:var(--accent2)}
+.unav-logout{margin-left:auto;color:#fca5a5!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:#7f1d1d!important;border:1px solid #991b1b!important;text-decoration:none;display:inline-flex;align-items:center;height:28px;white-space:nowrap}
 /* Page */
-.page{max-width:860px;margin:0 auto;padding:48px 24px}
+.page{max-width:860px;margin:0 auto;padding:40px 24px}
 .page-title{font-size:26px;font-weight:700;letter-spacing:-.5px;margin-bottom:6px}
 .page-sub{font-size:14px;color:var(--text2);margin-bottom:40px}
 /* Profile cards */
@@ -4798,17 +4795,15 @@ td.diff-dn{color:#f87171}
 </style>
 </head>
 <body>
-<nav>
-  <div class="nav-left">
-    <div class="nav-dot"></div>
-    <span class="nav-logo">NYSE Engine</span>
-    <a href="/dashboard" class="nav-link">Dashboard</a>
-    <a href="/journal" class="nav-link">Journal</a>
-    <a href="/settings" class="nav-link active">Settings</a>
-  </div>
-  <div>
-    <a href="/logout" class="btn-logout">Logout</a>
-  </div>
+<div class="unav-header"><div class="unav-logo">Automatic Trading Engine</div></div>
+<nav class="unav-bar">
+  <a href="/dashboard" class="unav-tab">Dashboard</a>
+  <a href="/dashboard" class="unav-tab">Positions</a>
+  <a href="/dashboard" class="unav-tab">Watchlist</a>
+  <a href="/dashboard" class="unav-tab">Signals</a>
+  <a href="/dashboard" class="unav-tab">Trades</a>
+  <a href="/settings" class="unav-tab active">Settings</a>
+  {% if auth %}<a href="/logout" class="unav-logout">Logout</a>{% endif %}
 </nav>
 
 <div class="page">
@@ -5148,17 +5143,14 @@ JOURNAL_HTML = """<!doctype html>
 body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;
      font-size:14px;min-height:100vh;-webkit-font-smoothing:antialiased}
 a{color:inherit;text-decoration:none}
-/* ── Header ── */
-header{background:rgba(7,9,15,.95);border-bottom:1px solid var(--border);
-       padding:0 24px;height:56px;display:flex;align-items:center;gap:14px;
-       position:sticky;top:0;z-index:10;backdrop-filter:blur(12px)}
-.logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px;display:flex;align-items:center;gap:7px}
-.logo::before{content:'';display:inline-block;width:7px;height:7px;background:var(--accent2);
-              border-radius:50%;box-shadow:0 0 8px var(--accent2)}
-.hdr-right{margin-left:auto;display:flex;align-items:center;gap:8px}
-.btn-back{background:var(--surface2);color:var(--text2);border:1px solid var(--border);
-          border-radius:6px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer}
-.btn-back:hover{border-color:var(--accent2);color:var(--text)}
+/* ── Unified nav ── */
+.unav-header{background:rgba(7,9,15,.95);border-bottom:1px solid var(--border);padding:0 20px;height:52px;display:flex;align-items:center;position:sticky;top:0;z-index:10;backdrop-filter:blur(12px)}
+.unav-logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
+.unav-bar{background:rgba(7,9,15,.95);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9;backdrop-filter:blur(12px)}
+.unav-tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--text2);font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center;transition:color .15s;font-family:inherit}
+.unav-tab:hover{color:var(--text)}
+.unav-tab.active{color:var(--text);border-bottom-color:var(--accent2)}
+.unav-logout{margin-left:auto;color:#fca5a5!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:#7f1d1d!important;border:1px solid #991b1b!important;text-decoration:none;display:inline-flex;align-items:center;height:28px;white-space:nowrap}
 /* ── Layout ── */
 main{padding:24px;max-width:1400px;margin:0 auto}
 /* ── Stat cards ── */
@@ -5228,13 +5220,16 @@ tr:hover td{background:rgba(18,26,46,.8)}
 </style>
 </head>
 <body>
-<header>
-  <div class="logo">Trade Journal</div>
-  <div class="hdr-right">
-    <button class="btn-back" onclick="window.location='/stats'">Stats</button>
-    <button class="btn-back" onclick="window.location='/dashboard'">← Dashboard</button>
-  </div>
-</header>
+<div class="unav-header"><div class="unav-logo">Automatic Trading Engine</div></div>
+<nav class="unav-bar">
+  <a href="/dashboard" class="unav-tab">Dashboard</a>
+  <a href="/dashboard" class="unav-tab">Positions</a>
+  <a href="/dashboard" class="unav-tab">Watchlist</a>
+  <a href="/dashboard" class="unav-tab">Signals</a>
+  <a href="/dashboard" class="unav-tab active">Trades</a>
+  <a href="/settings" class="unav-tab">Settings</a>
+  {% if auth %}<a href="/logout" class="unav-logout">Logout</a>{% endif %}
+</nav>
 
 <main>
   <!-- ── Summary stats ── -->
@@ -5420,10 +5415,13 @@ STATS_HTML = """<!doctype html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
-header{background:#1e293b;border-bottom:1px solid #334155;padding:12px 20px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:10}
-.logo{font-size:17px;font-weight:700;color:#f1f5f9}
-.back{font-size:12px;color:#64748b;cursor:pointer;padding:5px 10px;border-radius:6px;background:#334155;border:none;font-weight:600}
-.back:hover{opacity:.8}
+.unav-header{background:#0f172a;border-bottom:1px solid #334155;padding:0 20px;height:52px;display:flex;align-items:center;position:sticky;top:0;z-index:10}
+.unav-logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
+.unav-bar{background:#0f172a;border-bottom:1px solid #334155;display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9}
+.unav-tab{background:none;border:none;border-bottom:2px solid transparent;color:#64748b;font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center;transition:color .15s;font-family:inherit}
+.unav-tab:hover{color:#e2e8f0}
+.unav-tab.active{color:#f1f5f9;border-bottom-color:#3b82f6}
+.unav-logout{margin-left:auto;color:#fca5a5!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:#7f1d1d!important;border:1px solid #991b1b!important;text-decoration:none;display:inline-flex;align-items:center;height:28px;white-space:nowrap}
 main{padding:16px 20px;max-width:1200px;margin:0 auto}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px}
 .card{background:#1e293b;border-radius:10px;padding:14px 16px;border:1px solid #334155}
@@ -5485,10 +5483,16 @@ tr:hover td{background:#263044}
 </style>
 </head>
 <body>
-<header>
-  <button class="back" onclick="window.location='/'">← Dashboard</button>
-  <div class="logo">Performance &amp; Notifications</div>
-</header>
+<div class="unav-header"><div class="unav-logo">Automatic Trading Engine</div></div>
+<nav class="unav-bar">
+  <a href="/dashboard" class="unav-tab">Dashboard</a>
+  <a href="/dashboard" class="unav-tab">Positions</a>
+  <a href="/dashboard" class="unav-tab">Watchlist</a>
+  <a href="/dashboard" class="unav-tab">Signals</a>
+  <a href="/dashboard" class="unav-tab">Trades</a>
+  <a href="/settings" class="unav-tab">Settings</a>
+  {% if auth %}<a href="/logout" class="unav-logout">Logout</a>{% endif %}
+</nav>
 <main>
   <!-- Summary cards -->
   <div class="cards">
@@ -6100,14 +6104,14 @@ def leaderboard_page():
 
 @app.route("/stats")
 def stats_page():
-    return render_template_string(STATS_HTML)
+    return render_template_string(STATS_HTML, auth=_AUTH_ENABLED)
 
 
 @app.route("/journal")
 def journal_page():
     if _AUTH_ENABLED and not session.get("logged_in"):
         return redirect("/login?next=/journal")
-    resp = make_response(render_template_string(JOURNAL_HTML))
+    resp = make_response(render_template_string(JOURNAL_HTML, auth=_AUTH_ENABLED))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp
 
@@ -6145,6 +6149,7 @@ def settings_page():
         notify_email=user_notify_email if _AUTH_ENABLED else eng.emailer.notify_email,
         alpaca_connected=alpaca_connected,
         alpaca_paper=alpaca_paper,
+        auth=_AUTH_ENABLED,
     ))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp
