@@ -84,6 +84,15 @@ class TradingConfig:
     alpaca_api_key: str = field(default_factory=lambda: os.getenv("ALPACA_API_KEY", ""))
     alpaca_secret_key: str = field(default_factory=lambda: os.getenv("ALPACA_SECRET_KEY", ""))
 
+    # ── Universe screener thresholds ──────────────────────────────────────────
+    universe_min_avg_volume: int   = 500_000          # shares / day
+    universe_min_price:      float = 10.0
+    universe_max_price:      float = 1_000.0
+    universe_min_market_cap: float = 2_000_000_000.0  # $2 B
+    universe_top_n:          int   = 150
+    universe_include_etfs:   bool  = True
+    universe_use_alpaca:     bool  = True             # attempt Alpaca assets API
+
     # ── Fundamental filter ────────────────────────────────────────────────────
     use_fundamental_filter: bool = True    # P/E < 30, D/E < 2, positive FCF + EPS growth
     fundamental_pe_max: float = 30.0

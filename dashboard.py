@@ -1130,7 +1130,8 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "tf_15m": round(iscores["15m"], 3) if "15m" in iscores else None,
                 "mtf_agreement": int(iscores["mtf_agreement"]) if "mtf_agreement" in iscores else None,
                 "ml_mult": round(iscores["ml_mult"], 3) if "ml_mult" in iscores else None,
-                "sector": get_sector(sym) or "—",
+                "sector":   get_sector(sym) or "—",
+                "category": eng.dynamic_universe.last_result.get("categories", {}).get(sym, "Other"),
             })
         sig_list.sort(key=lambda x: -abs(x["score"]))
 
@@ -1229,6 +1230,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "public_url": _public_url,
         "personal_watchlist": _personal_watchlist,
         "alpaca_connected": eng.config.use_alpaca,
+        "universe_categories": eng.dynamic_universe.last_result.get("categories", {}),
         "next_close": next_close,
         "risk_rules": eng.risk_rules_status(price_lookup) if price_lookup else {},
         "today": {
@@ -1929,11 +1931,62 @@ def api_journal():
 @app.route("/api/universe")
 def api_universe():
     try:
-        eng = _get_engine()
+        eng    = _get_engine()
         result = dict(eng.dynamic_universe.last_result)
-        result["current_watchlist"] = eng.watchlist
-        result["watchlist_size"]    = eng.config.watchlist_size
+        result["current_watchlist"]  = eng.watchlist
+        result["watchlist_size"]     = eng.config.watchlist_size
+        result["settings"] = {
+            "min_avg_volume":  eng.dynamic_universe.min_avg_volume,
+            "min_price":       eng.dynamic_universe.min_price,
+            "max_price":       eng.dynamic_universe.max_price,
+            "min_market_cap":  eng.dynamic_universe.min_market_cap,
+            "top_n":           eng.dynamic_universe.top_n,
+            "include_etfs":    eng.dynamic_universe.include_etfs,
+            "use_alpaca":      bool(eng.dynamic_universe.alpaca_api_key),
+        }
         return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/universe/log")
+def api_universe_log():
+    try:
+        from src.data.universe import _LOG_PATH
+        if _LOG_PATH.exists():
+            entries = json.loads(_LOG_PATH.read_text())
+            return jsonify({"ok": True, "entries": list(reversed(entries))})
+        return jsonify({"ok": True, "entries": []})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/universe/rescan", methods=["POST"])
+def api_universe_rescan():
+    try:
+        eng     = _get_engine()
+        tickers = eng.dynamic_universe.force_rescan()
+        if tickers:
+            eng.scanner.universe    = list(dict.fromkeys(tickers))
+            eng.scanner.volume_top_n = len(tickers)
+        return jsonify({"ok": True, "universe_size": len(tickers)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/universe/settings", methods=["POST"])
+def api_universe_settings():
+    try:
+        data = request.get_json(force=True)
+        eng  = _get_engine()
+        du   = eng.dynamic_universe
+        if "min_avg_volume"  in data: du.min_avg_volume  = int(data["min_avg_volume"])
+        if "min_price"       in data: du.min_price       = float(data["min_price"])
+        if "max_price"       in data: du.max_price       = float(data["max_price"])
+        if "min_market_cap"  in data: du.min_market_cap  = float(data["min_market_cap"]) * 1e9
+        if "top_n"           in data: du.top_n           = int(data["top_n"])
+        if "include_etfs"    in data: du.include_etfs    = bool(data["include_etfs"])
+        return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -3054,13 +3107,25 @@ body.light .simple-verdict strong{color:#0f172a}
 
   <!-- ══ Watchlist tab ══ -->
   <div id="tab-watchlist" class="tab-section">
-    <!-- controls: search filter + sector buttons -->
-    <div class="wl-controls">
-      <input type="text" id="wl-filter" class="wl-filter-input" placeholder="Filter tickers…"
-             maxlength="6" oninput="this.value=this.value.toUpperCase();applyWlFilters()"
-             autocomplete="off" spellcheck="false"/>
+    <!-- controls: search filter + category + sector buttons -->
+    <div class="wl-controls" style="flex-direction:column;align-items:stretch;gap:6px">
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
+        <input type="text" id="wl-filter" class="wl-filter-input" placeholder="Filter tickers…"
+               maxlength="6" oninput="this.value=this.value.toUpperCase();applyWlFilters()"
+               autocomplete="off" spellcheck="false"/>
+        <button class="btn-save" onclick="triggerRescan()" id="wl-rescan-btn"
+                style="font-size:11px;padding:4px 10px;background:#1d4ed8">Rescan</button>
+      </div>
+      <div class="tab-btns" id="wl-category-btns">
+        <button class="tab-btn active" onclick="setWlCategory('all',this)">All</button>
+        <button class="tab-btn" onclick="setWlCategory('S&P 500',this)">S&amp;P 500</button>
+        <button class="tab-btn" onclick="setWlCategory('Nasdaq 100',this)">Nasdaq 100</button>
+        <button class="tab-btn" onclick="setWlCategory('Dow 30',this)">Dow 30</button>
+        <button class="tab-btn" onclick="setWlCategory('ETF',this)">ETFs</button>
+        <button class="tab-btn" onclick="setWlCategory('Other',this)">Other</button>
+      </div>
       <div class="tab-btns" id="wl-sector-btns">
-        <button class="tab-btn active" onclick="setWlSector('all',this)">All</button>
+        <button class="tab-btn active" onclick="setWlSector('all',this)">All Sectors</button>
       </div>
     </div>
     <!-- heat map — primary visual -->
@@ -3187,13 +3252,15 @@ const fmtD = n => n == null ? '—' : (n>=0?'+':'')+fmt(n);
 const cls = n => n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu';
 
 // ── Watchlist unified view state ──────────────────────────────────────────
-let _hmData     = {};   // sym → {price, change_pct, volume_ratio}
-let _wlSigData  = {};   // sym → signal row from state
-let _wlSymbols  = [];   // ordered watchlist
-let _wlSelected = null;
-let _wlSortCol  = 'score';
-let _wlSortAsc  = false;
-let _wlSector   = 'all';
+let _hmData       = {};   // sym → {price, change_pct, volume_ratio}
+let _wlSigData    = {};   // sym → signal row from state
+let _wlSymbols    = [];   // ordered watchlist
+let _wlSelected   = null;
+let _wlSortCol    = 'score';
+let _wlSortAsc    = false;
+let _wlSector     = 'all';
+let _wlCategory   = 'all';
+let _wlCategories = {};   // sym → category string from universe
 
 function applyState(s) {
   if (!s || typeof s !== 'object') return;
@@ -3377,6 +3444,8 @@ function applyState(s) {
       };
     });
   }
+  // update category map from universe
+  if (s.universe_categories) _wlCategories = s.universe_categories;
   _buildSectorButtons();
   renderWatchlistTable();
 
@@ -3628,10 +3697,14 @@ function renderHeatmap(items) {
   const isLight = document.body.classList.contains('light');
   const filter  = (document.getElementById('wl-filter')?.value || '').trim();
 
-  // cache & apply sector filter
+  // cache & apply filters
   items.forEach(it => { _hmData[it.symbol] = it; });
   let visible = items;
   if (filter) visible = visible.filter(it => it.symbol.includes(filter));
+  if (_wlCategory !== 'all') visible = visible.filter(it => {
+    const cat = _wlCategories[it.symbol] || ((_wlSigData[it.symbol] || {}).category) || 'Other';
+    return cat === _wlCategory;
+  });
   if (_wlSector !== 'all') visible = visible.filter(it => {
     const sig = _wlSigData[it.symbol];
     return sig && sig.sector === _wlSector;
@@ -3677,13 +3750,21 @@ function _buildSectorButtons() {
   const bar = document.getElementById('wl-sector-btns');
   if (!bar) return;
   const sectors = new Set();
-  Object.values(_wlSigData).forEach(r => { if (r.sector) sectors.add(r.sector); });
-  let html = `<button class="tab-btn${_wlSector === 'all' ? ' active' : ''}" onclick="setWlSector('all',this)">All</button>`;
+  Object.values(_wlSigData).forEach(r => { if (r.sector && r.sector !== '—') sectors.add(r.sector); });
+  let html = `<button class="tab-btn${_wlSector === 'all' ? ' active' : ''}" onclick="setWlSector('all',this)">All Sectors</button>`;
   [...sectors].sort().forEach(sec => {
     const esc = sec.replace(/'/g, "\\'");
     html += `<button class="tab-btn${_wlSector === sec ? ' active' : ''}" onclick="setWlSector('${esc}',this)">${sec}</button>`;
   });
   bar.innerHTML = html;
+}
+
+function setWlCategory(cat, btn) {
+  _wlCategory = cat;
+  document.querySelectorAll('#wl-category-btns .tab-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  renderWatchlistTable();
+  renderHeatmap(Object.values(_hmData));
 }
 
 function setWlSector(sec, btn) {
@@ -3698,6 +3779,20 @@ function applyWlFilters() {
   renderWatchlistTable();
   const items = Object.values(_hmData);
   if (items.length) renderHeatmap(items);
+}
+
+async function triggerRescan() {
+  const btn = document.getElementById('wl-rescan-btn');
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    const res  = await fetch('/api/universe/rescan', {method:'POST'});
+    const data = await res.json();
+    if (data.ok) {
+      // Also trigger a watchlist scan
+      await fetch('/api/rescan', {method:'POST'});
+    }
+  } catch(e) { /* ignore */ }
+  btn.disabled = false; btn.textContent = 'Rescan';
 }
 
 function highlightWlTicker(sym) {
@@ -3739,6 +3834,7 @@ function renderWatchlistTable() {
     return {
       symbol:       sym,
       sector:       sig.sector || '—',
+      category:     sig.category || _wlCategories[sym] || 'Other',
       price:        sig.price  ?? hm.price  ?? null,
       change_pct:   hm.change_pct ?? null,
       volume_ratio: hm.volume_ratio ?? sig.volume_ratio ?? null,
@@ -3747,8 +3843,9 @@ function renderWatchlistTable() {
     };
   });
 
-  if (filter) rows = rows.filter(r => r.symbol.includes(filter));
-  if (_wlSector !== 'all') rows = rows.filter(r => r.sector === _wlSector);
+  if (filter)                 rows = rows.filter(r => r.symbol.includes(filter));
+  if (_wlCategory !== 'all')  rows = rows.filter(r => r.category === _wlCategory);
+  if (_wlSector   !== 'all')  rows = rows.filter(r => r.sector   === _wlSector);
 
   rows.sort((a, b) => {
     let va = a[_wlSortCol], vb = b[_wlSortCol];
@@ -5484,30 +5581,78 @@ td.diff-dn{color:#f87171}
 
   <!-- Universe -->
   <div class="section-title">Trading Universe</div>
-  <div class="section-sub">Stocks screened from S&amp;P 500, Nasdaq 100, and Dow 30 — filtered daily by volume, price ($20–$500), and market cap (&gt;$10 B). The engine scans all of these each cycle and trades the top signals.</div>
+  <div class="section-sub">Dynamically screens NYSE, NASDAQ, and AMEX equities daily at 9:15 AM ET. Core ETFs are always included. Composite ranking by volume, momentum, and 52-week proximity.</div>
   <div class="universe-card" id="universe-card">
     <div class="universe-loading" id="universe-loading">Loading universe…</div>
     <div id="universe-content" style="display:none">
       <div class="universe-meta">
         <div class="universe-stat">
           <div class="universe-stat-val" id="u-size">—</div>
-          <div class="universe-stat-lbl">Stocks in Universe</div>
+          <div class="universe-stat-lbl">In Universe</div>
         </div>
         <div class="universe-stat">
           <div class="universe-stat-val" id="u-candidates">—</div>
-          <div class="universe-stat-lbl">Total Candidates</div>
+          <div class="universe-stat-lbl">Candidates Checked</div>
         </div>
         <div class="universe-stat">
           <div class="universe-stat-val" id="u-watchlist">—</div>
           <div class="universe-stat-lbl">Active Watchlist</div>
         </div>
+        <div class="universe-stat">
+          <div class="universe-stat-val" id="u-source" style="font-size:13px">—</div>
+          <div class="universe-stat-lbl">Data Source</div>
+        </div>
         <div class="universe-stat" style="margin-left:auto">
-          <div class="universe-stat-val" style="font-size:14px;color:var(--text2)" id="u-date">—</div>
+          <div class="universe-stat-val" style="font-size:13px;color:var(--text2)" id="u-date">—</div>
           <div class="universe-stat-lbl">Last Screened</div>
         </div>
       </div>
+      <!-- Exchange breakdown -->
+      <div id="u-exchange-row" style="display:flex;gap:12px;padding:10px 16px;border-top:1px solid var(--border);flex-wrap:wrap"></div>
+      <!-- Adjustable filter controls -->
+      <div style="padding:12px 16px;border-top:1px solid var(--border)">
+        <div style="font-size:12px;font-weight:600;color:var(--text1);margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em">Screener Filters</div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <label style="font-size:11px;color:var(--text2)">Min Vol (K/day)</label>
+            <input id="u-min-vol" type="number" min="100" step="100" class="alpaca-input" style="width:110px" placeholder="500"/>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <label style="font-size:11px;color:var(--text2)">Min Price ($)</label>
+            <input id="u-min-price" type="number" min="1" step="1" class="alpaca-input" style="width:90px" placeholder="10"/>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <label style="font-size:11px;color:var(--text2)">Max Price ($)</label>
+            <input id="u-max-price" type="number" min="10" step="10" class="alpaca-input" style="width:90px" placeholder="1000"/>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <label style="font-size:11px;color:var(--text2)">Min Cap ($B)</label>
+            <input id="u-min-cap" type="number" min="0.1" step="0.5" class="alpaca-input" style="width:90px" placeholder="2"/>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <label style="font-size:11px;color:var(--text2)">Top N</label>
+            <input id="u-top-n" type="number" min="10" max="500" step="10" class="alpaca-input" style="width:80px" placeholder="150"/>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px;align-items:center">
+            <label style="font-size:11px;color:var(--text2)">Include ETFs</label>
+            <input id="u-include-etfs" type="checkbox" style="width:18px;height:18px;cursor:pointer" checked/>
+          </div>
+          <button class="btn-save" onclick="saveUniverseFilters()" style="margin-bottom:1px">Save Filters</button>
+          <button class="btn-save" onclick="rescanUniverse()" id="rescan-btn"
+                  style="margin-bottom:1px;background:#1d4ed8">Rescan Now</button>
+        </div>
+        <div id="u-filter-status" style="font-size:12px;margin-top:6px;display:none"></div>
+      </div>
+      <!-- Universe chips -->
+      <div style="padding:8px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Universe Tickers</div>
       <div class="universe-chips" id="u-chips"></div>
-      <div class="universe-note">Screener runs once daily before the first trading cycle. Filters: avg daily volume ≥ 1 M shares · price $20–$500 · market cap &gt; $10 B.</div>
+      <!-- Screener log -->
+      <div style="padding:10px 16px;border-top:1px solid var(--border)">
+        <div style="font-size:12px;font-weight:600;color:var(--text1);margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em">Screener Log
+          <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text2)"> — last 7 runs</span>
+        </div>
+        <div id="u-log" style="font-size:12px;color:var(--text1)"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -5657,21 +5802,133 @@ async function loadUniverse() {
     const data = await res.json();
     document.getElementById('universe-loading').style.display = 'none';
     const content = document.getElementById('universe-content');
-    if (!data.ok) { document.getElementById('universe-loading').textContent = 'Failed to load universe.'; document.getElementById('universe-loading').style.display = ''; return; }
+    if (!data.ok) {
+      document.getElementById('universe-loading').textContent = 'Failed to load universe.';
+      document.getElementById('universe-loading').style.display = '';
+      return;
+    }
     content.style.display = '';
     document.getElementById('u-size').textContent       = data.universe_size || 0;
     document.getElementById('u-candidates').textContent = data.total_candidates || '—';
     document.getElementById('u-watchlist').textContent  = (data.current_watchlist || []).length;
-    document.getElementById('u-date').textContent       = data.screen_date || 'Not yet run';
+    document.getElementById('u-date').textContent       = data.scanned_at || data.screen_date || 'Not yet run';
+    document.getElementById('u-source').textContent     = data.using_alpaca ? 'Alpaca API' : 'Index Lists';
+
+    // Exchange breakdown
+    const exRow = document.getElementById('u-exchange-row');
+    const bkd   = data.exchange_breakdown || {};
+    exRow.innerHTML = Object.entries(bkd).map(([k,v]) =>
+      `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:5px 12px;text-align:center">
+        <div style="font-size:16px;font-weight:700">${v}</div>
+        <div style="font-size:11px;color:var(--text2)">${k}</div>
+      </div>`
+    ).join('');
+
+    // Populate filter inputs from current settings
+    const s = data.settings || {};
+    if (s.min_avg_volume != null) document.getElementById('u-min-vol').value   = Math.round(s.min_avg_volume / 1000);
+    if (s.min_price      != null) document.getElementById('u-min-price').value = s.min_price;
+    if (s.max_price      != null) document.getElementById('u-max-price').value = s.max_price;
+    if (s.min_market_cap != null) document.getElementById('u-min-cap').value   = (s.min_market_cap / 1e9).toFixed(1);
+    if (s.top_n          != null) document.getElementById('u-top-n').value     = s.top_n;
+    document.getElementById('u-include-etfs').checked = s.include_etfs !== false;
+
+    // Universe chips with category badge
+    const cats  = data.categories || {};
+    const catColor = {
+      'S&P 500': '#1d4ed8', 'Nasdaq 100': '#7c3aed', 'Dow 30': '#0369a1',
+      'ETF': '#065f46', 'Other': '#374151',
+    };
     const chips = document.getElementById('u-chips');
     const tickers = data.universe || [];
     if (tickers.length) {
-      chips.innerHTML = tickers.map(t => `<span class="universe-chip">${t}</span>`).join('');
+      chips.innerHTML = tickers.map(t => {
+        const cat = cats[t] || 'Other';
+        const bg  = catColor[cat] || '#374151';
+        return `<span class="universe-chip" onclick="openChart('${t}')" style="cursor:pointer" title="${cat}">
+          ${t}<span style="background:${bg};color:#fff;font-size:9px;border-radius:3px;padding:0 3px;margin-left:3px">${cat.split(' ')[0]}</span>
+        </span>`;
+      }).join('');
     } else {
-      chips.innerHTML = '<span style="font-size:12px;color:var(--text2)">No screen results yet — will run before the first trading cycle today.</span>';
+      chips.innerHTML = '<span style="font-size:12px;color:var(--text2)">No screen results yet — screener runs at 9:15 AM ET before market open.</span>';
     }
+
+    // Load screener log
+    loadUniverseLog();
   } catch(e) {
     document.getElementById('universe-loading').textContent = 'Failed to load universe.';
+  }
+}
+
+async function loadUniverseLog() {
+  try {
+    const res  = await fetch('/api/universe/log');
+    const data = await res.json();
+    const entries = (data.entries || []).slice(0, 7);
+    const el = document.getElementById('u-log');
+    if (!entries.length) {
+      el.innerHTML = '<span style="color:var(--text2)">No screener history yet.</span>';
+      return;
+    }
+    el.innerHTML = `<table style="width:100%;border-collapse:collapse">
+      <thead><tr style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:.04em">
+        <th style="text-align:left;padding:4px 8px">Date</th>
+        <th style="text-align:left;padding:4px 8px">Time</th>
+        <th style="text-align:right;padding:4px 8px">Universe</th>
+        <th style="text-align:right;padding:4px 8px">Candidates</th>
+        <th style="text-align:right;padding:4px 8px">Source</th>
+      </tr></thead>
+      <tbody>${entries.map(e => `<tr style="border-top:1px solid var(--border)">
+        <td style="padding:5px 8px">${e.date || '—'}</td>
+        <td style="padding:5px 8px;color:var(--text2)">${(e.scanned_at || '').split(' ')[1] || '—'}</td>
+        <td style="padding:5px 8px;text-align:right;font-weight:600">${e.universe_size || 0}</td>
+        <td style="padding:5px 8px;text-align:right;color:var(--text2)">${e.total_candidates || 0}</td>
+        <td style="padding:5px 8px;text-align:right">${e.using_alpaca ? 'Alpaca' : 'Index'}</td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  } catch(e) {
+    document.getElementById('u-log').innerHTML = '<span style="color:var(--text2)">Could not load log.</span>';
+  }
+}
+
+async function saveUniverseFilters() {
+  const status = document.getElementById('u-filter-status');
+  const body = {
+    min_avg_volume: (parseFloat(document.getElementById('u-min-vol').value)   || 500) * 1000,
+    min_price:       parseFloat(document.getElementById('u-min-price').value) || 10,
+    max_price:       parseFloat(document.getElementById('u-max-price').value) || 1000,
+    min_market_cap:  parseFloat(document.getElementById('u-min-cap').value)   || 2,
+    top_n:           parseInt(document.getElementById('u-top-n').value)        || 150,
+    include_etfs:    document.getElementById('u-include-etfs').checked,
+  };
+  try {
+    const res  = await fetch('/api/universe/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const data = await res.json();
+    status.style.display  = 'block';
+    status.style.color    = data.ok ? '#10b981' : '#f87171';
+    status.textContent    = data.ok ? '✓ Filters saved.' : 'Error: ' + (data.error || 'unknown');
+  } catch(e) {
+    status.style.display = 'block'; status.style.color = '#f87171'; status.textContent = 'Network error.';
+  }
+}
+
+async function rescanUniverse() {
+  const btn    = document.getElementById('rescan-btn');
+  const status = document.getElementById('u-filter-status');
+  btn.disabled = true; btn.textContent = 'Scanning…';
+  status.style.display = 'block'; status.style.color = 'var(--text2)'; status.textContent = 'Rescanning universe — this may take 1–2 minutes…';
+  try {
+    const res  = await fetch('/api/universe/rescan', {method:'POST'});
+    const data = await res.json();
+    status.style.color = data.ok ? '#10b981' : '#f87171';
+    status.textContent = data.ok
+      ? `✓ Rescan complete — ${data.universe_size} tickers in universe.`
+      : 'Error: ' + (data.error || 'unknown');
+    if (data.ok) loadUniverse();
+  } catch(e) {
+    status.style.color = '#f87171'; status.textContent = 'Network error.';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Rescan Now';
   }
 }
 
