@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Web dashboard for the NYSE Algorithmic Trading Engine.
+"""Web dashboard for the Automatic Trading Engine.
 
 Run:  python dashboard.py
 Then open http://localhost:8080
@@ -2155,7 +2155,7 @@ def pwa_manifest():
         "display":          "standalone",
         "background_color": "#0f172a",
         "theme_color":      "#1e293b",
-        "description":      "Algorithmic NYSE trading engine dashboard",
+        "description":      "Algorithmic trading engine dashboard",
         "icons": [
             {"src": "/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml"},
             {"src": "/icon-512.svg", "sizes": "512x512", "type": "image/svg+xml"},
