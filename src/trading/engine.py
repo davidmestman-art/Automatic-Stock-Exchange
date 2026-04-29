@@ -143,7 +143,18 @@ class TradingEngine:
         self._session_date: Optional[str] = None
         self._voo_alert_sent_date: Optional[str] = None  # send at most one VOO alert per day
         self.watchlist: List[str] = list(config.symbols)
-        self.dynamic_universe = DynamicUniverse()
+        use_alpaca_uni = getattr(config, "universe_use_alpaca", True)
+        self.dynamic_universe = DynamicUniverse(
+            min_avg_volume    = getattr(config, "universe_min_avg_volume", 500_000),
+            min_price         = getattr(config, "universe_min_price",      10.0),
+            max_price         = getattr(config, "universe_max_price",      1_000.0),
+            min_market_cap    = getattr(config, "universe_min_market_cap", 2_000_000_000.0),
+            top_n             = getattr(config, "universe_top_n",          150),
+            include_etfs      = getattr(config, "universe_include_etfs",   True),
+            alpaca_api_key    = config.alpaca_api_key    if use_alpaca_uni else "",
+            alpaca_secret_key = config.alpaca_secret_key if use_alpaca_uni else "",
+            paper_trading     = config.paper_trading,
+        )
         # Sector ETF 5-day returns — refreshed once per calendar day
         self._sector_returns: Dict[str, float] = {}
         self._sector_returns_date: Optional[str] = None
@@ -521,8 +532,28 @@ class TradingEngine:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _get_et_time():
+        """Return current datetime in US/Eastern timezone."""
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo("America/New_York"))
+        except ImportError:
+            try:
+                import pytz
+                return datetime.now(pytz.timezone("America/New_York"))
+            except ImportError:
+                from datetime import timezone, timedelta
+                return datetime.now(timezone(timedelta(hours=-5)))
+
     def _maybe_refresh_watchlist(self) -> None:
-        today = datetime.now().strftime("%Y-%m-%d")
+        now_et = self._get_et_time()
+        today  = now_et.strftime("%Y-%m-%d")
+
+        # Defer until 9:15 AM ET (pre-market screener window)
+        if now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 15):
+            return
+
         if self._session_date == today:
             return
         if self._pending_signals:
