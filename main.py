@@ -15,6 +15,9 @@ def orb_signal():
         "signal": signal
     })
     
+@app.route("/")
+def home():
+    return render_template("home.html")
 #!/usr/bin/env python3
 """NYSE Algorithmic Trading Engine — entry point.
 
