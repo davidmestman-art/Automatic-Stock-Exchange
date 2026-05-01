@@ -1,3 +1,20 @@
+from flask import request, jsonify
+from services.orb_service import get_orb_signal
+@app.route("/orb-signal")
+def orb_signal():
+    price = request.args.get("price")
+
+    if price is None:
+        return jsonify({"error": "missing price"}), 400
+
+    price = float(price)
+
+    signal = get_orb_signal(price)
+
+    return jsonify({
+        "signal": signal
+    })
+    
 #!/usr/bin/env python3
 """NYSE Algorithmic Trading Engine — entry point.
 
