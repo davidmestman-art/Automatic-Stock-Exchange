@@ -505,23 +505,17 @@ def _exchange_breakdown(tickers: List[str], cats: Dict[str, str]) -> Dict[str, i
 
 
 def _fetch_market_caps_with_names(symbols: List[str]) -> Dict[str, Dict]:
-    """Parallel fast_info lookup for market cap and company name."""
+    """Parallel fast_info.market_cap lookup — low-memory, no full info fetch."""
     results: Dict[str, Dict] = {}
 
     def _get(sym: str) -> Tuple[str, Dict]:
         try:
-            fi   = yf.Ticker(sym).fast_info
-            mc   = float(fi.market_cap) if fi.market_cap else None
-            name = ""
-            try:
-                name = yf.Ticker(sym).info.get("longName", "") or ""
-            except Exception:
-                pass
-            return sym, {"mc": mc, "name": name}
+            mc = yf.Ticker(sym).fast_info.market_cap
+            return sym, {"mc": float(mc) if mc else None, "name": ""}
         except Exception:
             return sym, {}
 
-    with ThreadPoolExecutor(max_workers=20) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(_get, sym): sym for sym in symbols}
         for fut in as_completed(futures, timeout=90):
             try:

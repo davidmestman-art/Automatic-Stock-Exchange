@@ -815,6 +815,7 @@ RISK_PROFILES = {
     },
 }
 _current_profile: str = "moderate"
+log = logging.getLogger(__name__)
 
 
 def _load_user_settings() -> dict:
@@ -890,8 +891,6 @@ _load_personal_watchlist()
 
 # ── Public ngrok URL ──────────────────────────────────────────────────────────
 _public_url: str = ""
-
-log = logging.getLogger(__name__)
 
 
 def _record_snapshot(total_value: float) -> None:
