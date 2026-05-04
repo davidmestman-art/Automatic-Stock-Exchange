@@ -16,6 +16,7 @@ from ..utils.sectors import SECTOR_ETFS, get_sector, sector_position_count
 from .executor import PaperExecutor
 from .orb import (
     ORBSession,
+    fetch_gap_pcts,
     fetch_opening_range_bars,
     fetch_prev_day_levels,
     fetch_latest_1min_volume,
@@ -232,6 +233,17 @@ class TradingEngine:
                 logger.info(f"  [ORB] Prev-day levels loaded for {len(pd_levels)} symbols")
             except Exception as e:
                 logger.warning(f"  [ORB] Prev-day fetch failed: {e}")
+            try:
+                logger.info("  [ORB] Fetching gap data (open vs prev close)…")
+                gap_data = fetch_gap_pcts(self._orb_session.watchlist())
+                for sym, gap in gap_data.items():
+                    self._orb_session.set_gap_pct(sym, gap)
+                n_gapped = sum(1 for g in gap_data.values() if abs(g) > 0.03)
+                logger.info(
+                    f"  [ORB] Gap data loaded — {n_gapped}/{len(gap_data)} stocks gap-filtered (>3%)"
+                )
+            except Exception as e:
+                logger.warning(f"  [ORB] Gap data fetch failed: {e}")
 
         # ── Phase 4: 3:45 PM — close everything and stop trading ─────────────
         if et_mins >= 15 * 60 + 45:
@@ -309,13 +321,16 @@ class TradingEngine:
                         )
             self._pending_signals.clear()
 
-        # Fetch latest 1-min bar volume for ORB breakout candidates only
+        # Fetch latest 1-min bar volume for ORB breakout/retest candidates
         vol_1min: Dict[str, float] = {}
         if orb_active:
             candidates = [
                 s for s in self.watchlist
-                if s in prices and (st := self._orb_session.get(s))
-                and st.or_high and (prices[s] > st.or_high or prices[s] < st.or_low)
+                if s in prices and (st := self._orb_session.get(s)) and st.or_high
+                and (
+                    prices[s] > st.or_high or prices[s] < st.or_low
+                    or (st.retest_eligible and prices[s] >= st.or_high * 0.997)
+                )
             ]
             if candidates:
                 try:
@@ -984,16 +999,13 @@ class TradingEngine:
         vol_1min: Dict[str, float],
     ) -> "SignalResult":
         """
-        ORB signal: BUY on upward breakout with confluence, SELL on breakdown.
+        ORB signal with three additional filters:
 
-        Confluence for BUY:
-          - price > OR high
-          - 1-min volume > 1.5x avg daily volume / 390 (avg bars/day)
-          - RSI in [40, 70]
-          - price > VWAP (if available)
-          - ADX > 20 (if available)
-
-        SELL triggered unconditionally on price < OR low (no confluence needed).
+        Gap filter:    skip any stock gapped >3% from prev close at open (both dirs)
+        Trend filter:  BUY only above 20-day EMA; SELL only below 20-day EMA
+        Retest entry:  on initial high-vol breakout above OR high, wait for pullback
+                       within 0.3% of OR high on lower volume before entering
+        RSI blocks:    RSI>80 blocks BUY; RSI<15 blocks SELL (extreme only)
         """
         if orb_st is None or not orb_st.formed or orb_st.or_high is None:
             return SignalResult(action="HOLD", score=0.0, confidence=0.0,
@@ -1001,63 +1013,79 @@ class TradingEngine:
 
         or_high = orb_st.or_high
         or_low  = orb_st.or_low
-        reasons = []
 
-        # ── Breakdown SELL — block only on extreme oversold RSI ──────────────
+        # ── Gap filter (both directions) ──────────────────────────────────────
+        if orb_st.gap_pct is not None and abs(orb_st.gap_pct) > 0.03:
+            return SignalResult(action="HOLD", score=0.0, confidence=0.0,
+                                reasons=[f"Gap filter: {orb_st.gap_pct * 100:.1f}% at open"])
+
+        # ── Breakdown SELL ────────────────────────────────────────────────────
         if current_price < or_low:
             if ind.rsi is not None and ind.rsi < 15:
                 return SignalResult(action="HOLD", score=-0.1, confidence=0.1,
-                                    reasons=[f"ORB breakdown — RSI {ind.rsi:.1f} extreme oversold, skip SELL"])
-            return SignalResult(
-                action="SELL",
-                score=-0.8,
-                confidence=0.8,
-                reasons=[f"ORB breakdown below ${or_low:.2f}"],
-            )
+                                    reasons=[f"ORB breakdown — RSI {ind.rsi:.1f} extreme oversold"])
+            if ind.ema_fast is not None and current_price >= ind.ema_fast:
+                return SignalResult(action="HOLD", score=-0.1, confidence=0.1,
+                                    reasons=["ORB breakdown — price above 20-day EMA, skip SELL"])
+            return SignalResult(action="SELL", score=-0.8, confidence=0.8,
+                                reasons=[f"ORB breakdown below ${or_low:.2f}"])
 
-        # ── Breakout BUY — require all confluence ─────────────────────────────
+        avg_per_min = orb_st.avg_daily_volume / 390.0 if orb_st.avg_daily_volume > 0 else 0
+        bar_vol     = vol_1min.get(symbol, 0)
+
+        # ── Retest zone: price pulled back within 0.3% of OR high ────────────
+        if orb_st.retest_eligible:
+            retest_low = or_high * 0.997
+            in_zone    = retest_low <= current_price <= or_high * 1.003
+            low_vol    = orb_st.breakout_volume and bar_vol < orb_st.breakout_volume
+            if in_zone and low_vol:
+                # Apply confluence filters at the retest level
+                if ind.ema_fast is not None and current_price <= ind.ema_fast:
+                    return SignalResult(action="HOLD", score=0.1, confidence=0.1,
+                                        reasons=["Retest — below 20-day EMA"])
+                if ind.rsi is not None and ind.rsi > 80:
+                    return SignalResult(action="HOLD", score=0.1, confidence=0.1,
+                                        reasons=[f"Retest — RSI {ind.rsi:.1f} extreme overbought"])
+                if ind.vwap is not None and current_price <= ind.vwap:
+                    return SignalResult(action="HOLD", score=0.1, confidence=0.1,
+                                        reasons=[f"Retest — below VWAP ${ind.vwap:.2f}"])
+                if ind.adx is not None and ind.adx <= 20:
+                    return SignalResult(action="HOLD", score=0.1, confidence=0.1,
+                                        reasons=[f"Retest — ADX {ind.adx:.1f} ≤ 20"])
+                reasons = [f"ORB retest @ ${current_price:.2f} (OR high ${or_high:.2f})"]
+                if orb_st.breakout_volume:
+                    reasons.append(f"Vol {bar_vol:.0f} < breakout {orb_st.breakout_volume:.0f}")
+                if ind.ema_fast:
+                    reasons.append(f"EMA ${ind.ema_fast:.2f} OK")
+                if ind.adx:
+                    reasons.append(f"ADX {ind.adx:.1f} OK")
+                score = round(min(0.85, 0.5 + (current_price - or_high) / or_high), 4)
+                return SignalResult(action="BUY", score=score,
+                                    confidence=round(min(0.9, score + 0.1), 4), reasons=reasons)
+            # Retest-eligible but not in zone — keep waiting
+            return SignalResult(action="HOLD", score=0.0, confidence=0.0,
+                                reasons=["Waiting for ORB retest"])
+
+        # ── Price inside OR ───────────────────────────────────────────────────
         if current_price <= or_high:
             return SignalResult(action="HOLD", score=0.0, confidence=0.0,
                                 reasons=["Price inside OR"])
 
-        # Volume confirmation: 1-min vol > 1.5x avg-per-minute
-        avg_per_min = orb_st.avg_daily_volume / 390.0 if orb_st.avg_daily_volume > 0 else 0
-        bar_vol = vol_1min.get(symbol, 0)
+        # ── Initial breakout above OR high — detect and wait for retest ───────
         if avg_per_min > 0 and bar_vol < 1.5 * avg_per_min:
             return SignalResult(action="HOLD", score=0.1, confidence=0.1,
                                 reasons=[
                                     f"ORB breakout above ${or_high:.2f} — "
                                     f"vol {bar_vol:.0f} < 1.5x avg {avg_per_min:.0f}"
                                 ])
-        reasons.append(f"ORB breakout ${current_price:.2f} > OR high ${or_high:.2f}")
-
-        # RSI extreme blocker only — block BUY if overbought >80
-        if ind.rsi is not None and ind.rsi > 80:
-            return SignalResult(action="HOLD", score=0.1, confidence=0.1,
-                                reasons=[f"RSI {ind.rsi:.1f} extreme overbought >80"])
-
-        # VWAP confirm
-        if ind.vwap is not None:
-            if current_price <= ind.vwap:
-                return SignalResult(action="HOLD", score=0.1, confidence=0.1,
-                                    reasons=[f"Price ${current_price:.2f} below VWAP ${ind.vwap:.2f}"])
-            reasons.append(f"VWAP ${ind.vwap:.2f} OK")
-
-        # ADX > 20
-        if ind.adx is not None:
-            if ind.adx <= 20:
-                return SignalResult(action="HOLD", score=0.1, confidence=0.1,
-                                    reasons=[f"ADX {ind.adx:.1f} ≤ 20"])
-            reasons.append(f"ADX {ind.adx:.1f} OK")
-
-        score      = min(0.9, 0.5 + (current_price - or_high) / or_high)
-        confidence = min(0.9, score + 0.1)
-        return SignalResult(
-            action="BUY",
-            score=round(score, 4),
-            confidence=round(confidence, 4),
-            reasons=reasons,
+        orb_st.retest_eligible = True
+        orb_st.breakout_volume = bar_vol if bar_vol > 0 else None
+        logger.info(
+            f"  [ORB] {symbol}: initial breakout @ ${current_price:.2f} "
+            f"vol={bar_vol:.0f} — waiting for retest near ${or_high:.2f}"
         )
+        return SignalResult(action="HOLD", score=0.2, confidence=0.2,
+                            reasons=[f"ORB breakout detected — awaiting retest near ${or_high:.2f}"])
 
     def _log_summary(self, prices: Dict[str, float]) -> None:
         s = self.portfolio.get_summary(prices)
