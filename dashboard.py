@@ -5572,11 +5572,24 @@ header{background:var(--bg1);border-bottom:1px solid var(--border);padding:0 20p
 .badge-paper{background:rgba(59,130,246,.18);color:#93c5fd;border:1px solid rgba(59,130,246,.3)}
 .badge-live{background:rgba(239,68,68,.18);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
 .badge-sim{background:rgba(100,116,139,.15);color:#94a3b8;border:1px solid var(--border)}
+.badge-connecting{background:rgba(100,116,139,.1);color:#64748b;border:1px dashed var(--border);animation:badge-pulse 1.4s ease-in-out infinite}
+@keyframes badge-pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .market-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px;flex-shrink:0}
 .market-open{background:var(--green);box-shadow:0 0 5px var(--green)}
 .market-closed{background:var(--red)}
 .market-unknown{background:#475569}
 #market-status{font-size:12px;color:var(--text1);white-space:nowrap;padding:0 14px;border-right:1px solid var(--border)}
+.btn-icon-refresh{background:none;border:none;color:var(--text1);font-size:20px;padding:0;min-height:unset;width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:pointer;line-height:1}
+.btn-icon-refresh:hover{color:var(--text0);background:var(--bg3)}
+.theme-toggle{background:none;border:1px solid var(--border);color:var(--text0);padding:0;border-radius:99px;font-size:16px;min-height:32px;width:36px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+body.light{--bg0:#f8fafc;--bg1:#ffffff;--bg2:#f1f5f9;--bg3:#e2e8f0;--border:rgba(0,0,0,.1);--border-strong:rgba(0,0,0,.18);--text0:#0f172a;--text1:#475569;--text2:#64748b}
+body.light header{background:#fff;border-bottom-color:#e2e8f0}
+body.light .nav-tabs-bar{background:#fff;border-bottom-color:#e2e8f0}
+body.light .nav-tab{color:#64748b}
+body.light .nav-tab.active{color:#1e293b;border-bottom-color:#3b82f6}
+body.light .nav-tab-logout{color:#b91c1c!important;background:#fee2e2!important;border-color:#fca5a5!important}
+body.light .btn-icon-refresh{color:#475569}
+body.light .theme-toggle{border-color:#cbd5e1;color:#1e293b}
 .hdr-stats{display:flex;align-items:stretch;height:100%}
 .hdr-stat{display:flex;flex-direction:column;justify-content:center;padding:0 14px;border-right:1px solid var(--border);min-width:0}
 .hdr-stat-lbl{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;line-height:1;margin-bottom:3px}
@@ -5591,8 +5604,6 @@ header{background:var(--bg1);border-bottom:1px solid var(--border);padding:0 20p
 .nav-tab-logout{margin-left:auto;color:var(--red)!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:var(--red-bg)!important;border:1px solid rgba(239,68,68,.25)!important;cursor:pointer;min-height:unset;white-space:nowrap;font-family:inherit}
 /* ── Settings content ────────────────────────────────────────────────────── */
 .settings-content{max-width:860px;margin:0 auto;padding:28px 20px}
-.page-title{font-size:26px;font-weight:700;letter-spacing:-.5px;margin-bottom:6px;color:var(--text0)}
-.page-sub{font-size:14px;color:var(--text1);margin-bottom:40px}
 /* Profile cards */
 .profiles{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:40px}
 @media(max-width:640px){.profiles{grid-template-columns:1fr}}
@@ -5684,7 +5695,7 @@ td.diff-dn{color:#f87171}
 <body>
 <header>
   <div class="logo">Automatic Trading Engine</div>
-  <span class="badge badge-sim" id="mode-badge">LOCAL SIMULATION</span>
+  <span class="badge {% if alpaca_connected %}{% if alpaca_paper %}badge-paper{% else %}badge-live{% endif %}{% else %}badge-sim{% endif %}" id="mode-badge">{% if alpaca_connected %}{% if alpaca_paper %}ALPACA PAPER{% else %}ALPACA LIVE{% endif %}{% else %}LOCAL SIMULATION{% endif %}</span>
   <span id="market-status">
     <span class="market-dot market-unknown" id="market-dot"></span>
     <span id="market-label">Market —</span>
@@ -5705,6 +5716,9 @@ td.diff-dn{color:#f87171}
   </div>
   <div class="hdr-right">
     <span class="ts" id="hdr-ts"></span>
+    <button class="btn-icon-refresh" onclick="location.reload()" title="Refresh">↻</button>
+    <span style="font-size:17px;cursor:pointer;opacity:.6" onclick="window.location='/stats'" title="Stats">🔔</span>
+    <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
   </div>
 </header>
 <nav class="nav-tabs-bar">
@@ -5719,9 +5733,6 @@ td.diff-dn{color:#f87171}
 
 <main>
 <div class="settings-content">
-  <div class="page-title">Settings</div>
-  <div class="page-sub">Choose your risk profile. Changes apply immediately to the live trading engine.</div>
-
   <div class="profiles" id="profiles">
     <!-- Rendered by JS -->
   </div>
@@ -6195,6 +6206,19 @@ async function saveAlpacaKeys() {
 
 function openChart(sym) { window.location = '/dashboard'; }
 
+function toggleTheme() {
+  const light = document.body.classList.toggle('light');
+  localStorage.setItem('theme', light ? 'light' : 'dark');
+  document.getElementById('theme-btn').textContent = light ? '🌙' : '☀️';
+}
+(function initTheme() {
+  if (localStorage.getItem('theme') === 'light') {
+    document.body.classList.add('light');
+    const btn = document.getElementById('theme-btn');
+    if (btn) btn.textContent = '🌙';
+  }
+})();
+
 async function initHeader() {
   try {
     const s = await fetch('/api/state').then(r => r.json());
@@ -6240,24 +6264,53 @@ JOURNAL_HTML = """<!doctype html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#07090f;--surface:#0d1220;--surface2:#121a2e;
-  --border:#1a2540;--border2:#223060;
-  --accent:#2563eb;--accent2:#3b82f6;
-  --green:#10b981;--green2:#34d399;
-  --red:#ef4444;--red2:#f87171;
-  --text:#eaf0fb;--text2:#8898b8;--text3:#4a5a78;
+  --bg0:#0d1520;--bg1:#111c2d;--bg2:#1a2540;--bg3:#1f2e47;
+  --border:rgba(255,255,255,0.07);--border-strong:rgba(255,255,255,0.13);
+  --text0:#f1f5f9;--text1:#94a3b8;--text2:#64748b;
+  --green:#22c55e;--green-dim:#166534;--green-bg:rgba(34,197,94,.08);
+  --red:#ef4444;--red-dim:#7f1d1d;--red-bg:rgba(239,68,68,.08);
+  --blue:#3b82f6;--radius:8px;
+  /* legacy aliases used in journal content */
+  --bg:var(--bg0);--surface:var(--bg1);--surface2:var(--bg2);
+  --green2:#34d399;--red2:#f87171;
+  --text:var(--text0);--text3:#4a5a78;
 }
-body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;
-     font-size:14px;min-height:100vh;-webkit-font-smoothing:antialiased}
+body{background:var(--bg0);color:var(--text1);font-family:'Inter','Segoe UI',system-ui,sans-serif;
+     font-size:13px;min-height:100vh;-webkit-font-smoothing:antialiased}
 a{color:inherit;text-decoration:none}
-/* ── Unified nav ── */
-.unav-header{background:rgba(7,9,15,.95);border-bottom:1px solid var(--border);padding:0 20px;height:52px;display:flex;align-items:center;position:sticky;top:0;z-index:10;backdrop-filter:blur(12px)}
-.unav-logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
-.unav-bar{background:rgba(7,9,15,.95);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9;backdrop-filter:blur(12px)}
-.unav-tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--text2);font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center;transition:color .15s;font-family:inherit}
-.unav-tab:hover{color:var(--text)}
-.unav-tab.active{color:var(--text);border-bottom-color:var(--accent2)}
-.unav-logout{margin-left:auto;color:#fca5a5!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:#7f1d1d!important;border:1px solid #991b1b!important;text-decoration:none;display:inline-flex;align-items:center;height:28px;white-space:nowrap}
+/* ── Header ── */
+header{background:var(--bg1);border-bottom:1px solid var(--border);padding:0 20px;height:52px;display:flex;align-items:center;gap:0;position:sticky;top:0;z-index:10}
+.logo{font-size:14px;font-weight:700;color:var(--text0);letter-spacing:-.2px;white-space:nowrap;padding-right:14px;border-right:1px solid var(--border)}
+.badge{padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;margin-left:12px}
+.badge-paper{background:rgba(59,130,246,.18);color:#93c5fd;border:1px solid rgba(59,130,246,.3)}
+.badge-live{background:rgba(239,68,68,.18);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
+.badge-sim{background:rgba(100,116,139,.15);color:#94a3b8;border:1px solid var(--border)}
+.market-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px;flex-shrink:0}
+.market-open{background:var(--green);box-shadow:0 0 5px var(--green)}
+.market-closed{background:var(--red)}
+.market-unknown{background:#475569}
+#market-status{font-size:12px;color:var(--text1);white-space:nowrap;padding:0 14px;border-right:1px solid var(--border)}
+.hdr-stats{display:flex;align-items:stretch;height:100%}
+.hdr-stat{display:flex;flex-direction:column;justify-content:center;padding:0 14px;border-right:1px solid var(--border);min-width:0}
+.hdr-stat-lbl{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;line-height:1;margin-bottom:3px}
+.hdr-stat-val{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text0);white-space:nowrap}
+.hdr-right{margin-left:auto;display:flex;align-items:center;gap:6px;padding-left:12px}
+.ts{font-size:11px;color:var(--text2);white-space:nowrap}
+.btn-icon-refresh{background:none;border:none;color:var(--text1);font-size:20px;padding:0;min-height:unset;width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:pointer;line-height:1}
+.btn-icon-refresh:hover{color:var(--text0);background:var(--bg3)}
+.theme-toggle{background:none;border:1px solid var(--border);color:var(--text0);padding:0;border-radius:99px;font-size:16px;min-height:32px;width:36px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+/* ── Tab nav ── */
+.nav-tabs-bar{background:var(--bg1);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9}
+.nav-tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--text2);font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;font-family:inherit;min-height:unset;border-radius:0;transition:color .15s}
+.nav-tab:hover{color:var(--text1);background:none;border-color:transparent}
+.nav-tab.active{color:var(--text0);border-bottom-color:var(--blue)}
+.nav-tab-logout{margin-left:auto;color:var(--red)!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:var(--red-bg)!important;border:1px solid rgba(239,68,68,.25)!important;cursor:pointer;min-height:unset;white-space:nowrap;font-family:inherit}
+/* light mode */
+body.light{--bg0:#f8fafc;--bg1:#ffffff;--bg2:#f1f5f9;--bg3:#e2e8f0;--border:rgba(0,0,0,.1);--border-strong:rgba(0,0,0,.18);--text0:#0f172a;--text1:#475569;--text2:#64748b}
+body.light header{background:#fff;border-bottom-color:#e2e8f0}
+body.light .nav-tabs-bar{background:#fff;border-bottom-color:#e2e8f0}
+body.light .nav-tab.active{color:#1e293b;border-bottom-color:#3b82f6}
+body.light .theme-toggle{border-color:#cbd5e1;color:#1e293b}
 /* ── Layout ── */
 main{padding:24px;max-width:1400px;margin:0 auto}
 /* ── Stat cards ── */
@@ -6327,15 +6380,32 @@ tr:hover td{background:rgba(18,26,46,.8)}
 </style>
 </head>
 <body>
-<div class="unav-header"><div class="unav-logo">Automatic Trading Engine</div></div>
-<nav class="unav-bar">
-  <a href="/dashboard" class="unav-tab">Dashboard</a>
-  <a href="/dashboard" class="unav-tab">Positions</a>
-  <a href="/dashboard" class="unav-tab">Watchlist</a>
-  <a href="/dashboard" class="unav-tab">Signals</a>
-  <a href="/dashboard" class="unav-tab active">Trades</a>
-  <a href="/settings" class="unav-tab">Settings</a>
-  {% if auth %}<a href="/logout" class="unav-logout">Logout</a>{% endif %}
+<header>
+  <div class="logo">Automatic Trading Engine</div>
+  <span class="badge badge-sim" id="mode-badge">LOCAL SIMULATION</span>
+  <span id="market-status">
+    <span class="market-dot market-unknown" id="market-dot"></span>
+    <span id="market-label">Market —</span>
+  </span>
+  <div class="hdr-stats">
+    <div class="hdr-stat"><span class="hdr-stat-lbl">Total Value</span><span class="hdr-stat-val" id="hdr-total">—</span></div>
+    <div class="hdr-stat"><span class="hdr-stat-lbl">Day P&amp;L</span><span class="hdr-stat-val" id="hdr-day-pnl">—</span></div>
+    <div class="hdr-stat"><span class="hdr-stat-lbl">Unrealized</span><span class="hdr-stat-val" id="hdr-unreal">—</span></div>
+  </div>
+  <div class="hdr-right">
+    <span class="ts" id="hdr-ts"></span>
+    <button class="btn-icon-refresh" onclick="location.reload()" title="Refresh">↻</button>
+    <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
+  </div>
+</header>
+<nav class="nav-tabs-bar">
+  <button class="nav-tab" onclick="window.location='/dashboard'">Dashboard</button>
+  <button class="nav-tab" onclick="window.location='/dashboard'">Positions</button>
+  <button class="nav-tab" onclick="window.location='/dashboard'">Watchlist</button>
+  <button class="nav-tab" onclick="window.location='/dashboard'">Signals</button>
+  <button class="nav-tab active">Trades</button>
+  <button class="nav-tab" onclick="window.location='/settings'">Settings</button>
+  {% if auth %}<button class="nav-tab nav-tab-logout" onclick="window.location='/logout'">Logout</button>{% endif %}
 </nav>
 
 <main>
@@ -6504,6 +6574,51 @@ async function loadJournal() {
 }
 
 loadJournal();
+
+function toggleTheme() {
+  const light = document.body.classList.toggle('light');
+  localStorage.setItem('theme', light ? 'light' : 'dark');
+  document.getElementById('theme-btn').textContent = light ? '🌙' : '☀️';
+}
+(function initTheme() {
+  if (localStorage.getItem('theme') === 'light') {
+    document.body.classList.add('light');
+    const btn = document.getElementById('theme-btn');
+    if (btn) btn.textContent = '🌙';
+  }
+})();
+
+async function initHeader() {
+  try {
+    const s = await fetch('/api/state').then(r => r.json());
+    const p = s.portfolio || {};
+    const mode = s.mode || 'Local Simulation';
+    const badge = document.getElementById('mode-badge');
+    badge.textContent = mode;
+    badge.className = 'badge ' + (mode.includes('Paper') ? 'badge-paper' : mode.includes('LIVE') ? 'badge-live' : 'badge-sim');
+    const dot = document.getElementById('market-dot');
+    const lbl = document.getElementById('market-label');
+    if (s.market_open === true)       { dot.className = 'market-dot market-open';   lbl.textContent = 'Market OPEN'; }
+    else if (s.market_open === false) { dot.className = 'market-dot market-closed'; lbl.textContent = 'Market CLOSED'; }
+    function fmt(v) { return v == null ? '—' : Math.abs(v) >= 1e6 ? (v/1e6).toFixed(2)+'M' : Math.abs(v) >= 1e3 ? (Math.abs(v)/1e3).toFixed(1)+'K' : Math.abs(v).toFixed(2); }
+    const hdrTotal = document.getElementById('hdr-total');
+    if (hdrTotal && p.total_value != null) hdrTotal.textContent = '$' + fmt(p.total_value);
+    const hdrDay = document.getElementById('hdr-day-pnl');
+    if (hdrDay) {
+      const dp = s.today && s.today.pnl != null ? s.today.pnl : null;
+      if (dp != null) { hdrDay.textContent = (dp >= 0 ? '+' : '-') + '$' + fmt(Math.abs(dp)); hdrDay.style.color = dp >= 0 ? 'var(--green)' : 'var(--red)'; }
+    }
+    const hdrUnreal = document.getElementById('hdr-unreal');
+    if (hdrUnreal && s.positions && s.positions.length > 0) {
+      const u = s.positions.reduce((sum, pos) => sum + (pos.pnl || 0), 0);
+      hdrUnreal.textContent = (u >= 0 ? '+' : '-') + '$' + fmt(Math.abs(u));
+      hdrUnreal.style.color = u > 0 ? 'var(--green)' : u < 0 ? 'var(--red)' : '';
+    }
+    const hdrTs = document.getElementById('hdr-ts');
+    if (hdrTs && s.timestamp) hdrTs.textContent = s.timestamp;
+  } catch(e) {}
+}
+initHeader();
 </script>
 </body>
 </html>"""
@@ -6521,14 +6636,45 @@ STATS_HTML = """<!doctype html>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
-.unav-header{background:#0f172a;border-bottom:1px solid #334155;padding:0 20px;height:52px;display:flex;align-items:center;position:sticky;top:0;z-index:10}
-.unav-logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
-.unav-bar{background:#0f172a;border-bottom:1px solid #334155;display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9}
-.unav-tab{background:none;border:none;border-bottom:2px solid transparent;color:#64748b;font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center;transition:color .15s;font-family:inherit}
-.unav-tab:hover{color:#e2e8f0}
-.unav-tab.active{color:#f1f5f9;border-bottom-color:#3b82f6}
-.unav-logout{margin-left:auto;color:#fca5a5!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:#7f1d1d!important;border:1px solid #991b1b!important;text-decoration:none;display:inline-flex;align-items:center;height:28px;white-space:nowrap}
+:root{
+  --bg0:#0d1520;--bg1:#111c2d;--bg2:#1a2540;--bg3:#1f2e47;
+  --border:rgba(255,255,255,0.07);--border-strong:rgba(255,255,255,0.13);
+  --text0:#f1f5f9;--text1:#94a3b8;--text2:#64748b;
+  --green:#22c55e;--red:#ef4444;--red-bg:rgba(239,68,68,.08);--blue:#3b82f6;
+}
+body{background:var(--bg0);color:var(--text1);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh;-webkit-font-smoothing:antialiased}
+/* ── Header ── */
+header{background:var(--bg1);border-bottom:1px solid var(--border);padding:0 20px;height:52px;display:flex;align-items:center;gap:0;position:sticky;top:0;z-index:10}
+.logo{font-size:14px;font-weight:700;color:var(--text0);letter-spacing:-.2px;white-space:nowrap;padding-right:14px;border-right:1px solid var(--border)}
+.badge{padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;margin-left:12px}
+.badge-paper{background:rgba(59,130,246,.18);color:#93c5fd;border:1px solid rgba(59,130,246,.3)}
+.badge-live{background:rgba(239,68,68,.18);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
+.badge-sim{background:rgba(100,116,139,.15);color:#94a3b8;border:1px solid var(--border)}
+.market-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px;flex-shrink:0}
+.market-open{background:var(--green);box-shadow:0 0 5px var(--green)}
+.market-closed{background:var(--red)}
+.market-unknown{background:#475569}
+#market-status{font-size:12px;color:var(--text1);white-space:nowrap;padding:0 14px;border-right:1px solid var(--border)}
+.hdr-stats{display:flex;align-items:stretch;height:100%}
+.hdr-stat{display:flex;flex-direction:column;justify-content:center;padding:0 14px;border-right:1px solid var(--border);min-width:0}
+.hdr-stat-lbl{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;line-height:1;margin-bottom:3px}
+.hdr-stat-val{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text0);white-space:nowrap}
+.hdr-right{margin-left:auto;display:flex;align-items:center;gap:6px;padding-left:12px}
+.ts{font-size:11px;color:var(--text2);white-space:nowrap}
+.btn-icon-refresh{background:none;border:none;color:var(--text1);font-size:20px;padding:0;min-height:unset;width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:pointer;line-height:1}
+.btn-icon-refresh:hover{color:var(--text0);background:var(--bg3)}
+.theme-toggle{background:none;border:1px solid var(--border);color:var(--text0);padding:0;border-radius:99px;font-size:16px;min-height:32px;width:36px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+/* ── Tab nav ── */
+.nav-tabs-bar{background:var(--bg1);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9}
+.nav-tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--text2);font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;font-family:inherit;min-height:unset;border-radius:0;transition:color .15s}
+.nav-tab:hover{color:var(--text1);background:none;border-color:transparent}
+.nav-tab.active{color:var(--text0);border-bottom-color:var(--blue)}
+.nav-tab-logout{margin-left:auto;color:var(--red)!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:var(--red-bg)!important;border:1px solid rgba(239,68,68,.25)!important;cursor:pointer;min-height:unset;white-space:nowrap;font-family:inherit}
+/* light mode */
+body.light{--bg0:#f8fafc;--bg1:#ffffff;--bg2:#f1f5f9;--bg3:#e2e8f0;--border:rgba(0,0,0,.1);--text0:#0f172a;--text1:#475569;--text2:#64748b}
+body.light header,body.light .nav-tabs-bar{background:#fff;border-bottom-color:#e2e8f0}
+body.light .nav-tab.active{color:#1e293b;border-bottom-color:#3b82f6}
+body.light .theme-toggle{border-color:#cbd5e1;color:#1e293b}
 main{padding:16px 20px;max-width:1200px;margin:0 auto}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:16px}
 .card{background:#1e293b;border-radius:10px;padding:14px 16px;border:1px solid #334155}
@@ -6590,15 +6736,32 @@ tr:hover td{background:#263044}
 </style>
 </head>
 <body>
-<div class="unav-header"><div class="unav-logo">Automatic Trading Engine</div></div>
-<nav class="unav-bar">
-  <a href="/dashboard" class="unav-tab">Dashboard</a>
-  <a href="/dashboard" class="unav-tab">Positions</a>
-  <a href="/dashboard" class="unav-tab">Watchlist</a>
-  <a href="/dashboard" class="unav-tab">Signals</a>
-  <a href="/dashboard" class="unav-tab">Trades</a>
-  <a href="/settings" class="unav-tab">Settings</a>
-  {% if auth %}<a href="/logout" class="unav-logout">Logout</a>{% endif %}
+<header>
+  <div class="logo">Automatic Trading Engine</div>
+  <span class="badge badge-sim" id="mode-badge">LOCAL SIMULATION</span>
+  <span id="market-status">
+    <span class="market-dot market-unknown" id="market-dot"></span>
+    <span id="market-label">Market —</span>
+  </span>
+  <div class="hdr-stats">
+    <div class="hdr-stat"><span class="hdr-stat-lbl">Total Value</span><span class="hdr-stat-val" id="hdr-total">—</span></div>
+    <div class="hdr-stat"><span class="hdr-stat-lbl">Day P&amp;L</span><span class="hdr-stat-val" id="hdr-day-pnl">—</span></div>
+    <div class="hdr-stat"><span class="hdr-stat-lbl">Unrealized</span><span class="hdr-stat-val" id="hdr-unreal">—</span></div>
+  </div>
+  <div class="hdr-right">
+    <span class="ts" id="hdr-ts"></span>
+    <button class="btn-icon-refresh" onclick="location.reload()" title="Refresh">↻</button>
+    <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
+  </div>
+</header>
+<nav class="nav-tabs-bar">
+  <button class="nav-tab" onclick="window.location='/dashboard'">Dashboard</button>
+  <button class="nav-tab" onclick="window.location='/dashboard'">Positions</button>
+  <button class="nav-tab" onclick="window.location='/dashboard'">Watchlist</button>
+  <button class="nav-tab" onclick="window.location='/dashboard'">Signals</button>
+  <button class="nav-tab" onclick="window.location='/dashboard'">Trades</button>
+  <button class="nav-tab" onclick="window.location='/settings'">Settings</button>
+  {% if auth %}<button class="nav-tab nav-tab-logout" onclick="window.location='/logout'">Logout</button>{% endif %}
 </nav>
 <main>
   <!-- Summary cards -->
@@ -7192,6 +7355,51 @@ async function runBacktest() {
 }
 
 loadBacktest();
+
+function toggleTheme() {
+  const light = document.body.classList.toggle('light');
+  localStorage.setItem('theme', light ? 'light' : 'dark');
+  document.getElementById('theme-btn').textContent = light ? '🌙' : '☀️';
+}
+(function initTheme() {
+  if (localStorage.getItem('theme') === 'light') {
+    document.body.classList.add('light');
+    const btn = document.getElementById('theme-btn');
+    if (btn) btn.textContent = '🌙';
+  }
+})();
+
+async function initHeader() {
+  try {
+    const s = await fetch('/api/state').then(r => r.json());
+    const p = s.portfolio || {};
+    const mode = s.mode || 'Local Simulation';
+    const badge = document.getElementById('mode-badge');
+    badge.textContent = mode;
+    badge.className = 'badge ' + (mode.includes('Paper') ? 'badge-paper' : mode.includes('LIVE') ? 'badge-live' : 'badge-sim');
+    const dot = document.getElementById('market-dot');
+    const lbl = document.getElementById('market-label');
+    if (s.market_open === true)       { dot.className = 'market-dot market-open';   lbl.textContent = 'Market OPEN'; }
+    else if (s.market_open === false) { dot.className = 'market-dot market-closed'; lbl.textContent = 'Market CLOSED'; }
+    function fmt(v) { return v == null ? '—' : Math.abs(v) >= 1e6 ? (v/1e6).toFixed(2)+'M' : Math.abs(v) >= 1e3 ? (Math.abs(v)/1e3).toFixed(1)+'K' : Math.abs(v).toFixed(2); }
+    const hdrTotal = document.getElementById('hdr-total');
+    if (hdrTotal && p.total_value != null) hdrTotal.textContent = '$' + fmt(p.total_value);
+    const hdrDay = document.getElementById('hdr-day-pnl');
+    if (hdrDay) {
+      const dp = s.today && s.today.pnl != null ? s.today.pnl : null;
+      if (dp != null) { hdrDay.textContent = (dp >= 0 ? '+' : '-') + '$' + fmt(Math.abs(dp)); hdrDay.style.color = dp >= 0 ? 'var(--green)' : 'var(--red)'; }
+    }
+    const hdrUnreal = document.getElementById('hdr-unreal');
+    if (hdrUnreal && s.positions && s.positions.length > 0) {
+      const u = s.positions.reduce((sum, pos) => sum + (pos.pnl || 0), 0);
+      hdrUnreal.textContent = (u >= 0 ? '+' : '-') + '$' + fmt(Math.abs(u));
+      hdrUnreal.style.color = u > 0 ? 'var(--green)' : u < 0 ? 'var(--red)' : '';
+    }
+    const hdrTs = document.getElementById('hdr-ts');
+    if (hdrTs && s.timestamp) hdrTs.textContent = s.timestamp;
+  } catch(e) {}
+}
+initHeader();
 
 // ── Service Worker (PWA) ──────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
