@@ -460,34 +460,115 @@ class TradingEngine:
                     logger.debug(f"  Risk rejected {symbol}: {rc.reason}")
 
             elif signal.action == "SELL" and self.portfolio.has_position(symbol):
-                if orb_active and (orb_st := self._orb_session.get(symbol)):
-                    orb_st.breakout = "down"
                 pos = self.portfolio.positions.get(symbol)
-                self.executor.execute_sell(
-                    symbol=symbol,
-                    price=current_price,
-                    reason=f"Signal: {', '.join(signal.reasons[:2])}",
-                    portfolio=self.portfolio,
-                )
-                if pos:
-                    pnl     = (current_price - pos.entry_price) * pos.shares
-                    pnl_pct = (current_price - pos.entry_price) / pos.entry_price
-                    self.notifier.trade_sell(
-                        symbol, pos.shares, current_price, pnl,
-                        f"Signal: {', '.join(signal.reasons[:2])}"
-                    )
-                    self.journal.log(
-                        action="SELL", symbol=symbol, shares=pos.shares,
+                if pos and pos.is_short:
+                    # Covering an existing short on a BUY signal is handled below
+                    pass
+                else:
+                    if orb_active and (orb_st := self._orb_session.get(symbol)):
+                        orb_st.breakout = "down"
+                    self.executor.execute_sell(
+                        symbol=symbol,
                         price=current_price,
                         reason=f"Signal: {', '.join(signal.reasons[:2])}",
-                        indicators=ind_snap, pnl=pnl, pnl_pct=pnl_pct,
+                        portfolio=self.portfolio,
                     )
-                    self.emailer.send_trade(
-                        action="SELL", symbol=symbol, shares=pos.shares,
-                        price=current_price, score=signal.score,
-                        reasons=signal.reasons, indicators=ind_snap,
-                        pnl=pnl, pnl_pct=pnl_pct,
-                    )
+                    if pos:
+                        pnl     = (current_price - pos.entry_price) * pos.shares
+                        pnl_pct = (current_price - pos.entry_price) / pos.entry_price
+                        self.notifier.trade_sell(
+                            symbol, pos.shares, current_price, pnl,
+                            f"Signal: {', '.join(signal.reasons[:2])}"
+                        )
+                        self.journal.log(
+                            action="SELL", symbol=symbol, shares=pos.shares,
+                            price=current_price,
+                            reason=f"Signal: {', '.join(signal.reasons[:2])}",
+                            indicators=ind_snap, pnl=pnl, pnl_pct=pnl_pct,
+                        )
+                        self.emailer.send_trade(
+                            action="SELL", symbol=symbol, shares=pos.shares,
+                            price=current_price, score=signal.score,
+                            reasons=signal.reasons, indicators=ind_snap,
+                            pnl=pnl, pnl_pct=pnl_pct,
+                        )
+
+            # ── Cover short on BUY signal ─────────────────────────────────────
+            elif signal.action == "BUY" and self.portfolio.has_position(symbol):
+                pos = self.portfolio.positions.get(symbol)
+                if pos and pos.is_short:
+                    cover_reason = f"Cover short: {', '.join(signal.reasons[:2])}"
+                    executor_cover = getattr(self.executor, "execute_cover", None)
+                    if executor_cover:
+                        trade = executor_cover(symbol, current_price, cover_reason, self.portfolio)
+                    else:
+                        trade = self.executor.execute_sell(symbol, current_price, cover_reason, self.portfolio)
+                    if trade and trade.pnl is not None:
+                        self.notifier.trade_sell(symbol, trade.shares, current_price, trade.pnl, cover_reason)
+                        self.journal.log(
+                            action="SELL", symbol=symbol, shares=trade.shares,
+                            price=current_price, reason=cover_reason,
+                            indicators=ind_snap, pnl=trade.pnl, pnl_pct=trade.pnl_pct,
+                        )
+                        self.emailer.send_trade(
+                            action="SELL", symbol=symbol, shares=trade.shares,
+                            price=current_price, score=signal.score,
+                            reasons=signal.reasons, indicators=ind_snap,
+                            pnl=trade.pnl, pnl_pct=trade.pnl_pct,
+                        )
+
+            # ── Open short position on SELL signal (no existing position) ─────
+            elif signal.action == "SELL" and not self.portfolio.has_position(symbol):
+                allow_short = getattr(self.config, "use_short_selling", False)
+                if not allow_short or orb_active:
+                    continue
+                regime = self._regime_result.regime if self._regime_result else None
+                allowed_regimes = getattr(self.config, "short_regimes", ["BEAR"])
+                if regime not in allowed_regimes:
+                    logger.debug(f"  Short skipped {symbol}: regime={regime} not in {allowed_regimes}")
+                    continue
+                if self.earnings_cal and self.earnings_cal.has_upcoming_earnings(symbol):
+                    logger.debug(f"  Earnings protection: skipping SHORT {symbol}")
+                    continue
+
+                sl_pct = getattr(self.config, "short_stop_loss_pct", 0.05)
+                tp_pct = getattr(self.config, "short_take_profit_pct", 0.10)
+                short_sl = round(current_price * (1 + sl_pct), 2)
+                short_tp = round(current_price * (1 - tp_pct), 2)
+
+                rc = self.risk.check_buy(
+                    symbol=symbol,
+                    price=current_price,
+                    portfolio_value=portfolio_value,
+                    cash=self.portfolio.cash,
+                    open_positions=self.portfolio.open_position_count(),
+                    daily_pnl_pct=daily_pnl,
+                    signal_confidence=signal.confidence,
+                    sector_positions=sector_position_count(symbol, self.portfolio.positions),
+                    sector_value_pct=self._sector_value_pct(symbol, prices),
+                    atr_pct=ind.atr_pct,
+                )
+                if rc.approved:
+                    regime_mult = _REGIME_SIZE_MULT.get(regime, 1.0)
+                    shares = rc.max_shares * regime_mult
+                    executor_short = getattr(self.executor, "execute_short", None)
+                    if executor_short:
+                        success = executor_short(
+                            symbol=symbol, shares=shares, price=current_price,
+                            stop_loss=short_sl, take_profit=short_tp,
+                            reason=f"Short: {', '.join(signal.reasons[:2])}",
+                            portfolio=self.portfolio,
+                        )
+                    else:
+                        success = False
+                    if success:
+                        self.journal.log(
+                            action="BUY", symbol=symbol, shares=shares,
+                            price=current_price,
+                            reason=f"SHORT {', '.join(signal.reasons[:2])}",
+                            indicators=ind_snap,
+                        )
+                        logger.info(f"  SHORT opened: {symbol} {shares:.0f} @ ${current_price:.2f}")
 
         if results:
             top5 = sorted(results.items(), key=lambda kv: abs(kv[1].score), reverse=True)[:5]
@@ -901,13 +982,48 @@ class TradingEngine:
         return blocked
 
     def _check_exit_conditions(self, prices: Dict[str, float]) -> None:
-        exits = []
+        partial_exits = []   # (symbol, shares, price, reason) — partial sells
+        exits = []           # (symbol, price, reason) — full closes
+
         for symbol, pos in self.portfolio.positions.items():
             price = prices.get(symbol, pos.entry_price)
+
+            if pos.is_short:
+                # Short: profit when price falls; stop is above entry
+                if not pos.partial_exit_done and pos.take_profit < pos.entry_price:
+                    halfway = pos.entry_price - 0.5 * (pos.entry_price - pos.take_profit)
+                    if price <= halfway and pos.shares >= 2:
+                        half_shares = pos.shares / 2
+                        partial_exits.append((symbol, half_shares, price, "Partial take-profit (50% ladder)"))
+                        pos.partial_exit_done = True
+                        pos.stop_loss = pos.entry_price  # move stop to breakeven
+                if price >= pos.stop_loss:
+                    exits.append((symbol, price, "Short stop triggered"))
+                elif price <= pos.take_profit:
+                    exits.append((symbol, price, "Short take profit triggered"))
+                continue
+
             self.risk.update_trailing_stop(pos, price)
 
-            # Breakeven stop: when price reaches halfway to take-profit, move stop to entry
-            if pos.take_profit > pos.entry_price:
+            # Partial ladder exit: at 50% of the way to TP, sell half and set breakeven stop
+            use_ladder = getattr(self.config, "use_partial_exits", True)
+            if (
+                use_ladder
+                and not pos.partial_exit_done
+                and pos.take_profit > pos.entry_price
+                and pos.shares >= 2
+            ):
+                halfway = pos.entry_price + 0.5 * (pos.take_profit - pos.entry_price)
+                if price >= halfway:
+                    half_shares = pos.initial_shares / 2
+                    partial_exits.append((symbol, half_shares, price, "Partial take-profit (50% ladder)"))
+                    pos.partial_exit_done = True
+                    # Move stop to breakeven after locking in half
+                    if pos.stop_loss < pos.entry_price:
+                        pos.stop_loss = pos.entry_price
+                        logger.info(f"  Breakeven stop set for {symbol} @ ${pos.entry_price:.2f}")
+            elif not use_ladder and pos.take_profit > pos.entry_price:
+                # Legacy: just move stop to breakeven at halfway (no partial sell)
                 halfway = pos.entry_price + 0.5 * (pos.take_profit - pos.entry_price)
                 if price >= halfway and pos.stop_loss < pos.entry_price:
                     pos.stop_loss = pos.entry_price
@@ -921,12 +1037,38 @@ class TradingEngine:
                 exits.append((symbol, price, stop_reason))
             elif price >= pos.take_profit:
                 exits.append((symbol, price, "Take profit triggered"))
+
+        # Execute partial exits first (before full closes so positions still exist)
+        for symbol, shares, price, reason in partial_exits:
+            if symbol not in self.portfolio.positions:
+                continue
+            pos = self.portfolio.positions[symbol]
+            trade = self.portfolio.partial_sell(symbol, shares, price, reason)
+            if trade:
+                self.executor.execute_partial_sell(symbol, shares, price, reason, self.portfolio)
+                pnl = trade.pnl or 0.0
+                pnl_pct = trade.pnl_pct or 0.0
+                logger.info(
+                    f"  [PARTIAL] {symbol}: sold {trade.shares:.0f} shares @ ${price:.2f}"
+                    f"  P&L +${pnl:,.2f} ({pnl_pct * 100:.2f}%)  remaining={pos.shares:.0f}"
+                )
+                self.notifier.trade_sell(symbol, trade.shares, price, pnl, reason)
+                self.journal.log(
+                    action="SELL", symbol=symbol, shares=trade.shares,
+                    price=price, reason=reason, pnl=pnl, pnl_pct=pnl_pct,
+                )
+                self.emailer.send_trade(
+                    action="SELL", symbol=symbol, shares=trade.shares,
+                    price=price, score=0.0, reasons=[reason],
+                    pnl=pnl, pnl_pct=pnl_pct,
+                )
+
         for symbol, price, reason in exits:
             pos = self.portfolio.positions.get(symbol)
             self.executor.execute_sell(symbol, price, reason, self.portfolio)
             if pos:
-                pnl     = (price - pos.entry_price) * pos.shares
-                pnl_pct = (price - pos.entry_price) / pos.entry_price
+                pnl     = (price - pos.entry_price) * pos.shares if not pos.is_short else (pos.entry_price - price) * pos.shares
+                pnl_pct = (price - pos.entry_price) / pos.entry_price if not pos.is_short else (pos.entry_price - price) / pos.entry_price
                 self.notifier.trade_sell(symbol, pos.shares, price, pnl, reason)
                 self.journal.log(
                     action="SELL",

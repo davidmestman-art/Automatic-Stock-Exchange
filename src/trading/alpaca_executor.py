@@ -419,6 +419,116 @@ class AlpacaExecutor:
             logger.error(f"[{self._tag} SELL FAILED] {symbol}: {e}")
             return None
 
+    def execute_partial_sell(
+        self,
+        symbol: str,
+        shares: float,
+        price: float,
+        reason: str,
+        portfolio: Portfolio,
+    ) -> bool:
+        """Sell a portion of an existing long position (partial profit-taking)."""
+        import math
+        qty = math.floor(shares)
+        if qty < 1:
+            return False
+        try:
+            order = self._call_with_retry(
+                self.trading.submit_order,
+                MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY,
+                ),
+            )
+            logger.info(
+                f"[{self._tag} PARTIAL] {qty} {symbol:6s} @ ~${price:.2f}"
+                f" | order={order.id}  {reason}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"[{self._tag} PARTIAL FAILED] {symbol}: {e}")
+            return False
+
+    def execute_short(
+        self,
+        symbol: str,
+        shares: float,
+        price: float,
+        stop_loss: float,
+        take_profit: float,
+        reason: str,
+        portfolio: Portfolio,
+    ) -> bool:
+        """Open a short position via a bracket sell order."""
+        import math
+        qty = math.floor(shares)
+        if qty < 1:
+            logger.warning(f"[{self._tag} SHORT SKIP] {symbol}: rounds to 0 shares")
+            return False
+        try:
+            # For shorts: stop_loss > entry, take_profit < entry
+            order = self._call_with_retry(
+                self.trading.submit_order,
+                MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY,
+                    order_class=OrderClass.BRACKET,
+                    stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+                    take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
+                ),
+            )
+            portfolio.buy(symbol, qty, price, stop_loss, take_profit, reason, is_short=True)
+            logger.info(
+                f"[{self._tag} SHORT] {qty} {symbol:6s} @ ~${price:.2f}"
+                f" | SL ${stop_loss:.2f}  TP ${take_profit:.2f}"
+                f" | order={order.id}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"[{self._tag} SHORT FAILED] {symbol}: {e}")
+            return False
+
+    def execute_cover(
+        self,
+        symbol: str,
+        price: float,
+        reason: str,
+        portfolio: Portfolio,
+    ) -> Optional[Trade]:
+        """Cover (close) a short position with a market buy."""
+        if symbol not in portfolio.positions:
+            return None
+        qty = math.floor(portfolio.positions[symbol].shares)
+        if qty < 1:
+            return portfolio.sell(symbol, price, reason)
+        try:
+            self._cancel_open_orders(symbol)
+            order = self._call_with_retry(
+                self.trading.submit_order,
+                MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                ),
+            )
+            trade = portfolio.sell(symbol, price, reason)
+            if trade and trade.pnl is not None:
+                sign = "+" if trade.pnl >= 0 else ""
+                logger.info(
+                    f"[{self._tag} COVER] {qty} {symbol:6s} @ ~${price:.2f}"
+                    f" | P&L {sign}${trade.pnl:,.2f} ({sign}{trade.pnl_pct * 100:.2f}%)"
+                    f" | order={order.id}  {reason}"
+                )
+            return trade
+        except Exception as e:
+            logger.error(f"[{self._tag} COVER FAILED] {symbol}: {e}")
+            return None
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _cancel_open_orders(self, symbol: str) -> None:

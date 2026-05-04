@@ -88,7 +88,7 @@ class TradingConfig:
     universe_min_avg_volume: int   = 500_000          # shares / day
     universe_min_price:      float = 10.0
     universe_max_price:      float = 1_000.0
-    universe_min_market_cap: float = 2_000_000_000.0  # $2 B
+    universe_min_market_cap: float = 100_000_000_000.0  # $100 B
     universe_top_n:          int   = 150
     universe_include_etfs:   bool  = True
     universe_use_alpaca:     bool  = True             # attempt Alpaca assets API
@@ -126,6 +126,15 @@ class TradingConfig:
 
     # ── Momentum signals ──────────────────────────────────────────────────────
     use_momentum_signals: bool = True   # ROC + StochRSI component in signal scoring
+
+    # ── Partial profit-taking (ladder exits) ──────────────────────────────────
+    use_partial_exits: bool = True     # take 50% off at 50% of TP distance
+
+    # ── Short selling ─────────────────────────────────────────────────────────
+    use_short_selling: bool = False    # disabled by default; enable for bear-market shorting
+    short_stop_loss_pct: float = 0.05  # stop = entry * (1 + pct)
+    short_take_profit_pct: float = 0.10  # TP = entry * (1 - pct)
+    short_regimes: list = field(default_factory=lambda: ["BEAR"])  # regimes where shorting allowed
 
     # ── ML signal ranking ─────────────────────────────────────────────────────
     use_ml_ranking: bool = True

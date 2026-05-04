@@ -12,6 +12,20 @@ from .metrics import BacktestMetrics, compute_metrics
 
 logger = logging.getLogger(__name__)
 
+# Realistic friction model
+_SLIPPAGE_PCT = 0.0005   # 0.05% per-side market-impact slippage
+_COMM_PER_SHARE = 0.005  # $0.005/share (Alpaca / IBKR retail)
+_COMM_MIN = 1.00         # minimum commission per order
+
+
+def _fill_price(price: float, side: str) -> float:
+    """Apply half-spread slippage: buys pay slightly more, sells receive slightly less."""
+    return price * (1 + _SLIPPAGE_PCT) if side == "BUY" else price * (1 - _SLIPPAGE_PCT)
+
+
+def _commission(shares: float) -> float:
+    return max(_COMM_MIN, shares * _COMM_PER_SHARE)
+
 
 class Backtester:
     def __init__(self, config):
@@ -68,6 +82,7 @@ class Backtester:
             self.config.ema_slow, self.config.macd_slow, self.config.bb_period
         ) + 5
         equity_curve = [self.config.initial_capital]
+        total_commissions = 0.0
 
         for date in trading_days:
             prices: Dict[str, float] = {}
@@ -79,16 +94,45 @@ class Backtester:
             if not prices:
                 continue
 
-            # Stop-loss / take-profit exits
+            # Stop-loss / take-profit exits (use slippage-adjusted fill)
             for symbol in list(portfolio.positions.keys()):
                 if symbol not in prices:
                     continue
                 pos = portfolio.positions[symbol]
                 p = prices[symbol]
-                if risk.check_stop_loss(pos.entry_price, p):
-                    portfolio.sell(symbol, p, "Stop loss")
+
+                # Partial ladder exit at halfway to TP
+                use_ladder = getattr(self.config, "use_partial_exits", True)
+                if (
+                    use_ladder
+                    and not pos.partial_exit_done
+                    and pos.take_profit > pos.entry_price
+                    and pos.shares >= 2
+                ):
+                    halfway = pos.entry_price + 0.5 * (pos.take_profit - pos.entry_price)
+                    if p >= halfway:
+                        import math
+                        half_shares = math.floor(pos.initial_shares / 2)
+                        if half_shares >= 1:
+                            fill = _fill_price(p, "SELL")
+                            comm = _commission(half_shares)
+                            portfolio.partial_sell(symbol, half_shares, fill - comm / half_shares,
+                                                   "Partial take-profit (50% ladder)")
+                            total_commissions += comm
+                            pos.partial_exit_done = True
+                            if pos.stop_loss < pos.entry_price:
+                                pos.stop_loss = pos.entry_price
+
+                if risk.check_stop_loss(pos.entry_price, p, pos):
+                    fill = _fill_price(p, "SELL")
+                    comm = _commission(pos.shares)
+                    total_commissions += comm
+                    portfolio.sell(symbol, fill - comm / max(pos.shares, 1), "Stop loss")
                 elif risk.check_take_profit(pos.entry_price, p):
-                    portfolio.sell(symbol, p, "Take profit")
+                    fill = _fill_price(p, "SELL")
+                    comm = _commission(pos.shares)
+                    total_commissions += comm
+                    portfolio.sell(symbol, fill - comm / max(pos.shares, 1), "Take profit")
 
             # Signal-driven entries / exits
             for symbol, df in all_data.items():
@@ -127,12 +171,21 @@ class Backtester:
                         signal_confidence=signal.confidence,
                     )
                     if rc.approved:
-                        sl = risk.stop_loss_price(prices[symbol])
-                        tp = risk.take_profit_price(prices[symbol])
-                        portfolio.buy(symbol, rc.max_shares, prices[symbol], sl, tp, "Signal")
+                        fill = _fill_price(prices[symbol], "BUY")
+                        comm = _commission(rc.max_shares)
+                        total_commissions += comm
+                        # Deduct commission from cash before buying
+                        if comm < portfolio.cash:
+                            portfolio.cash -= comm
+                        sl = risk.stop_loss_price(fill)
+                        tp = risk.take_profit_price(fill)
+                        portfolio.buy(symbol, rc.max_shares, fill, sl, tp, "Signal")
 
                 elif signal.action == "SELL" and portfolio.has_position(symbol):
-                    portfolio.sell(symbol, prices[symbol], "Signal sell")
+                    fill = _fill_price(prices[symbol], "SELL")
+                    comm = _commission(portfolio.positions[symbol].shares)
+                    total_commissions += comm
+                    portfolio.sell(symbol, fill - comm / max(portfolio.positions[symbol].shares, 1), "Signal sell")
 
             # Snapshot portfolio value
             port_val = (
@@ -148,5 +201,6 @@ class Backtester:
 
         days = len(trading_days)
         metrics = compute_metrics(equity_curve, portfolio.trades, days)
+        logger.info(f"  Total commissions paid: ${total_commissions:,.2f}")
         logger.info(f"\n{metrics}")
         return metrics
