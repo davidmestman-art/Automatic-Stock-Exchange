@@ -12,10 +12,15 @@ class Position:
     stop_loss: float
     take_profit: float
     highest_price: float = 0.0   # tracks new highs for trailing stop
+    partial_exit_done: bool = False   # True after first ladder exit fires
+    initial_shares: float = 0.0      # shares at entry (before any partial exits)
+    is_short: bool = False           # True for short positions
 
     def __post_init__(self):
         if self.highest_price == 0.0:
             self.highest_price = self.entry_price
+        if self.initial_shares == 0.0:
+            self.initial_shares = self.shares
 
     @property
     def cost_basis(self) -> float:
@@ -74,11 +79,13 @@ class Portfolio:
         take_profit: float,
         reason: str,
         indicator_snapshot: Optional[dict] = None,
+        is_short: bool = False,
     ) -> bool:
         cost = shares * price
-        if cost > self.cash:
+        if not is_short and cost > self.cash:
             return False
-        self.cash -= cost
+        if not is_short:
+            self.cash -= cost
         self.positions[symbol] = Position(
             symbol=symbol,
             shares=shares,
@@ -86,6 +93,8 @@ class Portfolio:
             entry_time=datetime.now(),
             stop_loss=stop_loss,
             take_profit=take_profit,
+            initial_shares=shares,
+            is_short=is_short,
         )
         self.trades.append(
             Trade(
@@ -100,6 +109,41 @@ class Portfolio:
         )
         return True
 
+    def partial_sell(
+        self,
+        symbol: str,
+        shares_to_sell: float,
+        price: float,
+        reason: str,
+        indicator_snapshot: Optional[dict] = None,
+    ) -> Optional[Trade]:
+        """Sell a fraction of a position without closing it entirely."""
+        if symbol not in self.positions:
+            return None
+        pos = self.positions[symbol]
+        import math
+        shares_to_sell = min(math.floor(shares_to_sell), math.floor(pos.shares))
+        if shares_to_sell < 1:
+            return None
+        proceeds = shares_to_sell * price
+        self.cash += proceeds
+        pnl = proceeds - shares_to_sell * pos.entry_price
+        pnl_pct = (price - pos.entry_price) / pos.entry_price
+        pos.shares -= shares_to_sell
+        trade = Trade(
+            symbol=symbol,
+            action="SELL",
+            shares=shares_to_sell,
+            price=price,
+            timestamp=datetime.now(),
+            reason=reason,
+            pnl=pnl,
+            pnl_pct=pnl_pct,
+            indicator_snapshot=indicator_snapshot,
+        )
+        self.trades.append(trade)
+        return trade
+
     def sell(
         self,
         symbol: str,
@@ -110,10 +154,16 @@ class Portfolio:
         if symbol not in self.positions:
             return None
         pos = self.positions.pop(symbol)
-        proceeds = pos.shares * price
-        self.cash += proceeds
-        pnl = proceeds - pos.cost_basis
-        pnl_pct = (price - pos.entry_price) / pos.entry_price
+        if pos.is_short:
+            # Cover: P&L = (entry - cover_price) * shares
+            pnl = (pos.entry_price - price) * pos.shares
+            pnl_pct = (pos.entry_price - price) / pos.entry_price
+            self.cash += pos.entry_price * pos.shares - pnl  # return collateral adjusted
+        else:
+            proceeds = pos.shares * price
+            self.cash += proceeds
+            pnl = proceeds - pos.cost_basis
+            pnl_pct = (price - pos.entry_price) / pos.entry_price
         trade = Trade(
             symbol=symbol,
             action="SELL",

@@ -127,6 +127,15 @@ class TradingConfig:
     # ── Momentum signals ──────────────────────────────────────────────────────
     use_momentum_signals: bool = True   # ROC + StochRSI component in signal scoring
 
+    # ── Partial profit-taking (ladder exits) ──────────────────────────────────
+    use_partial_exits: bool = True     # take 50% off at 50% of TP distance
+
+    # ── Short selling ─────────────────────────────────────────────────────────
+    use_short_selling: bool = False    # disabled by default; enable for bear-market shorting
+    short_stop_loss_pct: float = 0.05  # stop = entry * (1 + pct)
+    short_take_profit_pct: float = 0.10  # TP = entry * (1 - pct)
+    short_regimes: list = field(default_factory=lambda: ["BEAR"])  # regimes where shorting allowed
+
     # ── ML signal ranking ─────────────────────────────────────────────────────
     use_ml_ranking: bool = True
     ml_min_samples: int = 20
