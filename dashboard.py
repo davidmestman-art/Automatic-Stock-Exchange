@@ -5384,129 +5384,171 @@ SETTINGS_HTML = """<!doctype html>
 <title>Settings — Automatic Trading Engine</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
+/* ── Design tokens (same as main app) ────────────────────────────────────── */
 :root{
-  --bg:#07090f;--surface:#0d1220;--surface2:#121a2e;
-  --border:#1a2540;--border2:#223060;
-  --accent:#2563eb;--accent2:#3b82f6;
-  --green:#10b981;--amber:#f59e0b;
-  --text:#eaf0fb;--text2:#8898b8;--text3:#4a5a78;
+  --bg0:#0d1520;--bg1:#111c2d;--bg2:#1a2540;--bg3:#1f2e47;
+  --border:rgba(255,255,255,0.07);--border-strong:rgba(255,255,255,0.13);
+  --text0:#f1f5f9;--text1:#94a3b8;--text2:#64748b;
+  --green:#22c55e;--green-dim:#166534;--green-bg:rgba(34,197,94,.08);
+  --red:#ef4444;--red-dim:#7f1d1d;--red-bg:rgba(239,68,68,.08);
+  --blue:#3b82f6;--radius:8px;
 }
-body{background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;
-     -webkit-font-smoothing:antialiased;min-height:100vh}
+body{background:var(--bg0);color:var(--text1);font-family:'Inter','Segoe UI',system-ui,sans-serif;font-size:13px;-webkit-font-smoothing:antialiased;min-height:100vh}
 a{color:inherit;text-decoration:none}
-/* Unified nav */
-.unav-header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 20px;height:52px;display:flex;align-items:center;position:sticky;top:0;z-index:10}
-.unav-logo{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px}
-.unav-bar{background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9}
-.unav-tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--text2);font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center;transition:color .15s;font-family:inherit}
-.unav-tab:hover{color:var(--text)}
-.unav-tab.active{color:var(--text);border-bottom-color:var(--accent2)}
-.unav-logout{margin-left:auto;color:#fca5a5!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:#7f1d1d!important;border:1px solid #991b1b!important;text-decoration:none;display:inline-flex;align-items:center;height:28px;white-space:nowrap}
-/* Page */
-.page{max-width:860px;margin:0 auto;padding:40px 24px}
-.page-title{font-size:26px;font-weight:700;letter-spacing:-.5px;margin-bottom:6px}
-.page-sub{font-size:14px;color:var(--text2);margin-bottom:40px}
+/* ── Header ──────────────────────────────────────────────────────────────── */
+header{background:var(--bg1);border-bottom:1px solid var(--border);padding:0 20px;height:52px;display:flex;align-items:center;gap:0;position:sticky;top:0;z-index:10;overflow:hidden}
+.logo{font-size:14px;font-weight:700;color:var(--text0);letter-spacing:-.2px;white-space:nowrap;padding-right:14px;border-right:1px solid var(--border)}
+.badge{padding:2px 8px;border-radius:99px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;margin-left:12px}
+.badge-paper{background:rgba(59,130,246,.18);color:#93c5fd;border:1px solid rgba(59,130,246,.3)}
+.badge-live{background:rgba(239,68,68,.18);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
+.badge-sim{background:rgba(100,116,139,.15);color:#94a3b8;border:1px solid var(--border)}
+.market-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px;flex-shrink:0}
+.market-open{background:var(--green);box-shadow:0 0 5px var(--green)}
+.market-closed{background:var(--red)}
+.market-unknown{background:#475569}
+#market-status{font-size:12px;color:var(--text1);white-space:nowrap;padding:0 14px;border-right:1px solid var(--border)}
+.hdr-stats{display:flex;align-items:stretch;height:100%}
+.hdr-stat{display:flex;flex-direction:column;justify-content:center;padding:0 14px;border-right:1px solid var(--border);min-width:0}
+.hdr-stat-lbl{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;line-height:1;margin-bottom:3px}
+.hdr-stat-val{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text0);white-space:nowrap}
+.hdr-right{margin-left:auto;display:flex;align-items:center;gap:6px;padding-left:12px}
+.ts{font-size:11px;color:var(--text2);white-space:nowrap}
+/* ── Tab navigation bar ──────────────────────────────────────────────────── */
+.nav-tabs-bar{background:var(--bg1);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;position:sticky;top:52px;z-index:9}
+.nav-tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--text2);font-size:12px;font-weight:600;padding:0 14px;height:40px;cursor:pointer;white-space:nowrap;font-family:inherit;min-height:unset;border-radius:0;transition:color .15s}
+.nav-tab:hover{color:var(--text1);background:none;border-color:transparent}
+.nav-tab.active{color:var(--text0);border-bottom-color:var(--blue)}
+.nav-tab-logout{margin-left:auto;color:var(--red)!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:var(--red-bg)!important;border:1px solid rgba(239,68,68,.25)!important;cursor:pointer;min-height:unset;white-space:nowrap;font-family:inherit}
+/* ── Settings content ────────────────────────────────────────────────────── */
+.settings-content{max-width:860px;margin:0 auto;padding:28px 20px}
+.page-title{font-size:26px;font-weight:700;letter-spacing:-.5px;margin-bottom:6px;color:var(--text0)}
+.page-sub{font-size:14px;color:var(--text1);margin-bottom:40px}
 /* Profile cards */
 .profiles{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:40px}
 @media(max-width:640px){.profiles{grid-template-columns:1fr}}
-.profile-card{background:var(--surface);border:2px solid var(--border);border-radius:14px;
+.profile-card{background:var(--bg1);border:2px solid var(--border);border-radius:14px;
               padding:26px 24px;cursor:pointer;transition:all .2s;position:relative;user-select:none}
-.profile-card:hover{border-color:var(--border2);background:var(--surface2);transform:translateY(-2px)}
-.profile-card.selected{border-color:var(--card-color,var(--accent));
-                        box-shadow:0 0 0 1px var(--card-color,var(--accent)),
-                                   0 0 24px color-mix(in srgb,var(--card-color,var(--accent)) 20%,transparent)}
+.profile-card:hover{border-color:var(--border-strong);background:var(--bg2);transform:translateY(-2px)}
+.profile-card.selected{border-color:var(--card-color,var(--blue));
+                        box-shadow:0 0 0 1px var(--card-color,var(--blue)),
+                                   0 0 24px color-mix(in srgb,var(--card-color,var(--blue)) 20%,transparent)}
 .profile-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;
-              font-size:22px;margin-bottom:18px;background:color-mix(in srgb,var(--card-color,var(--accent)) 15%,transparent)}
-.profile-name{font-size:17px;font-weight:700;margin-bottom:6px;color:var(--text)}
-.profile-tagline{font-size:12px;color:var(--text2);margin-bottom:18px;line-height:1.5}
+              font-size:22px;margin-bottom:18px;background:color-mix(in srgb,var(--card-color,var(--blue)) 15%,transparent)}
+.profile-name{font-size:17px;font-weight:700;margin-bottom:6px;color:var(--text0)}
+.profile-tagline{font-size:12px;color:var(--text1);margin-bottom:18px;line-height:1.5}
 .profile-params{display:flex;flex-direction:column;gap:7px}
 .param-row{display:flex;justify-content:space-between;align-items:center;font-size:12px}
-.param-label{color:var(--text3)}
-.param-val{color:var(--text2);font-weight:600}
-.selected-badge{position:absolute;top:14px;right:14px;background:var(--card-color,var(--accent));
+.param-label{color:var(--text2)}
+.param-val{color:var(--text1);font-weight:600}
+.selected-badge{position:absolute;top:14px;right:14px;background:var(--card-color,var(--blue));
                 color:#fff;font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;
                 letter-spacing:.5px;display:none}
 .profile-card.selected .selected-badge{display:block}
 /* Save button */
 .save-row{display:flex;align-items:center;gap:14px;margin-bottom:40px}
-.btn-save{padding:11px 32px;background:var(--accent);color:#fff;border:none;border-radius:8px;
+.btn-save{padding:11px 32px;background:var(--blue);color:#fff;border:none;border-radius:8px;
           font-size:14px;font-weight:700;cursor:pointer;transition:all .15s}
-.btn-save:hover{background:var(--accent2)}
+.btn-save:hover{background:#2563eb}
 .btn-save:disabled{opacity:.5;cursor:default}
 .save-msg{font-size:13px;color:var(--green);display:none}
 /* Detail table */
-.detail-wrap{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden}
-.detail-hdr{padding:14px 20px;font-size:13px;font-weight:700;color:var(--text2);
-            background:var(--surface2);border-bottom:1px solid var(--border);letter-spacing:.4px}
+.detail-wrap{background:var(--bg1);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.detail-hdr{padding:14px 20px;font-size:13px;font-weight:700;color:var(--text1);
+            background:var(--bg2);border-bottom:1px solid var(--border);letter-spacing:.4px}
 .detail-table{width:100%;border-collapse:collapse}
 .detail-table th,.detail-table td{padding:11px 20px;font-size:13px;text-align:left}
-.detail-table th{color:var(--text3);font-weight:600;border-bottom:1px solid var(--border)}
-.detail-table td{border-bottom:1px solid rgba(26,37,64,.5)}
+.detail-table th{color:var(--text2);font-weight:600;border-bottom:1px solid var(--border)}
+.detail-table td{border-bottom:1px solid var(--border)}
 .detail-table tr:last-child td{border-bottom:none}
-.detail-table td:last-child{text-align:right;font-weight:600;color:var(--text)}
+.detail-table td:last-child{text-align:right;font-weight:600;color:var(--text0)}
 td.diff-up{color:#6ee7b7}
 td.diff-dn{color:#f87171}
 /* Email section */
-.section-title{font-size:18px;font-weight:700;margin:40px 0 6px;letter-spacing:-.3px}
-.section-sub{font-size:13px;color:var(--text2);margin-bottom:20px}
-.email-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px;
+.section-title{font-size:18px;font-weight:700;margin:40px 0 6px;letter-spacing:-.3px;color:var(--text0)}
+.section-sub{font-size:13px;color:var(--text1);margin-bottom:20px}
+.email-card{background:var(--bg1);border:1px solid var(--border);border-radius:14px;padding:24px;
             display:flex;align-items:center;justify-content:space-between;gap:16px}
 .email-info{flex:1}
-.email-title{font-size:15px;font-weight:700;margin-bottom:4px}
-.email-desc{font-size:12px;color:var(--text2);line-height:1.5}
+.email-title{font-size:15px;font-weight:700;margin-bottom:4px;color:var(--text0)}
+.email-desc{font-size:12px;color:var(--text1);line-height:1.5}
 .email-unconfigured{font-size:12px;color:#f59e0b;margin-top:8px;padding:8px 12px;
                      background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);
                      border-radius:6px;display:inline-flex;align-items:center;gap:6px}
 /* Alpaca key form */
-.alpaca-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px;margin-bottom:16px}
+.alpaca-card{background:var(--bg1);border:1px solid var(--border);border-radius:14px;padding:24px;margin-bottom:16px}
 .alpaca-row{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
-.alpaca-label{font-size:12px;color:var(--text2);font-weight:600}
-.alpaca-input{background:#07090f;border:1px solid var(--border2);border-radius:8px;padding:10px 14px;
-              color:var(--text);font-size:13px;font-family:monospace;width:100%;outline:none}
-.alpaca-input:focus{border-color:var(--accent)}
+.alpaca-label{font-size:12px;color:var(--text1);font-weight:600}
+.alpaca-input{background:var(--bg0);border:1px solid var(--border-strong);border-radius:8px;padding:10px 14px;
+              color:var(--text0);font-size:13px;font-family:monospace;width:100%;outline:none}
+.alpaca-input:focus{border-color:var(--blue)}
 .alpaca-mode{display:flex;gap:12px;margin-bottom:16px}
-.alpaca-mode label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text2);cursor:pointer}
+.alpaca-mode label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text1);cursor:pointer}
 .alpaca-status{font-size:12px;margin-top:12px;padding:8px 12px;border-radius:6px;display:none}
 .alpaca-status.ok{background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.25);color:#34d399}
 .alpaca-status.err{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#f87171}
 /* Toggle switch */
 .toggle-wrap{display:flex;align-items:center;gap:10px;flex-shrink:0}
-.toggle-label{font-size:12px;color:var(--text2);min-width:36px;text-align:right}
+.toggle-label{font-size:12px;color:var(--text1);min-width:36px;text-align:right}
 /* Universe section */
-.universe-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px}
+.universe-card{background:var(--bg1);border:1px solid var(--border);border-radius:14px;padding:24px}
 .universe-meta{display:flex;flex-wrap:wrap;gap:20px;margin-bottom:18px}
 .universe-stat{display:flex;flex-direction:column;gap:3px}
-.universe-stat-val{font-size:22px;font-weight:700;color:var(--text)}
-.universe-stat-lbl{font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px}
+.universe-stat-val{font-size:22px;font-weight:700;color:var(--text0)}
+.universe-stat-lbl{font-size:11px;color:var(--text1);text-transform:uppercase;letter-spacing:.5px}
 .universe-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
-.universe-chip{background:var(--surface2);border:1px solid var(--border2);border-radius:6px;
-               padding:4px 10px;font-size:12px;font-weight:600;color:var(--text);font-family:monospace}
-.universe-note{font-size:11px;color:var(--text3);margin-top:14px}
-.universe-loading{font-size:13px;color:var(--text2)}
+.universe-chip{background:var(--bg2);border:1px solid var(--border-strong);border-radius:6px;
+               padding:4px 10px;font-size:12px;font-weight:600;color:var(--text0);font-family:monospace}
+.universe-note{font-size:11px;color:var(--text2);margin-top:14px}
+.universe-loading{font-size:13px;color:var(--text1)}
 .toggle{position:relative;width:48px;height:26px;flex-shrink:0}
 .toggle input{opacity:0;width:0;height:0;position:absolute}
-.toggle-slider{position:absolute;inset:0;background:#1a2540;border-radius:26px;
+.toggle-slider{position:absolute;inset:0;background:var(--bg2);border-radius:26px;
                cursor:pointer;transition:background .2s}
 .toggle-slider:before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;
-                       background:#4a5a78;border-radius:50%;transition:all .2s}
+                       background:var(--text2);border-radius:50%;transition:all .2s}
 .toggle input:checked ~ .toggle-slider{background:#10b981}
 .toggle input:checked ~ .toggle-slider:before{transform:translateX(22px);background:#fff}
 .toggle input:disabled ~ .toggle-slider{opacity:.4;cursor:not-allowed}
 </style>
 </head>
 <body>
-<div class="unav-header"><div class="unav-logo">Automatic Trading Engine</div></div>
-<nav class="unav-bar">
-  <a href="/dashboard" class="unav-tab">Dashboard</a>
-  <a href="/dashboard" class="unav-tab">Positions</a>
-  <a href="/dashboard" class="unav-tab">Watchlist</a>
-  <a href="/dashboard" class="unav-tab">Signals</a>
-  <a href="/dashboard" class="unav-tab">Trades</a>
-  <a href="/settings" class="unav-tab active">Settings</a>
-  {% if auth %}<a href="/logout" class="unav-logout">Logout</a>{% endif %}
+<header>
+  <div class="logo">Automatic Trading Engine</div>
+  <span class="badge badge-sim" id="mode-badge">LOCAL SIMULATION</span>
+  <span id="market-status">
+    <span class="market-dot market-unknown" id="market-dot"></span>
+    <span id="market-label">Market —</span>
+  </span>
+  <div class="hdr-stats">
+    <div class="hdr-stat">
+      <span class="hdr-stat-lbl">Total Value</span>
+      <span class="hdr-stat-val" id="hdr-total">—</span>
+    </div>
+    <div class="hdr-stat">
+      <span class="hdr-stat-lbl">Day P&amp;L</span>
+      <span class="hdr-stat-val" id="hdr-day-pnl">—</span>
+    </div>
+    <div class="hdr-stat">
+      <span class="hdr-stat-lbl">Unrealized</span>
+      <span class="hdr-stat-val" id="hdr-unreal">—</span>
+    </div>
+  </div>
+  <div class="hdr-right">
+    <span class="ts" id="hdr-ts"></span>
+  </div>
+</header>
+<nav class="nav-tabs-bar">
+  <button class="nav-tab" onclick="window.location='/dashboard'">Dashboard</button>
+  <button class="nav-tab" onclick="window.location='/dashboard'">Positions</button>
+  <button class="nav-tab" onclick="window.location='/dashboard'">Watchlist</button>
+  <button class="nav-tab" onclick="window.location='/dashboard'">Signals</button>
+  <button class="nav-tab" onclick="window.location='/dashboard'">Trades</button>
+  <button class="nav-tab active">Settings</button>
+  {% if auth %}<button class="nav-tab nav-tab-logout" onclick="window.location='/logout'">Logout</button>{% endif %}
 </nav>
 
-<div class="page">
+<main>
+<div class="settings-content">
   <div class="page-title">Settings</div>
   <div class="page-sub">Choose your risk profile. Changes apply immediately to the live trading engine.</div>
 
@@ -5665,6 +5707,7 @@ td.diff-dn{color:#f87171}
     </div>
   </div>
 </div>
+</main>
 
 <script>
 const PROFILES = {{ profiles_json | safe }};
@@ -5979,6 +6022,40 @@ async function saveAlpacaKeys() {
   }
   status.style.display = 'block';
 }
+
+function openChart(sym) { window.location = '/dashboard'; }
+
+async function initHeader() {
+  try {
+    const s = await fetch('/api/state').then(r => r.json());
+    const p = s.portfolio || {};
+    const mode = s.mode || 'Local Simulation';
+    const badge = document.getElementById('mode-badge');
+    badge.textContent = mode;
+    badge.className = 'badge ' + (mode.includes('Paper') ? 'badge-paper' : mode.includes('LIVE') ? 'badge-live' : 'badge-sim');
+    const dot = document.getElementById('market-dot');
+    const lbl = document.getElementById('market-label');
+    if (s.market_open === true)       { dot.className = 'market-dot market-open';    lbl.textContent = 'Market OPEN'; }
+    else if (s.market_open === false) { dot.className = 'market-dot market-closed';  lbl.textContent = 'Market CLOSED'; }
+    function fmt(v) { return v == null ? '—' : Math.abs(v) >= 1e6 ? (v/1e6).toFixed(2)+'M' : Math.abs(v) >= 1e3 ? (Math.abs(v)/1e3).toFixed(1)+'K' : Math.abs(v).toFixed(2); }
+    const hdrTotal = document.getElementById('hdr-total');
+    if (hdrTotal && p.total_value != null) hdrTotal.textContent = '$' + fmt(p.total_value);
+    const hdrDay = document.getElementById('hdr-day-pnl');
+    if (hdrDay) {
+      const dp = s.today && s.today.pnl != null ? s.today.pnl : null;
+      if (dp != null) { hdrDay.textContent = (dp >= 0 ? '+' : '-') + '$' + fmt(Math.abs(dp)); hdrDay.style.color = dp >= 0 ? 'var(--green)' : 'var(--red)'; }
+    }
+    const hdrUnreal = document.getElementById('hdr-unreal');
+    if (hdrUnreal && s.positions && s.positions.length > 0) {
+      const u = s.positions.reduce((sum, pos) => sum + (pos.pnl || 0), 0);
+      hdrUnreal.textContent = (u >= 0 ? '+' : '-') + '$' + fmt(Math.abs(u));
+      hdrUnreal.style.color = u > 0 ? 'var(--green)' : u < 0 ? 'var(--red)' : '';
+    }
+    const hdrTs = document.getElementById('hdr-ts');
+    if (hdrTs && s.timestamp) hdrTs.textContent = s.timestamp;
+  } catch(e) { /* header stays with defaults on error */ }
+}
+initHeader();
 </script>
 </body>
 </html>"""
