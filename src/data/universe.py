@@ -22,11 +22,12 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import yfinance as yf
@@ -83,10 +84,14 @@ MIN_AVG_VOLUME:  int   = 500_000           # shares / day
 MIN_PRICE:       float = 10.0
 MAX_PRICE:       float = 1_000.0
 MIN_MARKET_CAP:  float = 2_000_000_000.0   # $2 B
-TOP_N:           int   = 150
+TOP_N:           int   = 50
 
 _CACHE_PATH   = Path(__file__).resolve().parent.parent.parent / "universe_cache.json"
 _LOG_PATH     = Path(__file__).resolve().parent.parent.parent / "screener_log.json"
+
+# 5-minute in-memory cache for market-cap lookups (avoids repeated yfinance calls on rescan)
+_mcap_cache: Dict[str, Any] = {}   # sym → {"mc": float|None, "name": str, "exp": float}
+_MCAP_CACHE_TTL = 300              # seconds
 
 # ── Category helpers ───────────────────────────────────────────────────────────
 
@@ -505,8 +510,20 @@ def _exchange_breakdown(tickers: List[str], cats: Dict[str, str]) -> Dict[str, i
 
 
 def _fetch_market_caps_with_names(symbols: List[str]) -> Dict[str, Dict]:
-    """Parallel fast_info.market_cap lookup — low-memory, no full info fetch."""
+    """Parallel fast_info.market_cap lookup with 5-minute in-memory cache."""
+    now = time.time()
     results: Dict[str, Dict] = {}
+    to_fetch: List[str] = []
+
+    for sym in symbols:
+        entry = _mcap_cache.get(sym)
+        if entry and now < entry.get("exp", 0):
+            results[sym] = {"mc": entry["mc"], "name": entry["name"]}
+        else:
+            to_fetch.append(sym)
+
+    if not to_fetch:
+        return results
 
     def _get(sym: str) -> Tuple[str, Dict]:
         try:
@@ -516,10 +533,11 @@ def _fetch_market_caps_with_names(symbols: List[str]) -> Dict[str, Dict]:
             return sym, {}
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_get, sym): sym for sym in symbols}
+        futures = {pool.submit(_get, sym): sym for sym in to_fetch}
         for fut in as_completed(futures, timeout=90):
             try:
                 sym, info = fut.result()
+                _mcap_cache[sym] = {**info, "exp": now + _MCAP_CACHE_TTL}
                 results[sym] = info
             except Exception:
                 pass
