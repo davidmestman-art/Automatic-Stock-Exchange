@@ -785,6 +785,18 @@ class TradingEngine:
                 prices[symbol] = p
         return prices
 
+    def get_cached_prices(self, symbols: List[str]) -> Dict[str, float]:
+        """Read fresh Alpaca quote prices from the shared 60s cache without API calls.
+
+        Used by dashboard endpoints (heatmap, watchlist) to share the same price
+        data already fetched during the engine cycle instead of hitting Alpaca again.
+        Returns {} when Alpaca is not configured or no cached prices exist yet.
+        """
+        if not self._use_alpaca:
+            return {}
+        from .alpaca_executor import get_cached_price
+        return {sym: p for sym in symbols if (p := get_cached_price(sym)) is not None}
+
     @property
     def last_corr_blocked(self) -> Dict[str, str]:
         """Symbols blocked by correlation filter in the last signal pass {sym: reason}."""

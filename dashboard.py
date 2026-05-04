@@ -1521,13 +1521,20 @@ def api_pnl():
 
 @app.route("/api/heatmap")
 def api_heatmap():
-    """Return daily price-change data for all watchlist symbols (uses fetcher cache)."""
+    """Return daily price-change data for all watchlist symbols.
+
+    Uses yfinance historical data for change% / volume, but overlays the shared
+    Alpaca 60-second quote cache for the current price so all endpoints (state,
+    heatmap, watchlist) read from the same fetched data without extra API calls.
+    """
     eng = _get_engine()
     watchlist = eng.watchlist
     if not watchlist:
         return jsonify({"ok": True, "items": []})
     try:
         market_data = eng.fetcher.fetch_many(watchlist, force_refresh=False)
+        # Pull any fresh Alpaca prices already cached from the engine cycle
+        live_prices = eng.get_cached_prices(watchlist)
         items = []
         for sym in watchlist:
             df = market_data.get(sym)
@@ -1535,7 +1542,8 @@ def api_heatmap():
                 continue
             close = df["Close"]
             prev_close = float(close.iloc[-2])
-            curr_close = float(close.iloc[-1])
+            # Prefer the live Alpaca quote (already in cache) over the yfinance day close
+            curr_close = live_prices.get(sym) or float(close.iloc[-1])
             change_pct = round((curr_close / prev_close - 1) * 100, 2) if prev_close > 0 else 0.0
             vol = float(df["Volume"].iloc[-1]) if "Volume" in df.columns else None
             avg_vol = float(df["Volume"].tail(20).mean()) if "Volume" in df.columns else None
@@ -2281,12 +2289,15 @@ def api_search(symbol):
 def api_watchlist_get():
     if not _personal_watchlist:
         return jsonify({"ok": True, "symbols": [], "items": []})
+    eng = _get_engine()
     items = []
-    # Use engine's fetcher cache (no extra network calls)
+    # Use engine's fetcher cache (yfinance historical — no extra network calls)
     try:
-        market_data = _get_engine().fetcher.fetch_many(_personal_watchlist, force_refresh=False)
+        market_data = eng.fetcher.fetch_many(_personal_watchlist, force_refresh=False)
     except Exception:
         market_data = {}
+    # Overlay live Alpaca prices from the shared 60s quote cache if available
+    live_prices = eng.get_cached_prices(_personal_watchlist)
     # Last computed signals for signal/rsi columns
     with _lock:
         sig_lookup = {s["symbol"]: s for s in _last_state.get("signals", [])}
@@ -2295,7 +2306,9 @@ def api_watchlist_get():
         price = change_pct = rsi = score = action = None
         df = market_data.get(sym)
         if df is not None and not df.empty:
-            price = round(float(df["Close"].iloc[-1]), 2)
+            yf_close = round(float(df["Close"].iloc[-1]), 2)
+            # Prefer live Alpaca quote already cached from engine cycle
+            price = round(live_prices[sym], 2) if sym in live_prices else yf_close
             if len(df) >= 2:
                 prev = float(df["Close"].iloc[-2])
                 change_pct = round((price / prev - 1) * 100, 2) if prev else None

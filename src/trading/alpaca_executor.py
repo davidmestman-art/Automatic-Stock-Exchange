@@ -11,6 +11,7 @@ bracket legs that fired between cycles).
 
 import logging
 import math
+import threading
 import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -31,13 +32,35 @@ from .portfolio import Portfolio, Position, Trade
 logger = logging.getLogger(__name__)
 
 # ── Rate-limit handling constants ─────────────────────────────────────────────
-_MAX_RETRIES       = 3
-_RATE_LIMIT_WAIT   = 5.0   # seconds to wait after a 429
-_PRICES_BATCH      = 5     # symbols per quote request
-_PRICES_BATCH_DELAY = 1.0  # seconds between batches
-_CLOCK_TTL         = 300   # 5 min — market open status changes slowly
-_PERF_TTL          = 300   # 5 min — daily P&L sparkline
-_POSITIONS_TTL     = 60    # 1 min  — live position list
+_MAX_RETRIES      = 3
+_RATE_LIMIT_WAIT  = 5.0    # seconds to wait after a 429
+_MIN_CALL_GAP     = 0.35   # max ~3 Alpaca calls/second globally
+_PRICES_BATCH     = 5      # symbols per quote request
+_QUOTE_TTL        = 60     # seconds — quote cache TTL (shared across all endpoints)
+_CLOCK_TTL        = 300    # 5 min  — market open status changes slowly
+_PERF_TTL         = 300    # 5 min  — daily P&L sparkline
+_POSITIONS_TTL    = 60     # 1 min  — live position list
+
+# ── Global rate limiter ───────────────────────────────────────────────────────
+_rate_lock = threading.Lock()
+_last_api_call: float = 0.0
+
+
+def _rate_sleep() -> None:
+    """Block until at least _MIN_CALL_GAP seconds have elapsed since the last call."""
+    global _last_api_call
+    with _rate_lock:
+        now = time.time()
+        gap = _MIN_CALL_GAP - (now - _last_api_call)
+        if gap > 0:
+            time.sleep(gap)
+        _last_api_call = time.time()
+
+
+# ── Shared caches ─────────────────────────────────────────────────────────────
+# Quote cache: all executor instances + dashboard endpoints share a single price dict.
+_quote_cache: Dict[str, Tuple[float, float]] = {}  # sym → (price, expires_at)
+_quote_lock = threading.Lock()
 
 # Shared cache for non-user-specific data (market clock — same for everyone)
 _shared_cache: Dict[str, Tuple[Any, float]] = {}
@@ -46,6 +69,15 @@ _shared_cache: Dict[str, Tuple[Any, float]] = {}
 def _is_rate_limited(exc: Exception) -> bool:
     s = str(exc).lower()
     return "429" in s or "rate limit" in s or "too many requests" in s
+
+
+def get_cached_price(symbol: str) -> Optional[float]:
+    """Return the latest cached Alpaca quote price for *symbol* if still fresh, else None."""
+    with _quote_lock:
+        entry = _quote_cache.get(symbol)
+    if entry and time.time() < entry[1]:
+        return entry[0]
+    return None
 
 
 class AlpacaExecutor:
@@ -58,14 +90,15 @@ class AlpacaExecutor:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _call_with_retry(self, fn: Callable, *args, **kwargs) -> Any:
-        """Call fn(*args, **kwargs) retrying up to _MAX_RETRIES times on 429."""
+        """Call fn(*args, **kwargs) with global rate limiting and 429 retry."""
         for attempt in range(_MAX_RETRIES + 1):
             try:
+                _rate_sleep()   # enforce ≤3 calls/second globally across all instances
                 return fn(*args, **kwargs)
             except Exception as e:
                 if _is_rate_limited(e) and attempt < _MAX_RETRIES:
                     logger.warning(
-                        f"[{self._tag}] Rate limited — waiting {_RATE_LIMIT_WAIT}s "
+                        f"[{self._tag}] Rate limited (429) — waiting {_RATE_LIMIT_WAIT}s "
                         f"(attempt {attempt + 1}/{_MAX_RETRIES})"
                     )
                     time.sleep(_RATE_LIMIT_WAIT)
@@ -129,24 +162,47 @@ class AlpacaExecutor:
     # ── Live quotes ───────────────────────────────────────────────────────────
 
     def get_live_prices(self, symbols: List[str]) -> Dict[str, float]:
-        """Returns mid-price (ask+bid)/2, batched _PRICES_BATCH symbols at a time with retry."""
+        """Return mid-price for each symbol.
+
+        Checks the 60-second module-level quote cache first; only fetches symbols
+        not already cached.  Results are stored back so heatmap / watchlist /
+        dashboard state all read from the same dict without extra API calls.
+        Batched _PRICES_BATCH at a time; rate limiter in _call_with_retry
+        enforces ≤3 requests/second so no extra inter-batch sleep needed.
+        """
+        now = time.time()
         prices: Dict[str, float] = {}
-        for i in range(0, len(symbols), _PRICES_BATCH):
-            batch = symbols[i:i + _PRICES_BATCH]
-            if i > 0:
-                time.sleep(_PRICES_BATCH_DELAY)
+        to_fetch: List[str] = []
+
+        with _quote_lock:
+            for sym in symbols:
+                entry = _quote_cache.get(sym)
+                if entry and now < entry[1]:
+                    prices[sym] = entry[0]
+                else:
+                    to_fetch.append(sym)
+
+        for i in range(0, len(to_fetch), _PRICES_BATCH):
+            batch = to_fetch[i:i + _PRICES_BATCH]
             try:
                 req = StockLatestQuoteRequest(symbol_or_symbols=batch)
                 quotes = self._call_with_retry(self.data.get_stock_latest_quote, req)
+                expires = time.time() + _QUOTE_TTL
+                batch_prices: Dict[str, float] = {}
                 for sym, q in quotes.items():
                     ask = float(q.ask_price) if q.ask_price else None
                     bid = float(q.bid_price) if q.bid_price else None
                     if ask and bid:
-                        prices[sym] = (ask + bid) / 2
+                        batch_prices[sym] = (ask + bid) / 2
                     elif ask or bid:
-                        prices[sym] = float(ask or bid)
+                        batch_prices[sym] = float(ask or bid)
+                with _quote_lock:
+                    for sym, price in batch_prices.items():
+                        _quote_cache[sym] = (price, expires)
+                prices.update(batch_prices)
             except Exception as e:
                 logger.error(f"[{self._tag}] Quote fetch failed for batch {batch}: {e}")
+
         return prices
 
     # ── Portfolio sync ────────────────────────────────────────────────────────
