@@ -6130,8 +6130,8 @@ async function saveUniverseFilters() {
     min_avg_volume: (parseFloat(document.getElementById('u-min-vol').value)   || 500) * 1000,
     min_price:       parseFloat(document.getElementById('u-min-price').value) || 10,
     max_price:       parseFloat(document.getElementById('u-max-price').value) || 1000,
-    min_market_cap:  parseFloat(document.getElementById('u-min-cap').value)   || 2,
-    top_n:           parseInt(document.getElementById('u-top-n').value)        || 150,
+    min_market_cap:  parseFloat(document.getElementById('u-min-cap').value)   || 100,
+    top_n:           parseInt(document.getElementById('u-top-n').value)        || 50,
     include_etfs:    document.getElementById('u-include-etfs').checked,
   };
   try {
