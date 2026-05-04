@@ -83,7 +83,7 @@ _ALL_CANDIDATES: List[str] = sorted(set(SP500_UNIVERSE + NASDAQ_100 + DOW_30))
 MIN_AVG_VOLUME:  int   = 500_000           # shares / day
 MIN_PRICE:       float = 10.0
 MAX_PRICE:       float = 1_000.0
-MIN_MARKET_CAP:  float = 2_000_000_000.0   # $2 B
+MIN_MARKET_CAP:  float = 100_000_000_000.0  # $100 B
 TOP_N:           int   = 50
 
 _CACHE_PATH   = Path(__file__).resolve().parent.parent.parent / "universe_cache.json"
