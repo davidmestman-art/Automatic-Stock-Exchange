@@ -44,6 +44,11 @@ class ORBState:
     breakout: Optional[str] = None        # 'up', 'down', or None
     pre_market_volume: float = 0.0
     avg_daily_volume: float = 0.0
+    # Gap filter — (today_open - prev_close) / prev_close; populated at 10:00
+    gap_pct: Optional[float] = None
+    # Retest entry — set on first high-vol breakout above OR high
+    retest_eligible: bool = False
+    breakout_volume: Optional[float] = None
 
     @property
     def or_midpoint(self) -> Optional[float]:
@@ -113,6 +118,10 @@ class ORBSession:
         if symbol in self.states:
             self.states[symbol].prev_day_high = high
             self.states[symbol].prev_day_low  = low
+
+    def set_gap_pct(self, symbol: str, gap: float) -> None:
+        if symbol in self.states:
+            self.states[symbol].gap_pct = gap
 
     def finalize_range(self) -> None:
         for s in self.states.values():
@@ -298,4 +307,37 @@ def fetch_latest_1min_volume(symbols: List[str]) -> Dict[str, float]:
         for f in as_completed(futures):
             sym, vol = f.result()
             result[sym] = vol
+    return result
+
+
+def fetch_gap_pcts(symbols: List[str]) -> Dict[str, float]:
+    """Return {symbol: gap_pct} where gap_pct = (today_open - prev_close) / prev_close."""
+    import yfinance as yf
+
+    def _fetch_one(sym: str):
+        try:
+            hist = yf.download(sym, period="2d", interval="1d",
+                               progress=False, auto_adjust=True)
+            if hist is None or len(hist) < 2:
+                return sym, None
+            prev_close = float(hist["Close"].iloc[-2])
+            today_open = float(hist["Open"].iloc[-1])
+            if prev_close <= 0:
+                return sym, None
+            if hasattr(prev_close, "item"):
+                prev_close = prev_close.item()
+            if hasattr(today_open, "item"):
+                today_open = today_open.item()
+            return sym, (today_open - prev_close) / prev_close
+        except Exception as e:
+            logger.debug(f"  [ORB] gap {sym}: {e}")
+            return sym, None
+
+    result: Dict[str, float] = {}
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_fetch_one, s): s for s in symbols}
+        for f in as_completed(futures):
+            sym, gap = f.result()
+            if gap is not None:
+                result[sym] = gap
     return result
