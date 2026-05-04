@@ -7495,12 +7495,15 @@ def index():
         if user_id:
             try:
                 _u = db.session.get(User, user_id)
+                # Keys in DB → show ALPACA PAPER regardless of live-API reachability
                 if _u and _u.alpaca_api_key_enc:
                     alpaca_connected = True
             except Exception:
                 pass
     else:
         try:
+            # use_alpaca is set from config (not from a live API call), so a
+            # 429 rate-limit error during trading won't flip this to False.
             alpaca_connected = bool(_get_engine().config.use_alpaca)
         except Exception:
             pass

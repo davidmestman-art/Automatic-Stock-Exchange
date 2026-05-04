@@ -11,8 +11,9 @@ bracket legs that fired between cycles).
 
 import logging
 import math
+import time
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestQuoteRequest
@@ -29,38 +30,94 @@ from .portfolio import Portfolio, Position, Trade
 
 logger = logging.getLogger(__name__)
 
+# ── Rate-limit handling constants ─────────────────────────────────────────────
+_MAX_RETRIES       = 3
+_RATE_LIMIT_WAIT   = 5.0   # seconds to wait after a 429
+_PRICES_BATCH      = 5     # symbols per quote request
+_PRICES_BATCH_DELAY = 1.0  # seconds between batches
+_CLOCK_TTL         = 300   # 5 min — market open status changes slowly
+_PERF_TTL          = 300   # 5 min — daily P&L sparkline
+_POSITIONS_TTL     = 60    # 1 min  — live position list
+
+# Shared cache for non-user-specific data (market clock — same for everyone)
+_shared_cache: Dict[str, Tuple[Any, float]] = {}
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "429" in s or "rate limit" in s or "too many requests" in s
+
 
 class AlpacaExecutor:
     def __init__(self, api_key: str, secret_key: str, paper: bool = True):
         self.trading = TradingClient(api_key, secret_key, paper=paper)
         self.data = StockHistoricalDataClient(api_key, secret_key)
         self._tag = "PAPER" if paper else "LIVE"
+        self._cache: Dict[str, Tuple[Any, float]] = {}  # per-instance (user-specific data)
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _call_with_retry(self, fn: Callable, *args, **kwargs) -> Any:
+        """Call fn(*args, **kwargs) retrying up to _MAX_RETRIES times on 429."""
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                if _is_rate_limited(e) and attempt < _MAX_RETRIES:
+                    logger.warning(
+                        f"[{self._tag}] Rate limited — waiting {_RATE_LIMIT_WAIT}s "
+                        f"(attempt {attempt + 1}/{_MAX_RETRIES})"
+                    )
+                    time.sleep(_RATE_LIMIT_WAIT)
+                else:
+                    raise
+
+    def _get_cached(self, key: str, fn: Callable, ttl: float, shared: bool = False) -> Any:
+        """Return cached value for key, or call fn() to populate it.
+
+        shared=True uses the module-level cache (for market clock, same across all users).
+        shared=False uses instance-level cache (for user-specific data like positions).
+        """
+        store = _shared_cache if shared else self._cache
+        now = time.time()
+        entry = store.get(key)
+        if entry and now < entry[1]:
+            return entry[0]
+        val = fn()
+        store[key] = (val, now + ttl)
+        return val
 
     # ── Market clock ──────────────────────────────────────────────────────────
 
     def is_market_open(self) -> bool:
         try:
-            return self.trading.get_clock().is_open
+            def _fetch():
+                return self._call_with_retry(self.trading.get_clock).is_open
+            return self._get_cached(f"{self._tag}:is_open", _fetch, _CLOCK_TTL, shared=True)
         except Exception as e:
             logger.warning(f"Could not fetch market clock: {e}")
-            return False
+            entry = _shared_cache.get(f"{self._tag}:is_open")
+            return entry[0] if entry else False
 
     def get_clock_info(self) -> dict:
         try:
-            clock = self.trading.get_clock()
-            return {
-                "is_open": clock.is_open,
-                "next_open": str(clock.next_open),
-                "next_close": str(clock.next_close),
-            }
+            def _fetch():
+                clock = self._call_with_retry(self.trading.get_clock)
+                return {
+                    "is_open": clock.is_open,
+                    "next_open": str(clock.next_open),
+                    "next_close": str(clock.next_close),
+                }
+            return self._get_cached(f"{self._tag}:clock_info", _fetch, _CLOCK_TTL, shared=True)
         except Exception as e:
             logger.warning(f"Clock fetch failed: {e}")
-            return {"is_open": False, "next_open": "unknown", "next_close": "unknown"}
+            entry = _shared_cache.get(f"{self._tag}:clock_info")
+            return entry[0] if entry else {"is_open": False, "next_open": "unknown", "next_close": "unknown"}
 
     # ── Account info ──────────────────────────────────────────────────────────
 
     def get_account_summary(self) -> dict:
-        acct = self.trading.get_account()
+        acct = self._call_with_retry(self.trading.get_account)
         return {
             "equity": float(acct.equity),
             "cash": float(acct.cash),
@@ -72,22 +129,25 @@ class AlpacaExecutor:
     # ── Live quotes ───────────────────────────────────────────────────────────
 
     def get_live_prices(self, symbols: List[str]) -> Dict[str, float]:
-        """Returns mid-price (ask+bid)/2 for each symbol."""
-        try:
-            req = StockLatestQuoteRequest(symbol_or_symbols=symbols)
-            quotes = self.data.get_stock_latest_quote(req)
-            prices: Dict[str, float] = {}
-            for sym, q in quotes.items():
-                ask = float(q.ask_price) if q.ask_price else None
-                bid = float(q.bid_price) if q.bid_price else None
-                if ask and bid:
-                    prices[sym] = (ask + bid) / 2
-                elif ask or bid:
-                    prices[sym] = float(ask or bid)
-            return prices
-        except Exception as e:
-            logger.error(f"Alpaca quote fetch failed: {e}")
-            return {}
+        """Returns mid-price (ask+bid)/2, batched _PRICES_BATCH symbols at a time with retry."""
+        prices: Dict[str, float] = {}
+        for i in range(0, len(symbols), _PRICES_BATCH):
+            batch = symbols[i:i + _PRICES_BATCH]
+            if i > 0:
+                time.sleep(_PRICES_BATCH_DELAY)
+            try:
+                req = StockLatestQuoteRequest(symbol_or_symbols=batch)
+                quotes = self._call_with_retry(self.data.get_stock_latest_quote, req)
+                for sym, q in quotes.items():
+                    ask = float(q.ask_price) if q.ask_price else None
+                    bid = float(q.bid_price) if q.bid_price else None
+                    if ask and bid:
+                        prices[sym] = (ask + bid) / 2
+                    elif ask or bid:
+                        prices[sym] = float(ask or bid)
+            except Exception as e:
+                logger.error(f"[{self._tag}] Quote fetch failed for batch {batch}: {e}")
+        return prices
 
     # ── Portfolio sync ────────────────────────────────────────────────────────
 
@@ -99,8 +159,8 @@ class AlpacaExecutor:
         locally without any manual accounting.
         """
         try:
-            alpaca_positions = {p.symbol: p for p in self.trading.get_all_positions()}
-            acct = self.trading.get_account()
+            alpaca_positions = {p.symbol: p for p in self._call_with_retry(self.trading.get_all_positions)}
+            acct = self._call_with_retry(self.trading.get_account)
 
             # Remove local positions that Alpaca no longer holds
             for sym in list(portfolio.positions.keys()):
@@ -146,49 +206,61 @@ class AlpacaExecutor:
             logger.error(f"Portfolio sync from Alpaca failed: {e}")
 
     def get_live_positions(self) -> List[dict]:
-        """Return all current Alpaca positions as plain dicts for dashboard display."""
-        positions = self.trading.get_all_positions()
-        result = []
-        for p in positions:
-            result.append({
-                "symbol": p.symbol,
-                "shares": float(p.qty),
-                "entry_price": float(p.avg_entry_price),
-                "current_price": float(p.current_price) if p.current_price else None,
-                "pnl": float(p.unrealized_pl) if p.unrealized_pl else None,
-                "pnl_pct": float(p.unrealized_plpc) if p.unrealized_plpc else None,
-                "change_today": float(p.unrealized_intraday_pl) if p.unrealized_intraday_pl else None,
-                "change_today_pct": float(p.unrealized_intraday_plpc) if p.unrealized_intraday_plpc else None,
-            })
-        return result
+        """Return all current Alpaca positions as plain dicts for dashboard display (cached 1 min)."""
+        def _fetch():
+            positions = self._call_with_retry(self.trading.get_all_positions)
+            result = []
+            for p in positions:
+                result.append({
+                    "symbol": p.symbol,
+                    "shares": float(p.qty),
+                    "entry_price": float(p.avg_entry_price),
+                    "current_price": float(p.current_price) if p.current_price else None,
+                    "pnl": float(p.unrealized_pl) if p.unrealized_pl else None,
+                    "pnl_pct": float(p.unrealized_plpc) if p.unrealized_plpc else None,
+                    "change_today": float(p.unrealized_intraday_pl) if p.unrealized_intraday_pl else None,
+                    "change_today_pct": float(p.unrealized_intraday_plpc) if p.unrealized_intraday_plpc else None,
+                })
+            return result
+        return self._get_cached(f"{self._tag}:positions", _fetch, _POSITIONS_TTL)
 
     def get_daily_performance(self) -> dict:
-        """Return today's P&L and equity sparkline from Alpaca portfolio history."""
+        """Return today's P&L and equity sparkline from Alpaca portfolio history (cached 5 min)."""
         from alpaca.trading.requests import GetPortfolioHistoryRequest
-        try:
-            hist = self.trading.get_portfolio_history(
-                GetPortfolioHistoryRequest(period="1D", timeframe="5Min", extended_hours=True)
-            )
-            if not hist or not hist.equity:
+
+        def _fetch():
+            try:
+                hist = self._call_with_retry(
+                    self.trading.get_portfolio_history,
+                    GetPortfolioHistoryRequest(period="1D", timeframe="5Min", extended_hours=True),
+                )
+                if not hist or not hist.equity:
+                    return {}
+                equity = [round(float(e), 2) for e in hist.equity if e is not None]
+                pnl_series = [round(float(pl), 2) for pl in hist.profit_loss if pl is not None]
+                pnl_pct_series = [
+                    round(float(pp) * 100, 4) for pp in hist.profit_loss_pct if pp is not None
+                ]
+                return {
+                    "today_pnl": pnl_series[-1] if pnl_series else 0,
+                    "today_pnl_pct": pnl_pct_series[-1] if pnl_pct_series else 0,
+                    "sparkline": equity[-48:],
+                }
+            except Exception as e:
+                logger.warning("Portfolio history fetch failed: %s", e)
                 return {}
-            equity = [round(float(e), 2) for e in hist.equity if e is not None]
-            pnl_series = [round(float(pl), 2) for pl in hist.profit_loss if pl is not None]
-            pnl_pct_series = [
-                round(float(pp) * 100, 4) for pp in hist.profit_loss_pct if pp is not None
-            ]
-            return {
-                "today_pnl": pnl_series[-1] if pnl_series else 0,
-                "today_pnl_pct": pnl_pct_series[-1] if pnl_pct_series else 0,
-                "sparkline": equity[-48:],
-            }
+
+        try:
+            return self._get_cached(f"{self._tag}:perf", _fetch, _PERF_TTL)
         except Exception as e:
-            logger.warning("Portfolio history fetch failed: %s", e)
+            logger.warning("Daily performance cache/fetch failed: %s", e)
             return {}
 
     def get_filled_orders(self, limit: int = 30) -> List[dict]:
         """Return recent filled orders from Alpaca, newest first."""
-        orders = self.trading.get_orders(
-            GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=limit * 2)
+        orders = self._call_with_retry(
+            self.trading.get_orders,
+            GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=limit * 2),
         )
         result = []
         for o in orders:
@@ -229,7 +301,8 @@ class AlpacaExecutor:
             return False
 
         try:
-            order = self.trading.submit_order(
+            order = self._call_with_retry(
+                self.trading.submit_order,
                 MarketOrderRequest(
                     symbol=symbol,
                     qty=qty,
@@ -238,7 +311,7 @@ class AlpacaExecutor:
                     order_class=OrderClass.BRACKET,
                     stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
                     take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
-                )
+                ),
             )
             # Mirror in local portfolio at the intended price
             portfolio.buy(symbol, qty, price, stop_loss, take_profit, reason)
@@ -268,13 +341,14 @@ class AlpacaExecutor:
 
         try:
             self._cancel_open_orders(symbol)
-            order = self.trading.submit_order(
+            order = self._call_with_retry(
+                self.trading.submit_order,
                 MarketOrderRequest(
                     symbol=symbol,
                     qty=qty,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.DAY,
-                )
+                ),
             )
             trade = portfolio.sell(symbol, price, reason)
             if trade and trade.pnl is not None:
@@ -293,8 +367,9 @@ class AlpacaExecutor:
 
     def _cancel_open_orders(self, symbol: str) -> None:
         try:
-            open_orders = self.trading.get_orders(
-                GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+            open_orders = self._call_with_retry(
+                self.trading.get_orders,
+                GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol]),
             )
             for order in open_orders:
                 self.trading.cancel_order_by_id(str(order.id))
