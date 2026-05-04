@@ -1,6 +1,13 @@
+"""Market regime detector using SPY SMA50/SMA200 via Alpaca bars.
+
+VIX is not available on Alpaca; regime is determined purely by SPY
+moving-average alignment.  All symbols pass when data is unavailable.
+"""
+
 import logging
+import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -33,7 +40,7 @@ class RegimeResult:
 
 
 class RegimeDetector:
-    """Classify the broad market as BULL / BEAR / CHOPPY using SPY MAs and VIX.
+    """Classify the broad market as BULL / BEAR / CHOPPY using SPY MAs.
 
     Results are cached for `cache_hours` to avoid redundant network calls on
     every 60-second trading cycle.
@@ -44,10 +51,14 @@ class RegimeDetector:
         cache_hours: int = 4,
         bull_vix_max: float = 25.0,
         bear_vix_min: float = 27.0,
+        api_key: str = "",
+        secret_key: str = "",
     ):
         self.cache_hours = cache_hours
         self.bull_vix_max = bull_vix_max
         self.bear_vix_min = bear_vix_min
+        self._api_key = api_key or os.getenv("ALPACA_API_KEY", "")
+        self._secret_key = secret_key or os.getenv("ALPACA_SECRET_KEY", "")
         self._cached: Optional[RegimeResult] = None
         self._cached_at: Optional[datetime] = None
 
@@ -66,58 +77,62 @@ class RegimeDetector:
 
     def _fetch_and_classify(self) -> Optional[RegimeResult]:
         try:
-            import yfinance as yf
             import pandas as pd
+            from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.data.requests import StockBarsRequest
+            from alpaca.data.timeframe import TimeFrame
 
-            spy_raw = yf.download(
-                "SPY",
-                period="14mo",
-                interval="1d",
-                auto_adjust=True,
-                progress=False,
-            )
-            if spy_raw is None or spy_raw.empty or len(spy_raw) < _REQUIRED_BARS:
-                logger.warning("RegimeDetector: insufficient SPY data")
+            if not self._api_key or not self._secret_key:
+                logger.warning("RegimeDetector: no Alpaca credentials")
                 return None
 
-            if hasattr(spy_raw.columns, "levels"):
-                spy_raw.columns = spy_raw.columns.droplevel(1)
+            client = StockHistoricalDataClient(self._api_key, self._secret_key)
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(days=int(_REQUIRED_BARS * 1.6))
 
-            close = spy_raw["Close"]
+            req = StockBarsRequest(
+                symbol_or_symbols="SPY",
+                timeframe=TimeFrame.Day,
+                start=start,
+                end=end,
+                feed="iex",
+            )
+            df_all = client.get_stock_bars(req).df
+
+            if df_all is None or df_all.empty:
+                logger.warning("RegimeDetector: empty SPY data")
+                return None
+
+            # Extract from MultiIndex if present
+            if isinstance(df_all.index, pd.MultiIndex):
+                df = df_all.xs("SPY", level=0).copy()
+            else:
+                df = df_all.copy()
+
+            if hasattr(df.index, "tz") and df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+
+            close = df["close"] if "close" in df.columns else df["Close"]
+            if len(close) < _REQUIRED_BARS:
+                logger.warning("RegimeDetector: insufficient SPY bars (%d)", len(close))
+                return None
+
             spy_price = float(close.iloc[-1])
             sma50 = float(close.rolling(50).mean().iloc[-1])
             sma200 = float(close.rolling(200).mean().iloc[-1])
-
-            vix: Optional[float] = None
-            try:
-                vix_raw = yf.download(
-                    "^VIX",
-                    period="5d",
-                    interval="1d",
-                    auto_adjust=True,
-                    progress=False,
-                )
-                if vix_raw is not None and not vix_raw.empty:
-                    if hasattr(vix_raw.columns, "levels"):
-                        vix_raw.columns = vix_raw.columns.droplevel(1)
-                    vix = float(vix_raw["Close"].iloc[-1])
-            except Exception as e:
-                logger.debug(f"RegimeDetector: VIX fetch failed: {e}")
 
             above_sma50 = spy_price > sma50
             above_sma200 = spy_price > sma200
             sma50_above_sma200 = sma50 > sma200
 
-            regime = self._classify(
-                above_sma50, above_sma200, sma50_above_sma200, vix
-            )
+            regime = self._classify(above_sma50, above_sma200, sma50_above_sma200)
 
             return RegimeResult(
                 regime=regime,
                 spy_price=spy_price,
                 sma50=sma50,
                 sma200=sma200,
-                vix=vix,
+                vix=None,
                 above_sma50=above_sma50,
                 above_sma200=above_sma200,
                 checked_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -132,16 +147,9 @@ class RegimeDetector:
         above_sma50: bool,
         above_sma200: bool,
         sma50_above_sma200: bool,
-        vix: Optional[float],
     ) -> str:
-        # BEAR: below SMA200 and (VIX elevated or VIX unknown)
         if not above_sma200:
-            if vix is None or vix > self.bear_vix_min:
-                return "BEAR"
-
-        # BULL: above SMA200, golden-cross alignment, and calm VIX
+            return "BEAR"
         if above_sma200 and sma50_above_sma200:
-            if vix is None or vix < self.bull_vix_max:
-                return "BULL"
-
+            return "BULL"
         return "CHOPPY"

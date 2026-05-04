@@ -1354,32 +1354,44 @@ def _compute_risk_metrics() -> dict:
 
 # ── News feed helpers ─────────────────────────────────────────────────────────
 
-def _parse_news_item(n: dict, sym: str) -> dict:
-    """Normalise yfinance news dict (old flat format or new nested 'content' format)."""
-    if "content" in n:
-        c = n["content"]
-        pub = c.get("pubDate", "")
-        ts = 0
-        if pub:
-            try:
-                dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
-                ts = int(dt.timestamp())
-            except Exception:
-                pass
-        return {
-            "symbol": sym,
-            "title": c.get("title", ""),
-            "publisher": (c.get("provider") or {}).get("displayName", ""),
-            "url": (c.get("canonicalUrl") or {}).get("url", ""),
-            "published_at": ts,
-        }
-    return {
-        "symbol": sym,
-        "title": n.get("title", ""),
-        "publisher": n.get("publisher", ""),
-        "url": n.get("link", ""),
-        "published_at": int(n.get("providerPublishTime") or 0),
-    }
+def _fetch_alpaca_news(symbols: list, limit: int = 10) -> list:
+    """Fetch news from Alpaca's news REST API for the given symbols."""
+    import urllib.request
+    import urllib.parse
+    try:
+        params = urllib.parse.urlencode({
+            "symbols": ",".join(symbols),
+            "limit":   min(limit, 50),
+            "sort":    "DESC",
+        })
+        url = f"https://data.alpaca.markets/v1beta1/news?{params}"
+        req = urllib.request.Request(url, headers={
+            "APCA-API-KEY-ID":     config.alpaca_api_key,
+            "APCA-API-SECRET-KEY": config.alpaca_secret_key,
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = __import__("json").loads(resp.read())
+        items = []
+        for n in raw.get("news", []):
+            ts = 0
+            created = n.get("created_at", "")
+            if created:
+                try:
+                    ts = int(datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp())
+                except Exception:
+                    pass
+            for sym in (n.get("symbols") or symbols[:1]):
+                items.append({
+                    "symbol":       sym,
+                    "title":        n.get("headline", ""),
+                    "publisher":    n.get("source", ""),
+                    "url":          n.get("url", ""),
+                    "published_at": ts,
+                })
+        return items
+    except Exception as e:
+        log.debug(f"_fetch_alpaca_news: {e}")
+        return []
 
 
 # ── Backtest background runner ────────────────────────────────────────────────
@@ -1405,12 +1417,10 @@ def _run_backtest_bg() -> None:
         # SPY buy-and-hold benchmark
         spy_return = None
         try:
-            import yfinance as yf
-            spy = yf.download("SPY", start=start_s, end=end_s,
-                              progress=False, auto_adjust=True)
-            if len(spy) > 1:
+            spy_df = eng.fetcher.fetch("SPY", force_refresh=True)
+            if spy_df is not None and len(spy_df) > 1:
                 spy_return = round(
-                    float(spy["Close"].iloc[-1] / spy["Close"].iloc[0] - 1) * 100, 2
+                    float(spy_df["Close"].iloc[-1] / spy_df["Close"].iloc[0] - 1) * 100, 2
                 )
         except Exception as e:
             log.debug(f"SPY benchmark fetch: {e}")
@@ -1523,7 +1533,7 @@ def api_pnl():
 def api_heatmap():
     """Return daily price-change data for all watchlist symbols.
 
-    Uses yfinance historical data for change% / volume, but overlays the shared
+    Uses Alpaca bar history for change% / volume, and overlays the shared
     Alpaca 60-second quote cache for the current price so all endpoints (state,
     heatmap, watchlist) read from the same fetched data without extra API calls.
     """
@@ -1542,7 +1552,7 @@ def api_heatmap():
                 continue
             close = df["Close"]
             prev_close = float(close.iloc[-2])
-            # Prefer the live Alpaca quote (already in cache) over the yfinance day close
+            # Prefer the live Alpaca quote (already in cache) over the bar close
             curr_close = live_prices.get(sym) or float(close.iloc[-1])
             change_pct = round((curr_close / prev_close - 1) * 100, 2) if prev_close > 0 else 0.0
             vol = float(df["Volume"].iloc[-1]) if "Volume" in df.columns else None
@@ -1754,26 +1764,31 @@ def api_bars(symbol):
     """Simple OHLCV data for the stock detail modal chart (multiple periods)."""
     symbol = symbol.upper()
     period = request.args.get("period", "3m")
-    period_map = {
-        "1d": ("1d",  "5m"),
-        "1w": ("5d",  "1h"),
-        "1m": ("1mo", "1d"),
-        "3m": ("3mo", "1d"),
-        "6m": ("6mo", "1d"),
-        "1y": ("1y",  "1d"),
+    period_to_interval: dict = {
+        "1d": "5m", "1w": "1h", "1m": "1d",
+        "3m": "1d", "6m": "1d", "1y": "1d",
     }
-    yf_period, yf_interval = period_map.get(period, ("3mo", "1d"))
+    period_to_days: dict = {
+        "1d": 2, "1w": 7, "1m": 30,
+        "3m": 90, "6m": 180, "1y": 365,
+    }
+    interval   = period_to_interval.get(period, "1d")
+    lookback   = period_to_days.get(period, 90)
     try:
         import math
-        import yfinance as yf
-        df = yf.Ticker(symbol).history(period=yf_period, interval=yf_interval)
+        from src.data.fetcher import MarketDataFetcher
+        fetcher = MarketDataFetcher(
+            lookback_days=lookback,
+            interval=interval,
+            api_key=config.alpaca_api_key,
+            secret_key=config.alpaca_secret_key,
+        )
+        df = fetcher.fetch(symbol)
         if df is None or df.empty:
             return jsonify({"ok": False, "error": f"No data for {symbol}"}), 404
-        if df.index.tz is not None:
-            df.index = df.index.tz_convert("UTC").tz_localize(None)
         def to_list(s):
             return [None if (v is None or (isinstance(v, float) and math.isnan(v))) else round(float(v), 4) for v in s]
-        is_intraday = yf_interval in ("5m", "1h")
+        is_intraday = interval in ("5m", "1h")
         date_fmt = "%Y-%m-%d %H:%M" if is_intraday else "%Y-%m-%d"
         return jsonify({
             "ok":      True,
@@ -1792,27 +1807,29 @@ def api_bars(symbol):
 
 @app.route("/api/detail/<symbol>")
 def api_detail(symbol):
-    """Combined stock detail: company info, OHLCV stats, signal, position, news."""
+    """Combined stock detail: OHLCV stats from Alpaca cache, signal, position, news."""
     symbol = symbol.upper()
     try:
-        import yfinance as yf
-        info = {}
+        # Price from Alpaca quote cache (populated every 60 s by AlpacaExecutor)
+        price = None
         try:
-            info = yf.Ticker(symbol).info or {}
+            from src.trading.alpaca_executor import get_cached_price
+            price = get_cached_price(symbol)
         except Exception:
             pass
 
-        name       = info.get("longName") or info.get("shortName") or symbol
-        price      = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
-        prev_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
-        change_val = change_pct = None
-        if price and prev_close:
-            change_val = round(float(price) - float(prev_close), 2)
-            change_pct = round((float(price) / float(prev_close) - 1) * 100, 2)
+        # Fall back to bar history if quote cache miss
+        eng = _get_engine()
+        df_hist = eng.fetcher.fetch(symbol)
+        if price is None and df_hist is not None and not df_hist.empty:
+            price = float(df_hist["Close"].iloc[-1])
 
-        week52_high = info.get("fiftyTwoWeekHigh")
-        week52_low  = info.get("fiftyTwoWeekLow")
-        volume      = info.get("regularMarketVolume") or info.get("volume")
+        # Compute 52-week range and volume from bar history
+        week52_high = week52_low = volume = None
+        if df_hist is not None and not df_hist.empty:
+            week52_high = round(float(df_hist["High"].max()), 2)
+            week52_low  = round(float(df_hist["Low"].min()), 2)
+            volume      = int(df_hist["Volume"].iloc[-1]) if "Volume" in df_hist.columns else None
 
         # Signal from last cached state (fast — no recompute)
         with _lock:
@@ -1836,7 +1853,7 @@ def api_detail(symbol):
                 "stop_loss", "highest_price", "take_profit",
             )}
 
-        # Stock-specific news (fresh fetch, small TTL)
+        # News via Alpaca REST (15-min cache)
         now = datetime.now()
         news_items = []
         cached = _news_cache.get(symbol)
@@ -1844,9 +1861,7 @@ def api_detail(symbol):
             news_items = cached["items"]
         else:
             try:
-                raw_news = yf.Ticker(symbol).news or []
-                news_items = [_parse_news_item(n, symbol) for n in raw_news[:6] if n]
-                news_items = [it for it in news_items if it.get("title")]
+                news_items = _fetch_alpaca_news([symbol], limit=6)
                 _news_cache[symbol] = {"items": news_items, "fetched_at": now}
             except Exception:
                 pass
@@ -1854,17 +1869,17 @@ def api_detail(symbol):
         return jsonify({
             "ok":         True,
             "symbol":     symbol,
-            "name":       name,
+            "name":       symbol,
             "price":      round(float(price), 2) if price else None,
-            "change_val": change_val,
-            "change_pct": change_pct,
-            "open":       round(float(info["regularMarketOpen"]),    2) if info.get("regularMarketOpen")    else None,
-            "high":       round(float(info["regularMarketDayHigh"]), 2) if info.get("regularMarketDayHigh") else None,
-            "low":        round(float(info["regularMarketDayLow"]),  2) if info.get("regularMarketDayLow")  else None,
+            "change_val": None,
+            "change_pct": None,
+            "open":       None,
+            "high":       None,
+            "low":        None,
             "close":      round(float(price), 2) if price else None,
-            "volume":     int(volume) if volume else None,
-            "week52_high": round(float(week52_high), 2) if week52_high else None,
-            "week52_low":  round(float(week52_low),  2) if week52_low  else None,
+            "volume":     volume,
+            "week52_high": week52_high,
+            "week52_low":  week52_low,
             "signal":    signal_data,
             "position":  position_data,
             "news":      news_items,
@@ -1952,15 +1967,6 @@ def api_universe():
         result = dict(eng.dynamic_universe.last_result)
         result["current_watchlist"]  = eng.watchlist
         result["watchlist_size"]     = eng.config.watchlist_size
-        result["settings"] = {
-            "min_avg_volume":  eng.dynamic_universe.min_avg_volume,
-            "min_price":       eng.dynamic_universe.min_price,
-            "max_price":       eng.dynamic_universe.max_price,
-            "min_market_cap":  eng.dynamic_universe.min_market_cap,
-            "top_n":           eng.dynamic_universe.top_n,
-            "include_etfs":    eng.dynamic_universe.include_etfs,
-            "use_alpaca":      bool(eng.dynamic_universe.alpaca_api_key),
-        }
         return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -1990,22 +1996,6 @@ def api_universe_rescan():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-
-@app.route("/api/universe/settings", methods=["POST"])
-def api_universe_settings():
-    try:
-        data = request.get_json(force=True)
-        eng  = _get_engine()
-        du   = eng.dynamic_universe
-        if "min_avg_volume"  in data: du.min_avg_volume  = int(data["min_avg_volume"])
-        if "min_price"       in data: du.min_price       = float(data["min_price"])
-        if "max_price"       in data: du.max_price       = float(data["max_price"])
-        if "min_market_cap"  in data: du.min_market_cap  = float(data["min_market_cap"]) * 1e9
-        if "top_n"           in data: du.top_n           = int(data["top_n"])
-        if "include_etfs"    in data: du.include_etfs    = bool(data["include_etfs"])
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/leaderboard")
@@ -2171,28 +2161,31 @@ def api_user_email():
 
 @app.route("/api/news")
 def api_news():
-    """Return recent headlines for watchlist symbols (15-min cache, ≤8 symbols)."""
-    import yfinance as yf
+    """Return recent headlines for watchlist symbols via Alpaca (15-min cache)."""
     watchlist = (_get_engine().watchlist or [])[:8]
     if not watchlist:
         return jsonify({"ok": True, "items": []})
 
-    now      = datetime.now()
+    now       = datetime.now()
     all_items: list = []
+    to_fetch:  list = []
 
     for sym in watchlist:
         cached = _news_cache.get(sym)
         if cached and (now - cached["fetched_at"]).total_seconds() < _NEWS_CACHE_TTL:
             all_items.extend(cached["items"])
-            continue
+        else:
+            to_fetch.append(sym)
+
+    if to_fetch:
         try:
-            raw   = yf.Ticker(sym).news or []
-            items = [_parse_news_item(n, sym) for n in raw[:5] if n]
-            items = [it for it in items if it.get("title")]
-            _news_cache[sym] = {"items": items, "fetched_at": now}
-            all_items.extend(items)
+            fetched = _fetch_alpaca_news(to_fetch, limit=5 * len(to_fetch))
+            for sym in to_fetch:
+                items = [it for it in fetched if it.get("symbol") == sym][:5]
+                _news_cache[sym] = {"items": items, "fetched_at": now}
+                all_items.extend(items)
         except Exception as e:
-            log.debug(f"News fetch {sym}: {e}")
+            log.debug(f"Alpaca news fetch: {e}")
 
     all_items.sort(key=lambda x: x.get("published_at") or 0, reverse=True)
     return jsonify({"ok": True, "items": all_items[:30]})
@@ -2228,15 +2221,18 @@ def api_search(symbol):
     if not symbol or not re.match(r"^[A-Z0-9.\-]{1,6}$", symbol):
         return jsonify({"ok": False, "error": f"Invalid symbol: {symbol}"}), 400
     try:
-        import yfinance as yf
         from src.data.fetcher import MarketDataFetcher
         from src.signals.analyzer import SignalAnalyzer
         from src.signals.indicators import TechnicalIndicators
 
-        fetcher = MarketDataFetcher(lookback_days=60, interval="1d")
+        fetcher = MarketDataFetcher(
+            lookback_days=60, interval="1d",
+            api_key=config.alpaca_api_key, secret_key=config.alpaca_secret_key,
+        )
         df = fetcher.fetch(symbol)
 
         rsi = score = action = None
+        roc_10 = stoch_rsi = None
         if df is not None and not df.empty:
             ind_calc = TechnicalIndicators(
                 rsi_period=config.rsi_period, macd_fast=config.macd_fast,
@@ -2249,18 +2245,17 @@ def api_search(symbol):
                 buy_threshold=config.buy_threshold,
                 sell_threshold=config.sell_threshold,
             ).analyze(ind)
-            rsi      = round(ind.rsi, 1) if ind.rsi is not None else None
-            roc_10   = round(ind.roc_10 * 100, 2) if getattr(ind, "roc_10", None) is not None else None
+            rsi       = round(ind.rsi, 1) if ind.rsi is not None else None
+            roc_10    = round(ind.roc_10 * 100, 2) if getattr(ind, "roc_10", None) is not None else None
             stoch_rsi = round(ind.stoch_rsi, 1) if getattr(ind, "stoch_rsi", None) is not None else None
-            score    = round(sig.score, 3)
-            action   = sig.action
+            score     = round(sig.score, 3)
+            action    = sig.action
 
-        info = {}
+        # Price from Alpaca quote cache, fall back to bar history
         price = None
         try:
-            info  = yf.Ticker(symbol).info or {}
-            price = (info.get("regularMarketPrice") or info.get("currentPrice")
-                     or info.get("previousClose"))
+            from src.trading.alpaca_executor import get_cached_price
+            price = get_cached_price(symbol)
         except Exception:
             pass
         if price is None and df is not None and not df.empty:
@@ -2269,11 +2264,11 @@ def api_search(symbol):
         return jsonify({
             "ok":        True,
             "symbol":    symbol,
-            "name":      info.get("longName") or info.get("shortName") or symbol,
+            "name":      symbol,
             "price":     round(float(price), 2) if price else None,
-            "sector":    info.get("sector") or get_sector(symbol) or "—",
-            "pe_ratio":  round(float(info["trailingPE"]), 1) if info.get("trailingPE") else None,
-            "market_cap": info.get("marketCap"),
+            "sector":    get_sector(symbol) or "—",
+            "pe_ratio":  None,
+            "market_cap": None,
             "rsi":       rsi,
             "roc_10":    roc_10,
             "stoch_rsi": stoch_rsi,
@@ -2291,7 +2286,7 @@ def api_watchlist_get():
         return jsonify({"ok": True, "symbols": [], "items": []})
     eng = _get_engine()
     items = []
-    # Use engine's fetcher cache (yfinance historical — no extra network calls)
+    # Use engine's fetcher cache (Alpaca bars — no extra network calls)
     try:
         market_data = eng.fetcher.fetch_many(_personal_watchlist, force_refresh=False)
     except Exception:
@@ -5854,39 +5849,11 @@ td.diff-dn{color:#f87171}
       </div>
       <!-- Exchange breakdown -->
       <div id="u-exchange-row" style="display:flex;gap:12px;padding:10px 16px;border-top:1px solid var(--border);flex-wrap:wrap"></div>
-      <!-- Adjustable filter controls -->
-      <div style="padding:12px 16px;border-top:1px solid var(--border)">
-        <div style="font-size:12px;font-weight:600;color:var(--text1);margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em">Screener Filters</div>
-        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
-          <div style="display:flex;flex-direction:column;gap:3px">
-            <label style="font-size:11px;color:var(--text2)">Min Vol (K/day)</label>
-            <input id="u-min-vol" type="number" min="100" step="100" class="alpaca-input" style="width:110px" placeholder="500"/>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:3px">
-            <label style="font-size:11px;color:var(--text2)">Min Price ($)</label>
-            <input id="u-min-price" type="number" min="1" step="1" class="alpaca-input" style="width:90px" placeholder="10"/>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:3px">
-            <label style="font-size:11px;color:var(--text2)">Max Price ($)</label>
-            <input id="u-max-price" type="number" min="10" step="10" class="alpaca-input" style="width:90px" placeholder="1000"/>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:3px">
-            <label style="font-size:11px;color:var(--text2)">Min Cap ($B)</label>
-            <input id="u-min-cap" type="number" min="0.1" step="0.5" class="alpaca-input" style="width:90px" placeholder="200"/>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:3px">
-            <label style="font-size:11px;color:var(--text2)">Top N</label>
-            <input id="u-top-n" type="number" min="10" max="500" step="10" class="alpaca-input" style="width:80px" placeholder="150"/>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:3px;align-items:center">
-            <label style="font-size:11px;color:var(--text2)">Include ETFs</label>
-            <input id="u-include-etfs" type="checkbox" style="width:18px;height:18px;cursor:pointer" checked/>
-          </div>
-          <button class="btn-save" onclick="saveUniverseFilters()" style="margin-bottom:1px">Save Filters</button>
-          <button class="btn-save" onclick="rescanUniverse()" id="rescan-btn"
-                  style="margin-bottom:1px;background:#1d4ed8">Rescan Now</button>
-        </div>
-        <div id="u-filter-status" style="font-size:12px;margin-top:6px;display:none"></div>
+      <!-- Rescan button -->
+      <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:10px;align-items:center">
+        <button class="btn-save" onclick="rescanUniverse()" id="rescan-btn"
+                style="background:#1d4ed8">Rescan Now</button>
+        <div id="u-filter-status" style="font-size:12px;display:none"></div>
       </div>
       <!-- Universe chips -->
       <div style="padding:8px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Universe Tickers</div>
@@ -6070,15 +6037,6 @@ async function loadUniverse() {
       </div>`
     ).join('');
 
-    // Populate filter inputs from current settings
-    const s = data.settings || {};
-    if (s.min_avg_volume != null) document.getElementById('u-min-vol').value   = Math.round(s.min_avg_volume / 1000);
-    if (s.min_price      != null) document.getElementById('u-min-price').value = s.min_price;
-    if (s.max_price      != null) document.getElementById('u-max-price').value = s.max_price;
-    if (s.min_market_cap != null) document.getElementById('u-min-cap').value   = (s.min_market_cap / 1e9).toFixed(1);
-    if (s.top_n          != null) document.getElementById('u-top-n').value     = s.top_n;
-    document.getElementById('u-include-etfs').checked = s.include_etfs !== false;
-
     // Universe chips with category badge
     const cats  = data.categories || {};
     const catColor = {
@@ -6137,26 +6095,6 @@ async function loadUniverseLog() {
   }
 }
 
-async function saveUniverseFilters() {
-  const status = document.getElementById('u-filter-status');
-  const body = {
-    min_avg_volume: (parseFloat(document.getElementById('u-min-vol').value)   || 500) * 1000,
-    min_price:       parseFloat(document.getElementById('u-min-price').value) || 10,
-    max_price:       parseFloat(document.getElementById('u-max-price').value) || 1000,
-    min_market_cap:  parseFloat(document.getElementById('u-min-cap').value)   || 200,
-    top_n:           parseInt(document.getElementById('u-top-n').value)        || 50,
-    include_etfs:    document.getElementById('u-include-etfs').checked,
-  };
-  try {
-    const res  = await fetch('/api/universe/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-    const data = await res.json();
-    status.style.display  = 'block';
-    status.style.color    = data.ok ? '#10b981' : '#f87171';
-    status.textContent    = data.ok ? '✓ Filters saved.' : 'Error: ' + (data.error || 'unknown');
-  } catch(e) {
-    status.style.display = 'block'; status.style.color = '#f87171'; status.textContent = 'Network error.';
-  }
-}
 
 async function rescanUniverse() {
   const btn    = document.getElementById('rescan-btn');

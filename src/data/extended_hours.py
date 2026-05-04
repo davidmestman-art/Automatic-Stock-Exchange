@@ -1,15 +1,12 @@
-"""Pre-market and after-hours price data.
+"""Extended-hours price monitor using the shared Alpaca quote cache.
 
-Fetches extended-hours quotes for a list of symbols via yfinance.
-Results are cached for ``cache_ttl_seconds`` (default 120 s) so rapid
-dashboard refreshes don't hammer the API.
+Instead of a separate yfinance call, this reads from the 60-second quote
+cache already populated by AlpacaExecutor during normal trading cycles.
 """
 
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional
-
-import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +18,6 @@ class ExtendedHoursMonitor:
         self._cache_ts: Dict[str, datetime] = {}
 
     def fetch(self, symbols: List[str]) -> List[dict]:
-        """Return extended-hours data for each symbol (cached)."""
         results = []
         for sym in symbols:
             data = self._fetch_one(sym)
@@ -36,30 +32,25 @@ class ExtendedHoursMonitor:
             return self._cache.get(symbol)
 
         try:
-            info = yf.Ticker(symbol).info
-            regular = info.get("regularMarketPrice") or info.get("currentPrice")
-            pre = info.get("preMarketPrice")
-            post = info.get("postMarketPrice")
+            from src.trading.alpaca_executor import get_cached_price
+            price = get_cached_price(symbol)
+        except Exception:
+            price = None
 
-            def pct(ext_price):
-                if ext_price and regular:
-                    return round((ext_price / regular - 1) * 100, 2)
-                return None
-
-            result = {
-                "symbol": symbol,
-                "regular_price": round(float(regular), 2) if regular else None,
-                "pre_market_price": round(float(pre), 2) if pre else None,
-                "pre_market_change_pct": pct(pre),
-                "post_market_price": round(float(post), 2) if post else None,
-                "post_market_change_pct": pct(post),
-            }
-            self._cache[symbol] = result
-            self._cache_ts[symbol] = now
-            return result
-        except Exception as e:
-            logger.debug(f"Extended hours fetch failed for {symbol}: {e}")
+        if price is None:
             return None
+
+        result = {
+            "symbol": symbol,
+            "regular_price": round(float(price), 2),
+            "pre_market_price": round(float(price), 2),
+            "pre_market_change_pct": None,
+            "post_market_price": round(float(price), 2),
+            "post_market_change_pct": None,
+        }
+        self._cache[symbol] = result
+        self._cache_ts[symbol] = now
+        return result
 
     def clear_cache(self) -> None:
         self._cache.clear()

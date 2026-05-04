@@ -39,6 +39,8 @@ class TradingEngine:
         self.fetcher = MarketDataFetcher(
             lookback_days=config.lookback_days,
             interval=config.data_interval,
+            api_key=config.alpaca_api_key,
+            secret_key=config.alpaca_secret_key,
         )
         self.indicators = TechnicalIndicators(
             rsi_period=config.rsi_period,
@@ -95,7 +97,11 @@ class TradingEngine:
         )
         self.portfolio = Portfolio(initial_capital=config.initial_capital)
 
-        self.voo_monitor = VOOMonitor(alert_threshold_pct=config.voo_alert_threshold_pct)
+        self.voo_monitor = VOOMonitor(
+            alert_threshold_pct=config.voo_alert_threshold_pct,
+            api_key=config.alpaca_api_key,
+            secret_key=config.alpaca_secret_key,
+        )
         self.notifier = Notifier(
             ntfy_topic=config.ntfy_topic,
             pushover_token=config.pushover_token,
@@ -114,6 +120,8 @@ class TradingEngine:
                 buy_threshold=config.buy_threshold,
                 sell_threshold=config.sell_threshold,
                 min_agreeing=getattr(config, "mtf_min_agreeing", 2),
+                api_key=config.alpaca_api_key,
+                secret_key=config.alpaca_secret_key,
             )
 
         # Market regime detector
@@ -124,6 +132,8 @@ class TradingEngine:
             self._regime_detector = RegimeDetector(
                 bull_vix_max=getattr(config, "regime_bull_vix_max", 25.0),
                 bear_vix_min=getattr(config, "regime_bear_vix_min", 27.0),
+                api_key=config.alpaca_api_key,
+                secret_key=config.alpaca_secret_key,
             )
 
         # ML signal ranker
@@ -357,7 +367,12 @@ class TradingEngine:
 
             if orb_active:
                 orb_st = self._orb_session.get(symbol)
-                signal = self._compute_orb_signal(symbol, ind, current_price, orb_st, vol_1min)
+                orb_sig = self._compute_orb_signal(symbol, ind, current_price, orb_st, vol_1min)
+                # Fall back to momentum signal when ORB range is not yet formed
+                if orb_sig.action == "HOLD" and (orb_st is None or not (orb_st.formed if orb_st else False)):
+                    signal = self._compute_signal(symbol, ind)
+                else:
+                    signal = orb_sig
             else:
                 signal = self._compute_signal(symbol, ind)
             results[symbol] = signal
@@ -858,7 +873,7 @@ class TradingEngine:
             prices = self.executor.get_live_prices(symbols)
             if prices:
                 return prices
-            logger.warning("Alpaca quotes unavailable — falling back to yfinance")
+            logger.warning("Alpaca live quotes unavailable — falling back to bar cache")
         prices: Dict[str, float] = {}
         for symbol in symbols:
             p = self.fetcher.get_current_price(symbol)

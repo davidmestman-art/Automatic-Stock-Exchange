@@ -1,14 +1,15 @@
+"""Multi-timeframe signal analyzer using Alpaca bars via MarketDataFetcher."""
+
 import logging
+import os
 from dataclasses import dataclass
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Contribution weight of each timeframe to the final composite score
 _WEIGHTS: Dict[str, float] = {"1d": 0.50, "1h": 0.30, "15m": 0.20}
 
-# How much history to fetch per interval
-_PERIODS: Dict[str, str] = {"1d": "120d", "1h": "60d", "15m": "7d"}
+_LOOKBACK: Dict[str, int] = {"1d": 120, "1h": 60, "15m": 7}
 
 
 @dataclass
@@ -20,7 +21,7 @@ class MTFSignal:
     composite: float
     action: str
     confidence: float
-    agreement: int = 0          # how many TFs agree with the composite direction
+    agreement: int = 0
 
 
 class MultiTimeframeAnalyzer:
@@ -41,12 +42,16 @@ class MultiTimeframeAnalyzer:
         buy_threshold: float = 0.20,
         sell_threshold: float = -0.20,
         min_agreeing: int = 2,
+        api_key: str = "",
+        secret_key: str = "",
     ):
         self.indicators = indicators
         self.analyzer = analyzer
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
         self.min_agreeing = min_agreeing
+        self._api_key = api_key or os.getenv("ALPACA_API_KEY", "")
+        self._secret_key = secret_key or os.getenv("ALPACA_SECRET_KEY", "")
 
     def analyze(self, symbol: str) -> Optional[MTFSignal]:
         scores: Dict[str, float] = {}
@@ -69,7 +74,6 @@ class MultiTimeframeAnalyzer:
         )
         confidence = min(1.0, abs(composite) / max(self.buy_threshold, 0.01))
 
-        # Count how many TFs agree with the composite direction
         agreement = 0
         if action != "HOLD":
             for tf_score in scores.values():
@@ -78,7 +82,6 @@ class MultiTimeframeAnalyzer:
                 elif action == "SELL" and tf_score < 0:
                     agreement += 1
 
-        # Enforce minimum agreement — downgrade to HOLD when insufficient
         required = min(self.min_agreeing, len(scores))
         if action != "HOLD" and len(scores) >= 2 and agreement < required:
             action = "HOLD"
@@ -96,23 +99,19 @@ class MultiTimeframeAnalyzer:
 
     def _score_interval(self, symbol: str, interval: str) -> Optional[float]:
         try:
-            import yfinance as yf
+            from src.data.fetcher import MarketDataFetcher
 
-            raw = yf.download(
-                symbol,
-                period=_PERIODS[interval],
+            fetcher = MarketDataFetcher(
+                lookback_days=_LOOKBACK[interval],
                 interval=interval,
-                auto_adjust=True,
-                progress=False,
+                api_key=self._api_key,
+                secret_key=self._secret_key,
             )
-            if raw is None or raw.empty or len(raw) < 15:
+            df = fetcher.fetch(symbol)
+            if df is None or df.empty or len(df) < 15:
                 return None
 
-            # Flatten MultiIndex columns produced by single-ticker downloads
-            if hasattr(raw.columns, "levels"):
-                raw.columns = raw.columns.droplevel(1)
-
-            ind = self.indicators.compute(raw)
+            ind = self.indicators.compute(df)
             sig = self.analyzer.analyze(ind)
             return sig.score
 
