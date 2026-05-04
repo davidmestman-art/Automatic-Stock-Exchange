@@ -169,12 +169,16 @@ class TradingEngine:
 
     def run_cycle(self) -> Dict[str, SignalResult]:
         self._cycle += 1
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = self._get_et_time().strftime("%Y-%m-%d %H:%M:%S ET")
         logger.info(f"\n{_SEP}")
         logger.info(f"  Trading Cycle #{self._cycle}  —  {ts}")
         logger.info(_SEP)
 
         if self._use_alpaca and not self._market_is_open():
+            logger.info(
+                f"  [CYCLE] #{self._cycle} alive — market CLOSED — "
+                f"watchlist={len(self.watchlist)} stocks — sleeping until next cycle"
+            )
             return {}
 
         self._maybe_refresh_watchlist()
@@ -190,7 +194,7 @@ class TradingEngine:
         # VOO monitor — cached daily; send alert notification at most once per day
         voo = self.voo_monitor.check()
         if voo and voo.alert:
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = self._get_et_time().strftime("%Y-%m-%d")
             if self._voo_alert_sent_date != today:
                 self.notifier.voo_alert(voo.price, voo.ma200w, voo.gap_pct)
                 self._voo_alert_sent_date = today
@@ -394,6 +398,24 @@ class TradingEngine:
                         pnl_pct=pnl_pct,
                     )
 
+        # ── Top-5 signal scores — visible in every cycle's Railway logs ─────────
+        if results:
+            top5 = sorted(results.items(), key=lambda kv: abs(kv[1].score), reverse=True)[:5]
+            parts = [
+                f"{sym}={sig.score:+.3f}({sig.action})" for sym, sig in top5
+            ]
+            logger.info(f"  [SIGNALS] Top-5 scores this cycle: {' | '.join(parts)}")
+            buys  = sum(1 for s in results.values() if s.action == "BUY")
+            sells = sum(1 for s in results.values() if s.action == "SELL")
+            holds = sum(1 for s in results.values() if s.action == "HOLD")
+            logger.info(
+                f"  [SIGNALS] Summary: {len(results)} scored — "
+                f"BUY={buys}  SELL={sells}  HOLD={holds}  "
+                f"threshold={self.config.buy_threshold:.2f}"
+            )
+        else:
+            logger.warning("  [SIGNALS] No signals computed this cycle")
+
         self._log_summary(prices)
         return results
 
@@ -453,7 +475,7 @@ class TradingEngine:
         """Force an immediate session scan and return the new watchlist."""
         result = self.scanner.scan(self.indicators, self.analyzer, force=True)
         self.watchlist = result.watchlist
-        self._session_date = datetime.now().strftime("%Y-%m-%d")
+        self._session_date = self._get_et_time().strftime("%Y-%m-%d")
         logger.info(f"Watchlist force-refreshed: {self.watchlist}")
         return self.watchlist
 
@@ -534,17 +556,13 @@ class TradingEngine:
 
     @staticmethod
     def _get_et_time():
-        """Return current datetime in US/Eastern timezone."""
+        """Return current datetime in America/New_York (DST-aware)."""
         try:
             from zoneinfo import ZoneInfo
             return datetime.now(ZoneInfo("America/New_York"))
         except ImportError:
-            try:
-                import pytz
-                return datetime.now(pytz.timezone("America/New_York"))
-            except ImportError:
-                from datetime import timezone, timedelta
-                return datetime.now(timezone(timedelta(hours=-5)))
+            import pytz
+            return datetime.now(pytz.timezone("America/New_York"))
 
     def _maybe_refresh_watchlist(self) -> None:
         now_et = self._get_et_time()
@@ -552,34 +570,85 @@ class TradingEngine:
 
         # Defer until 9:15 AM ET (pre-market screener window)
         if now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 15):
+            logger.info(
+                f"  [SCREENER] Waiting for 9:15 AM ET — current ET time "
+                f"{now_et.strftime('%H:%M')} — screener will run later"
+            )
             return
 
         if self._session_date == today:
             return
+
         if self._pending_signals:
             logger.info(f"  New session — clearing {len(self._pending_signals)} stale pending signals")
             self._pending_signals.clear()
-        logger.info(f"  New session ({today}) — refreshing stock universe…")
+
+        logger.info(
+            f"  [SCREENER] New session {today} — starting universe screen "
+            f"(ET {now_et.strftime('%H:%M')})"
+        )
+
+        # ── Step 1: Universe screener ─────────────────────────────────────────
         try:
             new_universe = self.dynamic_universe.refresh_if_stale()
+            stats = self.dynamic_universe.last_result.get("filter_stats", {})
             if new_universe:
-                self.scanner.universe = list(dict.fromkeys(new_universe))
+                self.scanner.universe    = list(dict.fromkeys(new_universe))
                 self.scanner.volume_top_n = len(new_universe)
-                logger.info(f"  Universe updated: {len(new_universe)} tickers from daily screen")
+                logger.info(
+                    f"  [SCREENER] Universe screen complete — "
+                    f"{len(new_universe)} tickers passed "
+                    f"(candidates={stats.get('total', '?')} "
+                    f"→ vol/price={stats.get('after_vol_price', '?')} "
+                    f"→ mcap={stats.get('after_mcap', '?')} "
+                    f"ipo_removed={stats.get('removed_ipo', 0)} "
+                    f"spac_removed={stats.get('removed_spac', 0)})"
+                )
+            else:
+                logger.warning(
+                    f"  [SCREENER] Universe screen returned 0 tickers — "
+                    f"keeping scanner universe ({len(self.scanner.universe)} symbols)"
+                )
         except Exception as e:
-            logger.warning(f"  Universe refresh failed: {e} — using previous scanner universe")
+            logger.warning(f"  [SCREENER] Universe refresh failed: {e} — keeping previous scanner universe")
 
-        logger.info(f"  Running watchlist scan…")
+        # ── Step 2: Watchlist scan ────────────────────────────────────────────
+        logger.info(
+            f"  [SCREENER] Running watchlist scan on "
+            f"{len(self.scanner.universe)} candidates…"
+        )
         try:
             result = self.scanner.scan(self.indicators, self.analyzer)
             if result.watchlist:
                 self.watchlist = result.watchlist
                 self._session_date = today
-                logger.info(f"  Watchlist set to: {self.watchlist}")
+                # Log top scores so we can verify signals are alive
+                top = sorted(
+                    result.scores.items(), key=lambda kv: abs(kv[1]), reverse=True
+                )[:5]
+                top_str = "  ".join(f"{s}={v:+.3f}" for s, v in top)
+                logger.info(
+                    f"  [SCREENER] Watchlist ({len(self.watchlist)} stocks): "
+                    f"{self.watchlist}"
+                )
+                logger.info(f"  [SCREENER] Top scanner scores: {top_str}")
             else:
-                logger.warning("  Scan returned empty watchlist — keeping previous")
+                # Explicit fallback so trading never stops
+                fallback = self.config.symbols
+                logger.warning(
+                    f"  [SCREENER] Scan returned empty watchlist — "
+                    f"falling back to config.symbols: {fallback}"
+                )
+                self.watchlist = list(fallback)
+                self._session_date = today   # mark done so we don't retry every cycle
         except Exception as e:
-            logger.error(f"  Watchlist scan failed: {e} — keeping previous")
+            fallback = self.config.symbols
+            logger.error(
+                f"  [SCREENER] Watchlist scan failed ({e}) — "
+                f"falling back to config.symbols: {fallback}"
+            )
+            self.watchlist = list(fallback)
+            self._session_date = today
 
         # Attempt ML model (re-)training at the start of each new session
         if self._signal_ranker is not None:
@@ -590,7 +659,7 @@ class TradingEngine:
 
     def _refresh_sector_returns(self) -> None:
         """Fetch and cache 5-day returns for all sector ETFs. Runs once per calendar day."""
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = self._get_et_time().strftime("%Y-%m-%d")
         if self._sector_returns_date == today and self._sector_returns:
             return
         etfs = list(set(SECTOR_ETFS.values()))
