@@ -5872,7 +5872,7 @@ td.diff-dn{color:#f87171}
           </div>
           <div style="display:flex;flex-direction:column;gap:3px">
             <label style="font-size:11px;color:var(--text2)">Min Cap ($B)</label>
-            <input id="u-min-cap" type="number" min="0.1" step="0.5" class="alpaca-input" style="width:90px" placeholder="2"/>
+            <input id="u-min-cap" type="number" min="0.1" step="0.5" class="alpaca-input" style="width:90px" placeholder="200"/>
           </div>
           <div style="display:flex;flex-direction:column;gap:3px">
             <label style="font-size:11px;color:var(--text2)">Top N</label>
@@ -6143,7 +6143,7 @@ async function saveUniverseFilters() {
     min_avg_volume: (parseFloat(document.getElementById('u-min-vol').value)   || 500) * 1000,
     min_price:       parseFloat(document.getElementById('u-min-price').value) || 10,
     max_price:       parseFloat(document.getElementById('u-max-price').value) || 1000,
-    min_market_cap:  parseFloat(document.getElementById('u-min-cap').value)   || 100,
+    min_market_cap:  parseFloat(document.getElementById('u-min-cap').value)   || 200,
     top_n:           parseInt(document.getElementById('u-top-n').value)        || 50,
     include_etfs:    document.getElementById('u-include-etfs').checked,
   };
