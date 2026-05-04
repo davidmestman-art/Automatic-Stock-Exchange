@@ -88,7 +88,7 @@ class TradingConfig:
     universe_min_avg_volume: int   = 500_000          # shares / day
     universe_min_price:      float = 10.0
     universe_max_price:      float = 1_000.0
-    universe_min_market_cap: float = 2_000_000_000.0  # $2 B
+    universe_min_market_cap: float = 100_000_000_000.0  # $100 B
     universe_top_n:          int   = 150
     universe_include_etfs:   bool  = True
     universe_use_alpaca:     bool  = True             # attempt Alpaca assets API

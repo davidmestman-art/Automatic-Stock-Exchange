@@ -83,8 +83,44 @@ _ALL_CANDIDATES: List[str] = sorted(set(SP500_UNIVERSE + NASDAQ_100 + DOW_30))
 MIN_AVG_VOLUME:  int   = 500_000           # shares / day
 MIN_PRICE:       float = 10.0
 MAX_PRICE:       float = 1_000.0
-MIN_MARKET_CAP:  float = 200_000_000_000.0  # $200 B
+MIN_MARKET_CAP:  float = 100_000_000_000.0  # $100 B
 TOP_N:           int   = 50
+
+# ── Mega-cap seed: stocks with market cap ≥ ~$80B ──────────────────────────────
+# Used to pre-filter the 10,000+ Alpaca asset list BEFORE any data download.
+# When Alpaca returns the full exchange list, we intersect with this set so that
+# yf.download only ever touches ~80 tickers instead of 10,000+.
+# Update periodically as companies cross the threshold.
+_MEGA_CAP_SEED: frozenset = frozenset([
+    # Technology
+    "AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CRM", "ADBE", "AMD", "QCOM", "TXN",
+    "INTC", "AMAT", "LRCX", "KLAC", "MU", "ADI", "MRVL", "NOW", "PANW", "SNPS",
+    "CDNS", "INTU", "CSCO", "ACN", "IBM", "FICO", "PLTR", "ANET", "CRWD", "APP",
+    # Communication Services
+    "GOOGL", "GOOG", "META", "NFLX", "T", "VZ", "TMUS", "DIS", "CMCSA",
+    # Consumer Discretionary
+    "AMZN", "TSLA", "HD", "MCD", "NKE", "BKNG", "LOW", "SBUX", "TJX",
+    "UBER", "ABNB", "CMG", "ORLY",
+    # Consumer Staples
+    "WMT", "COST", "PG", "KO", "PEP", "PM", "MO", "CL", "MDLZ",
+    # Financials
+    "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "AXP",
+    "C", "COF", "CME", "SPGI", "MCO", "MMC", "AON", "ICE", "BK", "FI", "PYPL",
+    # Health Care
+    "UNH", "LLY", "JNJ", "MRK", "ABBV", "TMO", "ABT", "DHR", "BMY", "PFE",
+    "AMGN", "GILD", "CI", "ELV", "MDT", "SYK", "BSX", "ISRG", "ZTS", "REGN",
+    "VRTX", "CVS", "HUM",
+    # Industrials
+    "GE", "RTX", "HON", "CAT", "DE", "BA", "UNP", "UPS", "LMT", "NOC",
+    "GD", "ETN", "EMR", "ITW", "MMM", "CTAS", "CSX", "NSC", "ODFL",
+    # Energy
+    "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "MPC", "PSX", "WMB", "LNG",
+    # Materials
+    "LIN", "APD", "SHW", "ECL", "NEM", "FCX",
+    # Utilities / Real Estate
+    "NEE", "DUK", "SO",
+    # Mega-cap ETFs always pass through separately — no need to list here
+])
 
 _CACHE_PATH   = Path(__file__).resolve().parent.parent.parent / "universe_cache.json"
 _LOG_PATH     = Path(__file__).resolve().parent.parent.parent / "screener_log.json"
@@ -230,11 +266,23 @@ class DynamicUniverse:
         alpaca_names: Dict[str, str] = {}
         using_alpaca = False
         if self.alpaca_api_key and self.alpaca_secret_key:
-            candidates, alpaca_names = _fetch_alpaca_assets(
+            raw_candidates, alpaca_names = _fetch_alpaca_assets(
                 self.alpaca_api_key, self.alpaca_secret_key, self.paper_trading
             )
-            if candidates:
+            if raw_candidates:
                 using_alpaca = True
+                # Pre-filter to mega-cap seed BEFORE any data download.
+                # Alpaca returns 10,000+ tickers; we only want the ~80 with
+                # market cap ≥ $100B so that yf.download touches a tiny list.
+                candidates = [s for s in raw_candidates if s in _MEGA_CAP_SEED]
+                log.info(
+                    "[Universe] Pre-filtered %d Alpaca tickers → %d mega-cap candidates",
+                    len(raw_candidates), len(candidates),
+                )
+                if not candidates:
+                    # Seed list may be outdated — fall back to full intersection
+                    candidates = list(_ALL_CANDIDATES)
+                    log.warning("[Universe] Mega-cap seed returned 0 matches — using constituent lists")
 
         if not using_alpaca:
             candidates = list(_ALL_CANDIDATES)
