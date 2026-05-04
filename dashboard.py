@@ -818,6 +818,16 @@ _current_profile: str = "moderate"
 log = logging.getLogger(__name__)
 
 
+def _now_et() -> datetime:
+    """Return current datetime in America/New_York (DST-aware)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York"))
+    except ImportError:
+        import pytz
+        return datetime.now(pytz.timezone("America/New_York"))
+
+
 def _load_user_settings() -> dict:
     if _SETTINGS_PATH.exists():
         try:
@@ -918,8 +928,8 @@ def _background_loop() -> None:
                 _last_cycle_at = datetime.now()
             except Exception as e:
                 log.error(f"Background cycle error: {e}")
-        # Auto-trigger weekend backtest on Fridays after market close (≥16:00)
-        _now = datetime.now()
+        # Auto-trigger weekend backtest on Fridays after market close (≥16:00 ET)
+        _now = _now_et()
         if _now.weekday() == 4 and _now.hour >= 16 and not _backtest_running:
             last_end = _backtest_report.get("period_end") if _backtest_report else None
             if last_end != _now.date().isoformat():
@@ -934,7 +944,7 @@ def _background_loop() -> None:
 def _safe_empty_state(error: str = "") -> dict:
     """Minimal valid state returned when _build_state fails completely."""
     return {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
         "mode": "Local Simulation",
         "market_open": None,
         "portfolio": {
@@ -1172,7 +1182,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
             log.debug("Daily performance fetch failed: %s", e)
 
     # Count today's trades
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = _now_et().strftime("%Y-%m-%d")
     today_trade_count = sum(
         1 for t in trades_list if (t.get("timestamp") or "").startswith(today_str)
     )
@@ -1185,7 +1195,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         log.debug(f"Extended hours fetch error: {e}")
 
     return {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
         "mode": mode,
         "market_open": market_open,
         "portfolio": {
@@ -1596,7 +1606,7 @@ def api_stats():
         weekly_map[f"{yr}-W{wk:02d}"] += t.pnl
         monthly_map[f"{d.year}-{d.month:02d}"] += t.pnl
 
-    today = datetime.now().date()
+    today = _now_et().date()
     daily_pnl  = [{"period": (today - timedelta(days=i)).isoformat(),
                    "pnl": round(daily_map.get((today - timedelta(days=i)).isoformat(), 0.0), 2)}
                   for i in range(29, -1, -1)]

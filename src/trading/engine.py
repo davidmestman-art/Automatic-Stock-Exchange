@@ -169,7 +169,7 @@ class TradingEngine:
 
     def run_cycle(self) -> Dict[str, SignalResult]:
         self._cycle += 1
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = self._get_et_time().strftime("%Y-%m-%d %H:%M:%S ET")
         logger.info(f"\n{_SEP}")
         logger.info(f"  Trading Cycle #{self._cycle}  —  {ts}")
         logger.info(_SEP)
@@ -194,7 +194,7 @@ class TradingEngine:
         # VOO monitor — cached daily; send alert notification at most once per day
         voo = self.voo_monitor.check()
         if voo and voo.alert:
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = self._get_et_time().strftime("%Y-%m-%d")
             if self._voo_alert_sent_date != today:
                 self.notifier.voo_alert(voo.price, voo.ma200w, voo.gap_pct)
                 self._voo_alert_sent_date = today
@@ -475,7 +475,7 @@ class TradingEngine:
         """Force an immediate session scan and return the new watchlist."""
         result = self.scanner.scan(self.indicators, self.analyzer, force=True)
         self.watchlist = result.watchlist
-        self._session_date = datetime.now().strftime("%Y-%m-%d")
+        self._session_date = self._get_et_time().strftime("%Y-%m-%d")
         logger.info(f"Watchlist force-refreshed: {self.watchlist}")
         return self.watchlist
 
@@ -556,17 +556,13 @@ class TradingEngine:
 
     @staticmethod
     def _get_et_time():
-        """Return current datetime in US/Eastern timezone."""
+        """Return current datetime in America/New_York (DST-aware)."""
         try:
             from zoneinfo import ZoneInfo
             return datetime.now(ZoneInfo("America/New_York"))
         except ImportError:
-            try:
-                import pytz
-                return datetime.now(pytz.timezone("America/New_York"))
-            except ImportError:
-                from datetime import timezone, timedelta
-                return datetime.now(timezone(timedelta(hours=-5)))
+            import pytz
+            return datetime.now(pytz.timezone("America/New_York"))
 
     def _maybe_refresh_watchlist(self) -> None:
         now_et = self._get_et_time()
@@ -663,7 +659,7 @@ class TradingEngine:
 
     def _refresh_sector_returns(self) -> None:
         """Fetch and cache 5-day returns for all sector ETFs. Runs once per calendar day."""
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = self._get_et_time().strftime("%Y-%m-%d")
         if self._sector_returns_date == today and self._sector_returns:
             return
         etfs = list(set(SECTOR_ETFS.values()))
