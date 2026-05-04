@@ -14,6 +14,13 @@ from ..utils.journal import TradeJournal
 from ..utils.notifications import Notifier
 from ..utils.sectors import SECTOR_ETFS, get_sector, sector_position_count
 from .executor import PaperExecutor
+from .orb import (
+    ORBSession,
+    fetch_opening_range_bars,
+    fetch_prev_day_levels,
+    fetch_latest_1min_volume,
+    screen_orb_universe,
+)
 from .portfolio import Portfolio
 from .risk import RiskManager
 
@@ -162,6 +169,8 @@ class TradingEngine:
         self._pending_signals: Dict[str, dict] = {}
         # Symbols blocked by correlation filter in the most recent signal pass
         self._last_corr_blocked: Dict[str, str] = {}
+        # ── ORB strategy session state ─────────────────────────────────────────
+        self._orb_session = ORBSession()
 
         logger.info(f"TradingEngine initialised  [mode={mode}]")
 
@@ -169,35 +178,98 @@ class TradingEngine:
 
     def run_cycle(self) -> Dict[str, SignalResult]:
         self._cycle += 1
-        ts = self._get_et_time().strftime("%Y-%m-%d %H:%M:%S ET")
+        now_et  = self._get_et_time()
+        ts      = now_et.strftime("%Y-%m-%d %H:%M:%S ET")
+        et_mins = now_et.hour * 60 + now_et.minute
+        today   = now_et.strftime("%Y-%m-%d")
+
         logger.info(f"\n{_SEP}")
         logger.info(f"  Trading Cycle #{self._cycle}  —  {ts}")
         logger.info(_SEP)
 
-        if self._use_alpaca and not self._market_is_open():
+        # Reset ORB session at the start of each new calendar day
+        if self._orb_session.session_date != today:
+            self._orb_session.reset(today)
+
+        # ── Phase 1: Pre-market universe scan (9:15–9:29 ET) ─────────────────
+        if 9 * 60 + 15 <= et_mins < 9 * 60 + 30:
+            if not self._orb_session.screened:
+                self._orb_do_scan()
             logger.info(
-                f"  [CYCLE] #{self._cycle} alive — market CLOSED — "
-                f"watchlist={len(self.watchlist)} stocks — sleeping until next cycle"
+                f"  [ORB] PRE-MARKET scan done — "
+                f"{len(self._orb_session.states)} stocks queued for OR tracking"
             )
             return {}
 
-        self._maybe_refresh_watchlist()
+        # ── Phase 2: Opening range formation (9:30–9:59 ET) — no trading ─────
+        if 9 * 60 + 30 <= et_mins < 10 * 60:
+            self._orb_session.phase = "FORMING"
+            if self._orb_session.screened:
+                self._orb_update_ranges()
+            elapsed   = et_mins - 9 * 60 - 30
+            remaining = 30 - elapsed
+            valid     = sum(1 for s in self._orb_session.states.values() if s.or_high)
+            logger.info(
+                f"  [ORB] FORMING — {elapsed}m elapsed / {remaining}m left "
+                f"— {valid} ranges active"
+            )
+            if self._use_alpaca:
+                self.executor.sync_portfolio(self.portfolio, risk_mgr=self.risk)
+            prices = self._get_prices(list(self._orb_session.states.keys()))
+            if self._cycle == 1:
+                self.portfolio.update_day_start(prices)
+            return {}
+
+        # ── Finalize opening range once at 10:00 ─────────────────────────────
+        if not self._orb_session.range_formed and self._orb_session.screened:
+            self._orb_update_ranges()
+            self._orb_session.finalize_range()
+            try:
+                logger.info("  [ORB] Fetching prev-day high/low (take-profit targets)…")
+                pd_levels = fetch_prev_day_levels(self._orb_session.watchlist())
+                for sym, (ph, pl) in pd_levels.items():
+                    self._orb_session.set_prev_day(sym, ph, pl)
+                logger.info(f"  [ORB] Prev-day levels loaded for {len(pd_levels)} symbols")
+            except Exception as e:
+                logger.warning(f"  [ORB] Prev-day fetch failed: {e}")
+
+        # ── Phase 4: 3:45 PM — close everything and stop trading ─────────────
+        if et_mins >= 15 * 60 + 45:
+            if self.portfolio.positions:
+                logger.info("  [ORB] 3:45 PM — closing all open positions")
+                self._orb_close_all()
+            self._orb_session.phase = "DONE"
+            logger.info(f"  [CYCLE] #{self._cycle} — session DONE")
+            return {}
+
+        # ── Standard market-closed guard (Alpaca mode only) ───────────────────
+        if self._use_alpaca and not self._market_is_open():
+            logger.info(
+                f"  [CYCLE] #{self._cycle} alive — market CLOSED — "
+                f"watchlist={len(self.watchlist)} stocks"
+            )
+            return {}
+
+        # ── Determine active watchlist ────────────────────────────────────────
+        if self._orb_session.screened and self._orb_session.states:
+            self.watchlist = self._orb_session.watchlist()
+        else:
+            self._maybe_refresh_watchlist()
+
         self._refresh_sector_returns()
 
-        # Refresh market regime (cached; fetches at most once every 4 h)
         if self._regime_detector is not None:
             try:
                 self._regime_result = self._regime_detector.detect()
             except Exception as e:
                 logger.warning(f"  Regime detection failed: {e}")
 
-        # VOO monitor — cached daily; send alert notification at most once per day
         voo = self.voo_monitor.check()
         if voo and voo.alert:
-            today = self._get_et_time().strftime("%Y-%m-%d")
-            if self._voo_alert_sent_date != today:
+            today_str = self._get_et_time().strftime("%Y-%m-%d")
+            if self._voo_alert_sent_date != today_str:
                 self.notifier.voo_alert(voo.price, voo.ma200w, voo.gap_pct)
-                self._voo_alert_sent_date = today
+                self._voo_alert_sent_date = today_str
 
         if self._use_alpaca:
             self.executor.sync_portfolio(self.portfolio, risk_mgr=self.risk)
@@ -207,37 +279,49 @@ class TradingEngine:
             logger.error("No market data returned — skipping cycle")
             return {}
 
-        # Ensure position data is available for correlation filter
         if self.config.use_correlation_filter and self.portfolio.positions:
             pos_syms = [s for s in self.portfolio.positions if s not in market_data]
             if pos_syms:
-                extra = self.fetcher.fetch_many(pos_syms, force_refresh=False)
-                market_data.update(extra)
+                market_data.update(self.fetcher.fetch_many(pos_syms, force_refresh=False))
 
         self._last_corr_blocked = self._compute_corr_blocks(market_data)
-
         prices = self._get_prices(list(market_data.keys()))
 
         if self._cycle == 1:
             self.portfolio.update_day_start(prices)
 
-        # Trailing stop updates + exit checks run in all modes
         self._check_exit_conditions(prices)
 
-        # Process confirmations queued in the previous cycle
+        # Confirmations (only used outside ORB ACTIVE phase)
         _confirmed_buys: set = set()
-        if self.config.use_confirmation and self._pending_signals:
+        orb_active = self._orb_session.range_formed
+        if not orb_active and self.config.use_confirmation and self._pending_signals:
             tol = self.config.confirmation_tolerance_pct
             for sym, info in list(self._pending_signals.items()):
                 if sym in prices:
-                    cp = prices[sym]
+                    cp    = prices[sym]
                     floor = info["signal_price"] * (1 - tol)
                     if cp >= floor:
                         _confirmed_buys.add(sym)
-                        logger.info(f"  Confirmation PASSED {sym}: ${cp:.2f} ≥ ${floor:.2f}")
                     else:
-                        logger.info(f"  Confirmation FAILED {sym}: ${cp:.2f} dropped below ${floor:.2f}")
+                        logger.info(
+                            f"  Confirmation FAILED {sym}: ${cp:.2f} dropped below ${floor:.2f}"
+                        )
             self._pending_signals.clear()
+
+        # Fetch latest 1-min bar volume for ORB breakout candidates only
+        vol_1min: Dict[str, float] = {}
+        if orb_active:
+            candidates = [
+                s for s in self.watchlist
+                if s in prices and (st := self._orb_session.get(s))
+                and st.or_high and (prices[s] > st.or_high or prices[s] < st.or_low)
+            ]
+            if candidates:
+                try:
+                    vol_1min = fetch_latest_1min_volume(candidates)
+                except Exception as e:
+                    logger.debug(f"  [ORB] vol fetch failed: {e}")
 
         results: Dict[str, SignalResult] = {}
 
@@ -245,11 +329,10 @@ class TradingEngine:
             if symbol not in market_data or symbol not in prices:
                 continue
 
-            df = market_data[symbol]
+            df            = market_data[symbol]
             current_price = prices[symbol]
 
             ind = self.indicators.compute(df)
-            # Inject sector momentum (stock 5d return vs sector ETF 5d return)
             if len(df) >= 6:
                 stock_5d = float(df["Close"].iloc[-1]) / float(df["Close"].iloc[-6]) - 1
                 sec_name = get_sector(symbol)
@@ -257,7 +340,11 @@ class TradingEngine:
                     ind.sector_mom = stock_5d - self._sector_returns[sec_name]
             ind.close = current_price
 
-            signal = self._compute_signal(symbol, ind)
+            if orb_active:
+                orb_st = self._orb_session.get(symbol)
+                signal = self._compute_orb_signal(symbol, ind, current_price, orb_st, vol_1min)
+            else:
+                signal = self._compute_signal(symbol, ind)
             results[symbol] = signal
 
             rsi_str = f"RSI {ind.rsi:5.1f}" if ind.rsi else "RSI  n/a"
@@ -268,24 +355,16 @@ class TradingEngine:
             )
 
             portfolio_value = self.portfolio.total_value_at(prices)
-            daily_pnl = self.portfolio.daily_pnl_pct(prices)
-
-            ind_snap = self._indicator_snapshot(ind, signal)
+            daily_pnl       = self.portfolio.daily_pnl_pct(prices)
+            ind_snap        = self._indicator_snapshot(ind, signal)
 
             if signal.action == "BUY" and not self.portfolio.has_position(symbol):
-                # Earnings protection (also applied in scanner, but double-check at execution)
                 if self.earnings_cal and self.earnings_cal.has_upcoming_earnings(symbol):
                     logger.debug(f"  Earnings protection: skipping BUY {symbol}")
                     continue
 
-                # Correlation filter — high correlation halves position size (doesn't block)
                 corr_reduced = symbol in self._last_corr_blocked
-                if corr_reduced:
-                    logger.info(
-                        f"  Correlation reduced {symbol} (0.5×): {self._last_corr_blocked[symbol]}"
-                    )
 
-                # In BEAR regime, only trade if signal is strong enough
                 if self._regime_result is not None and self._regime_result.regime == "BEAR":
                     bear_min = self.config.buy_threshold * getattr(
                         self.config, "regime_bear_min_score_mult", 1.8
@@ -310,58 +389,64 @@ class TradingEngine:
                     atr_pct=ind.atr_pct,
                 )
                 if rc.approved:
-                    # Correlation-reduced: halve position size for correlated entries
                     if corr_reduced:
-                        rc.max_shares = rc.max_shares * 0.5
-                    # Apply regime-based position-size multiplier
+                        rc.max_shares *= 0.5
                     if self._regime_result is not None:
-                        cfg = self.config
-                        mult_key = f"regime_size_mult_{self._regime_result.regime.lower()}"
-                        regime_mult = getattr(cfg, mult_key, _REGIME_SIZE_MULT.get(
-                            self._regime_result.regime, 1.0
-                        ))
-                        rc.max_shares = rc.max_shares * regime_mult
-                    if self.config.use_confirmation and symbol not in _confirmed_buys:
-                        # Queue for next-candle confirmation
+                        mult_key   = f"regime_size_mult_{self._regime_result.regime.lower()}"
+                        regime_mult = getattr(
+                            self.config, mult_key,
+                            _REGIME_SIZE_MULT.get(self._regime_result.regime, 1.0),
+                        )
+                        rc.max_shares *= regime_mult
+
+                    # ORB: stop = OR midpoint, take-profit = prev-day high (absolute $)
+                    orb_st = self._orb_session.get(symbol) if orb_active else None
+                    if orb_st and orb_st.or_midpoint:
+                        sl = orb_st.or_midpoint
+                        tp = orb_st.prev_day_high or self.risk.take_profit_price(current_price)
+                    elif not orb_active and self.config.use_confirmation and symbol not in _confirmed_buys:
                         self._pending_signals[symbol] = {
                             "signal_price": current_price,
                             "queued_at": datetime.now().isoformat(),
                         }
-                        logger.info(f"  {symbol}: BUY queued for confirmation @ ${current_price:.2f}")
+                        logger.info(
+                            f"  {symbol}: BUY queued for confirmation @ ${current_price:.2f}"
+                        )
+                        continue
                     else:
-                        self.executor.execute_buy(
-                            symbol=symbol,
-                            shares=rc.max_shares,
-                            price=current_price,
-                            stop_loss=self.risk.stop_loss_price(current_price),
-                            take_profit=self.risk.take_profit_price(current_price),
-                            reason=", ".join(signal.reasons[:2]),
-                            portfolio=self.portfolio,
-                        )
-                        self.notifier.trade_buy(
-                            symbol, rc.max_shares, current_price, ", ".join(signal.reasons[:2])
-                        )
-                        self.journal.log(
-                            action="BUY",
-                            symbol=symbol,
-                            shares=rc.max_shares,
-                            price=current_price,
-                            reason=", ".join(signal.reasons[:2]),
-                            indicators=ind_snap,
-                        )
-                        self.emailer.send_trade(
-                            action="BUY",
-                            symbol=symbol,
-                            shares=rc.max_shares,
-                            price=current_price,
-                            score=signal.score,
-                            reasons=signal.reasons,
-                            indicators=ind_snap,
-                        )
+                        sl = self.risk.stop_loss_price(current_price)
+                        tp = self.risk.take_profit_price(current_price)
+
+                    self.executor.execute_buy(
+                        symbol=symbol,
+                        shares=rc.max_shares,
+                        price=current_price,
+                        stop_loss=sl,
+                        take_profit=tp,
+                        reason=", ".join(signal.reasons[:2]),
+                        portfolio=self.portfolio,
+                    )
+                    if orb_st:
+                        orb_st.breakout = "up"
+                    self.notifier.trade_buy(
+                        symbol, rc.max_shares, current_price, ", ".join(signal.reasons[:2])
+                    )
+                    self.journal.log(
+                        action="BUY", symbol=symbol, shares=rc.max_shares,
+                        price=current_price, reason=", ".join(signal.reasons[:2]),
+                        indicators=ind_snap,
+                    )
+                    self.emailer.send_trade(
+                        action="BUY", symbol=symbol, shares=rc.max_shares,
+                        price=current_price, score=signal.score,
+                        reasons=signal.reasons, indicators=ind_snap,
+                    )
                 else:
                     logger.debug(f"  Risk rejected {symbol}: {rc.reason}")
 
             elif signal.action == "SELL" and self.portfolio.has_position(symbol):
+                if orb_active and (orb_st := self._orb_session.get(symbol)):
+                    orb_st.breakout = "down"
                 pos = self.portfolio.positions.get(symbol)
                 self.executor.execute_sell(
                     symbol=symbol,
@@ -370,48 +455,36 @@ class TradingEngine:
                     portfolio=self.portfolio,
                 )
                 if pos:
-                    pnl = (current_price - pos.entry_price) * pos.shares
+                    pnl     = (current_price - pos.entry_price) * pos.shares
                     pnl_pct = (current_price - pos.entry_price) / pos.entry_price
                     self.notifier.trade_sell(
                         symbol, pos.shares, current_price, pnl,
                         f"Signal: {', '.join(signal.reasons[:2])}"
                     )
                     self.journal.log(
-                        action="SELL",
-                        symbol=symbol,
-                        shares=pos.shares,
+                        action="SELL", symbol=symbol, shares=pos.shares,
                         price=current_price,
                         reason=f"Signal: {', '.join(signal.reasons[:2])}",
-                        indicators=ind_snap,
-                        pnl=pnl,
-                        pnl_pct=pnl_pct,
+                        indicators=ind_snap, pnl=pnl, pnl_pct=pnl_pct,
                     )
                     self.emailer.send_trade(
-                        action="SELL",
-                        symbol=symbol,
-                        shares=pos.shares,
-                        price=current_price,
-                        score=signal.score,
-                        reasons=signal.reasons,
-                        indicators=ind_snap,
-                        pnl=pnl,
-                        pnl_pct=pnl_pct,
+                        action="SELL", symbol=symbol, shares=pos.shares,
+                        price=current_price, score=signal.score,
+                        reasons=signal.reasons, indicators=ind_snap,
+                        pnl=pnl, pnl_pct=pnl_pct,
                     )
 
-        # ── Top-5 signal scores — visible in every cycle's Railway logs ─────────
         if results:
             top5 = sorted(results.items(), key=lambda kv: abs(kv[1].score), reverse=True)[:5]
-            parts = [
-                f"{sym}={sig.score:+.3f}({sig.action})" for sym, sig in top5
-            ]
-            logger.info(f"  [SIGNALS] Top-5 scores this cycle: {' | '.join(parts)}")
-            buys  = sum(1 for s in results.values() if s.action == "BUY")
-            sells = sum(1 for s in results.values() if s.action == "SELL")
-            holds = sum(1 for s in results.values() if s.action == "HOLD")
             logger.info(
-                f"  [SIGNALS] Summary: {len(results)} scored — "
-                f"BUY={buys}  SELL={sells}  HOLD={holds}  "
-                f"threshold={self.config.buy_threshold:.2f}"
+                f"  [SIGNALS] Top-5: "
+                f"{' | '.join(f'{s}={g.score:+.3f}({g.action})' for s, g in top5)}"
+            )
+            buys  = sum(1 for g in results.values() if g.action == "BUY")
+            sells = sum(1 for g in results.values() if g.action == "SELL")
+            logger.info(
+                f"  [SIGNALS] {len(results)} scored — BUY={buys} SELL={sells} "
+                f"phase={self._orb_session.phase}"
             )
         else:
             logger.warning("  [SIGNALS] No signals computed this cycle")
@@ -805,13 +878,21 @@ class TradingEngine:
         for symbol, pos in self.portfolio.positions.items():
             price = prices.get(symbol, pos.entry_price)
             self.risk.update_trailing_stop(pos, price)
+
+            # Breakeven stop: when price reaches halfway to take-profit, move stop to entry
+            if pos.take_profit > pos.entry_price:
+                halfway = pos.entry_price + 0.5 * (pos.take_profit - pos.entry_price)
+                if price >= halfway and pos.stop_loss < pos.entry_price:
+                    pos.stop_loss = pos.entry_price
+                    logger.debug(f"  Breakeven stop set for {symbol} @ ${pos.entry_price:.2f}")
+
             stop_reason = (
                 "Trailing stop triggered" if self.risk.use_trailing_stop
                 else "Stop loss triggered"
             )
             if self.risk.check_stop_loss(pos.entry_price, price, pos):
                 exits.append((symbol, price, stop_reason))
-            elif self.risk.check_take_profit(pos.entry_price, price):
+            elif price >= pos.take_profit:
                 exits.append((symbol, price, "Take profit triggered"))
         for symbol, price, reason in exits:
             pos = self.portfolio.positions.get(symbol)
@@ -839,6 +920,143 @@ class TradingEngine:
                     pnl=pnl,
                     pnl_pct=pnl_pct,
                 )
+
+    # ── ORB helpers ───────────────────────────────────────────────────────────
+
+    def _orb_do_scan(self) -> None:
+        """9:15–9:29 ET: screen universe and lock ORB watchlist."""
+        logger.info("  [ORB] Starting pre-market universe scan…")
+        try:
+            symbols, pm_vols, avg_vols = screen_orb_universe()
+            self._orb_session.set_universe(symbols, pm_vols, avg_vols)
+            self.watchlist = self._orb_session.watchlist()
+            logger.info(
+                f"  [ORB] Universe ready: {len(symbols)} stocks — "
+                f"top 5 by PM vol: {symbols[:5]}"
+            )
+        except Exception as e:
+            logger.error(f"  [ORB] Pre-market scan failed: {e}")
+
+    def _orb_update_ranges(self) -> None:
+        """9:30–9:59 ET: pull latest 1-min bars and widen OR high/low."""
+        symbols = self._orb_session.watchlist()
+        if not symbols:
+            return
+        try:
+            bars = fetch_opening_range_bars(symbols)
+            for sym, (hi, lo) in bars.items():
+                self._orb_session.update_range(sym, hi, lo)
+            logger.debug(f"  [ORB] OR bars updated for {len(bars)} symbols")
+        except Exception as e:
+            logger.warning(f"  [ORB] Range update failed: {e}")
+
+    def _orb_close_all(self) -> None:
+        """Close every open position — called at 3:45 PM ET."""
+        for symbol in list(self.portfolio.positions.keys()):
+            pos = self.portfolio.positions.get(symbol)
+            prices = self._get_prices([symbol])
+            price = prices.get(symbol, pos.entry_price if pos else 0)
+            if not price:
+                continue
+            reason = "ORB EOD close 3:45 PM"
+            self.executor.execute_sell(symbol, price, reason, self.portfolio)
+            if pos:
+                pnl     = (price - pos.entry_price) * pos.shares
+                pnl_pct = (price - pos.entry_price) / pos.entry_price
+                self.notifier.trade_sell(symbol, pos.shares, price, pnl, reason)
+                self.journal.log(
+                    action="SELL", symbol=symbol, shares=pos.shares,
+                    price=price, reason=reason, pnl=pnl, pnl_pct=pnl_pct,
+                )
+                self.emailer.send_trade(
+                    action="SELL", symbol=symbol, shares=pos.shares,
+                    price=price, score=0.0, reasons=[reason],
+                    pnl=pnl, pnl_pct=pnl_pct,
+                )
+            logger.info(f"  [ORB] EOD closed {symbol} @ ${price:.2f}")
+
+    def _compute_orb_signal(
+        self,
+        symbol: str,
+        ind,
+        current_price: float,
+        orb_st,
+        vol_1min: Dict[str, float],
+    ) -> "SignalResult":
+        """
+        ORB signal: BUY on upward breakout with confluence, SELL on breakdown.
+
+        Confluence for BUY:
+          - price > OR high
+          - 1-min volume > 1.5x avg daily volume / 390 (avg bars/day)
+          - RSI in [40, 70]
+          - price > VWAP (if available)
+          - ADX > 20 (if available)
+
+        SELL triggered unconditionally on price < OR low (no confluence needed).
+        """
+        if orb_st is None or not orb_st.formed or orb_st.or_high is None:
+            return SignalResult(action="HOLD", score=0.0, confidence=0.0,
+                                reasons=["ORB range not yet formed"])
+
+        or_high = orb_st.or_high
+        or_low  = orb_st.or_low
+        reasons = []
+
+        # ── Breakdown SELL — no filter needed ────────────────────────────────
+        if current_price < or_low:
+            return SignalResult(
+                action="SELL",
+                score=-0.8,
+                confidence=0.8,
+                reasons=[f"ORB breakdown below ${or_low:.2f}"],
+            )
+
+        # ── Breakout BUY — require all confluence ─────────────────────────────
+        if current_price <= or_high:
+            return SignalResult(action="HOLD", score=0.0, confidence=0.0,
+                                reasons=["Price inside OR"])
+
+        # Volume confirmation: 1-min vol > 1.5x avg-per-minute
+        avg_per_min = orb_st.avg_daily_volume / 390.0 if orb_st.avg_daily_volume > 0 else 0
+        bar_vol = vol_1min.get(symbol, 0)
+        if avg_per_min > 0 and bar_vol < 1.5 * avg_per_min:
+            return SignalResult(action="HOLD", score=0.1, confidence=0.1,
+                                reasons=[
+                                    f"ORB breakout above ${or_high:.2f} — "
+                                    f"vol {bar_vol:.0f} < 1.5x avg {avg_per_min:.0f}"
+                                ])
+        reasons.append(f"ORB breakout ${current_price:.2f} > OR high ${or_high:.2f}")
+
+        # RSI 40–70
+        if ind.rsi is not None:
+            if not (40 <= ind.rsi <= 70):
+                return SignalResult(action="HOLD", score=0.1, confidence=0.1,
+                                    reasons=[f"RSI {ind.rsi:.1f} outside 40–70"])
+            reasons.append(f"RSI {ind.rsi:.1f} OK")
+
+        # VWAP confirm
+        if ind.vwap is not None:
+            if current_price <= ind.vwap:
+                return SignalResult(action="HOLD", score=0.1, confidence=0.1,
+                                    reasons=[f"Price ${current_price:.2f} below VWAP ${ind.vwap:.2f}"])
+            reasons.append(f"VWAP ${ind.vwap:.2f} OK")
+
+        # ADX > 20
+        if ind.adx is not None:
+            if ind.adx <= 20:
+                return SignalResult(action="HOLD", score=0.1, confidence=0.1,
+                                    reasons=[f"ADX {ind.adx:.1f} ≤ 20"])
+            reasons.append(f"ADX {ind.adx:.1f} OK")
+
+        score      = min(0.9, 0.5 + (current_price - or_high) / or_high)
+        confidence = min(0.9, score + 0.1)
+        return SignalResult(
+            action="BUY",
+            score=round(score, 4),
+            confidence=round(confidence, 4),
+            reasons=reasons,
+        )
 
     def _log_summary(self, prices: Dict[str, float]) -> None:
         s = self.portfolio.get_summary(prices)

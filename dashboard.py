@@ -2329,6 +2329,47 @@ def api_watchlist_remove():
     return jsonify({"ok": True, "symbols": _personal_watchlist})
 
 
+@app.route("/api/orb")
+def api_orb():
+    """Return ORB session state for the dashboard panel."""
+    eng  = _get_engine()
+    sess = eng._orb_session
+    now_et   = _now_et()
+    et_mins  = now_et.hour * 60 + now_et.minute
+
+    forming_end = 10 * 60          # 10:00 AM ET in minutes
+    countdown   = None
+    if 9 * 60 + 30 <= et_mins < forming_end:
+        countdown = forming_end - et_mins   # minutes remaining in range-formation window
+
+    symbols_data = []
+    for sym, st in sess.states.items():
+        symbols_data.append({
+            "symbol":         sym,
+            "or_high":        st.or_high,
+            "or_low":         st.or_low,
+            "or_midpoint":    st.or_midpoint,
+            "or_range":       st.or_range,
+            "prev_day_high":  st.prev_day_high,
+            "prev_day_low":   st.prev_day_low,
+            "formed":         st.formed,
+            "breakout":       st.breakout,
+            "pm_volume":      round(st.pre_market_volume) if st.pre_market_volume else None,
+            "avg_volume":     round(st.avg_daily_volume)  if st.avg_daily_volume  else None,
+        })
+
+    return jsonify({
+        "ok":           True,
+        "phase":        sess.phase,
+        "session_date": sess.session_date,
+        "screened":     sess.screened,
+        "range_formed": sess.range_formed,
+        "countdown_min": countdown,
+        "symbols":      symbols_data,
+        "symbol_count": len(symbols_data),
+    })
+
+
 # ── PWA routes ────────────────────────────────────────────────────────────────
 
 @app.route("/manifest.json")
@@ -2649,6 +2690,25 @@ body.light .hm-cell{border-color:rgba(0,0,0,0.08)}
 body.light .hm-price{color:rgba(0,0,0,0.4)}
 .hm-cell{cursor:pointer}
 .hm-cell.hm-selected{outline:2px solid #3b82f6;outline-offset:-1px}
+/* ── ORB panel ───────────────────────────────────────────────────────────── */
+#orb-panel{display:none}
+.orb-phase{display:inline-block;padding:2px 10px;border-radius:99px;font-size:11px;font-weight:700;letter-spacing:.5px;margin-left:8px}
+.orb-phase-IDLE,.orb-phase-DONE{background:#1e293b;color:#94a3b8}
+.orb-phase-SCANNING{background:#1e3a5f;color:#60a5fa}
+.orb-phase-FORMING{background:#3b2800;color:#fbbf24}
+.orb-phase-ACTIVE{background:#052e16;color:#4ade80}
+.orb-phase-CLOSING{background:#2d0f0f;color:#f87171}
+.orb-countdown{font-size:22px;font-weight:700;color:#fbbf24;font-variant-numeric:tabular-nums;letter-spacing:1px;padding:6px 0 2px}
+.orb-countdown-label{font-size:11px;color:var(--text2);margin-bottom:6px}
+.orb-tbl{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+.orb-tbl th{text-align:right;padding:5px 8px;color:var(--text2);font-weight:600;font-size:11px;border-bottom:1px solid var(--border);white-space:nowrap}
+.orb-tbl th:first-child{text-align:left}
+.orb-tbl td{padding:4px 8px;text-align:right;border-bottom:1px solid var(--border);white-space:nowrap}
+.orb-tbl td:first-child{text-align:left;font-weight:600;color:var(--text0)}
+.orb-tbl tr:hover td{background:var(--bg2)}
+.orb-bkout-up{color:#4ade80;font-weight:700}
+.orb-bkout-down{color:#f87171;font-weight:700}
+.orb-bkout-none{color:var(--text2)}
 .wl-controls{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 14px;background:var(--bg1);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:14px}
 .wl-filter-input{flex:1 1 120px;max-width:200px;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text0);font-size:12px;font-family:inherit;outline:none}
 .sort-hdr{cursor:pointer;user-select:none;white-space:nowrap}
@@ -3116,6 +3176,34 @@ body.light .simple-verdict strong{color:#0f172a}
 
   <!-- ══ Watchlist tab ══ -->
   <div id="tab-watchlist" class="tab-section">
+    <!-- ORB session panel -->
+    <div class="panel grid1" id="orb-panel">
+      <div class="panel-title" style="justify-content:space-between;flex-wrap:wrap;gap:6px">
+        <span>Opening Range Breakout
+          <span id="orb-phase-badge" class="orb-phase">IDLE</span>
+          <span id="orb-date" style="font-size:11px;color:var(--text2);margin-left:8px"></span>
+        </span>
+        <span id="orb-count" style="font-size:12px;color:var(--text2)"></span>
+      </div>
+      <div id="orb-forming-row" style="display:none;padding:8px 16px;border-bottom:1px solid var(--border);text-align:center">
+        <div class="orb-countdown" id="orb-countdown">—</div>
+        <div class="orb-countdown-label">minutes until range closes</div>
+      </div>
+      <div class="tbl-wrap">
+        <table class="orb-tbl">
+          <thead><tr>
+            <th>Symbol</th>
+            <th>OR High</th>
+            <th>OR Low</th>
+            <th>OR Range</th>
+            <th>Midpoint (SL)</th>
+            <th>Prev High (TP)</th>
+            <th>Breakout</th>
+          </tr></thead>
+          <tbody id="orb-body"><tr><td colspan="7" class="empty">ORB data loads at 9:15 AM ET</td></tr></tbody>
+        </table>
+      </div>
+    </div>
     <!-- controls: search filter + category + sector buttons -->
     <div class="wl-controls" style="flex-direction:column;align-items:stretch;gap:6px">
       <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
@@ -3697,6 +3785,79 @@ function renderSectorPie(positions) {
     legend: {font: {color: fontCol, size: 11}, bgcolor: 'rgba(0,0,0,0)', orientation: 'v'},
     showlegend: true,
   }, {responsive: true, displayModeBar: false});
+}
+
+// ── ORB panel ─────────────────────────────────────────────────────────────────
+async function fetchORB() {
+  try {
+    const d = await fetch('/api/orb').then(r => r.json());
+    if (!d.ok) return;
+
+    const panel = document.getElementById('orb-panel');
+    const phase = d.phase || 'IDLE';
+
+    // Show panel whenever there's a session or during market hours
+    const show = d.screened || ['FORMING','ACTIVE','CLOSING'].includes(phase);
+    panel.style.display = show ? '' : 'none';
+
+    // Phase badge
+    const badge = document.getElementById('orb-phase-badge');
+    if (badge) {
+      badge.textContent = phase;
+      badge.className   = 'orb-phase orb-phase-' + phase;
+    }
+    const dateEl = document.getElementById('orb-date');
+    if (dateEl) dateEl.textContent = d.session_date || '';
+
+    const countEl = document.getElementById('orb-count');
+    if (countEl) countEl.textContent = d.symbol_count ? d.symbol_count + ' stocks' : '';
+
+    // Countdown row — visible only during FORMING
+    const formingRow = document.getElementById('orb-forming-row');
+    const cdEl       = document.getElementById('orb-countdown');
+    if (formingRow && cdEl) {
+      if (phase === 'FORMING' && d.countdown_min != null) {
+        formingRow.style.display = '';
+        cdEl.textContent = d.countdown_min + 'm';
+      } else {
+        formingRow.style.display = 'none';
+      }
+    }
+
+    // Symbol table
+    const tbody = document.getElementById('orb-body');
+    if (!tbody) return;
+    const syms = (d.symbols || []).filter(s => s.or_high != null || s.breakout);
+    if (!syms.length) {
+      const label = phase === 'IDLE' ? 'ORB data loads at 9:15 AM ET'
+                   : phase === 'FORMING' ? 'Building opening ranges…'
+                   : 'No ORB data';
+      tbody.innerHTML = `<tr><td colspan="7" class="empty">${label}</td></tr>`;
+      return;
+    }
+
+    const fmt = v => v != null ? '$' + v.toFixed(2) : '—';
+    const bkout = b => b === 'up'   ? '<span class="orb-bkout-up">▲ UP</span>'
+                     : b === 'down' ? '<span class="orb-bkout-down">▼ DOWN</span>'
+                     : '<span class="orb-bkout-none">—</span>';
+
+    syms.sort((a, b) => {
+      if (a.breakout && !b.breakout) return -1;
+      if (!a.breakout && b.breakout) return 1;
+      return (b.pm_volume || 0) - (a.pm_volume || 0);
+    });
+
+    tbody.innerHTML = syms.map(s => `
+      <tr>
+        <td>${s.symbol}</td>
+        <td>${fmt(s.or_high)}</td>
+        <td>${fmt(s.or_low)}</td>
+        <td>${s.or_range != null ? '$' + s.or_range.toFixed(2) : '—'}</td>
+        <td>${fmt(s.or_midpoint)}</td>
+        <td>${fmt(s.prev_day_high)}</td>
+        <td>${bkout(s.breakout)}</td>
+      </tr>`).join('');
+  } catch(e) { /* silently ignore network errors */ }
 }
 
 // ── Watchlist heat map ────────────────────────────────────────────────────────
@@ -4968,6 +5129,15 @@ function copyPublicUrl() {
 // Load pinned watchlist on init; refresh every 30s
 loadPinnedWatchlist();
 setInterval(loadPinnedWatchlist, 30000);
+
+// ORB panel — poll every 30s during FORMING, 60s otherwise
+(function pollORB() {
+  fetchORB().then(() => {
+    const badge = document.getElementById('orb-phase-badge');
+    const phase = badge ? badge.textContent : '';
+    setTimeout(pollORB, phase === 'FORMING' ? 30000 : 60000);
+  });
+})();
 
 function _relTime(ts) {
   if (!ts) return '';
