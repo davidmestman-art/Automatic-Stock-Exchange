@@ -1003,8 +1003,11 @@ class TradingEngine:
         or_low  = orb_st.or_low
         reasons = []
 
-        # ── Breakdown SELL — no filter needed ────────────────────────────────
+        # ── Breakdown SELL — block only on extreme oversold RSI ──────────────
         if current_price < or_low:
+            if ind.rsi is not None and ind.rsi < 15:
+                return SignalResult(action="HOLD", score=-0.1, confidence=0.1,
+                                    reasons=[f"ORB breakdown — RSI {ind.rsi:.1f} extreme oversold, skip SELL"])
             return SignalResult(
                 action="SELL",
                 score=-0.8,
@@ -1028,12 +1031,10 @@ class TradingEngine:
                                 ])
         reasons.append(f"ORB breakout ${current_price:.2f} > OR high ${or_high:.2f}")
 
-        # RSI 40–70
-        if ind.rsi is not None:
-            if not (40 <= ind.rsi <= 70):
-                return SignalResult(action="HOLD", score=0.1, confidence=0.1,
-                                    reasons=[f"RSI {ind.rsi:.1f} outside 40–70"])
-            reasons.append(f"RSI {ind.rsi:.1f} OK")
+        # RSI extreme blocker only — block BUY if overbought >80
+        if ind.rsi is not None and ind.rsi > 80:
+            return SignalResult(action="HOLD", score=0.1, confidence=0.1,
+                                reasons=[f"RSI {ind.rsi:.1f} extreme overbought >80"])
 
         # VWAP confirm
         if ind.vwap is not None:

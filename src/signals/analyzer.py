@@ -6,7 +6,9 @@ from .indicators import IndicatorValues
 SignalAction = Literal["BUY", "SELL", "HOLD"]
 
 # Keys that participate in the composite score (in weight order)
-_WEIGHTED_KEYS = ["rsi", "macd", "ema_cross", "bollinger", "vwap", "adx", "sector_mom"]
+# RSI is deliberately excluded — it only acts as an extreme blocker in ORB strategy,
+# never as a standalone buy/sell contributor.
+_WEIGHTED_KEYS = ["macd", "ema_cross", "bollinger", "vwap", "adx", "sector_mom"]
 
 
 @dataclass
@@ -19,16 +21,16 @@ class SignalResult:
 
 
 class SignalAnalyzer:
-    # New weight distribution per user specification:
-    #   RSI 25%, MACD 25%, EMA trend 20%, Bollinger 15%, new indicators 15%
-    #   New indicators split evenly: VWAP 5%, ADX 5%, sector_mom 5%
+    # RSI weight redistributed proportionally across remaining indicators so
+    # composite still spans [-1, +1] and buy/sell thresholds are unchanged.
+    # Old: RSI=0.25, MACD=0.25, EMA=0.20, BB=0.15, VWAP=0.05, ADX=0.05, SM=0.05
+    # New (RSI removed, others rescaled to sum=1.0):
     _WEIGHTS: Dict[str, float] = {
-        "rsi":        0.25,
-        "macd":       0.25,
-        "ema_cross":  0.20,
-        "bollinger":  0.15,
-        "vwap":       0.05,
-        "adx":        0.05,
+        "macd":       0.34,
+        "ema_cross":  0.27,
+        "bollinger":  0.20,
+        "vwap":       0.07,
+        "adx":        0.07,
         "sector_mom": 0.05,
     }
 
@@ -48,14 +50,16 @@ class SignalAnalyzer:
         scores: Dict[str, float] = {}
         reasons: List[str] = []
 
-        # Core signals (weighted)
-        scores["rsi"],        r = self._rsi_signal(ind);         reasons.extend(r)
+        # Core signals (weighted) — RSI excluded; it never triggers trades alone
         scores["macd"],       r = self._macd_signal(ind);        reasons.extend(r)
         scores["ema_cross"],  r = self._ema_cross_signal(ind);   reasons.extend(r)
         scores["bollinger"],  r = self._bollinger_signal(ind);   reasons.extend(r)
         scores["vwap"],       r = self._vwap_signal(ind);        reasons.extend(r)
         scores["adx"],        r = self._adx_signal(ind);         reasons.extend(r)
         scores["sector_mom"], r = self._sector_mom_signal(ind);  reasons.extend(r)
+
+        # RSI computed for display / ORB extreme blocking, not for composite score
+        scores["rsi"], _ = self._rsi_signal(ind)
 
         # Supplemental signals — still computed for signal reasons but not weighted
         _, mr_reasons  = self._mean_reversion_signal(ind)
