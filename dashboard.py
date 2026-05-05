@@ -4015,16 +4015,22 @@ function renderToday(today, marketOpen, nextClose) {
 }
 
 async function refresh() {
+  let data;
   try {
     const res = await fetch('/api/state');
-    const data = await res.json();
-    applyState(data);
-    // Only refresh the heatmap if the heatmap tab is currently active
-    const heatmapActive = document.getElementById('tab-heatmap')?.classList.contains('active');
-    if (heatmapActive) loadHeatmap();
+    data = await res.json();
   } catch(e) {
     document.getElementById('err-banner').textContent = 'Failed to fetch state: ' + e;
     document.getElementById('err-banner').style.display = 'block';
+    return;
+  }
+  try {
+    applyState(data);
+    // Only refresh the heatmap when the watchlist tab (which hosts the heatmap) is active
+    const watchlistActive = document.getElementById('tab-watchlist')?.classList.contains('active');
+    if (watchlistActive) loadHeatmap();
+  } catch(e) {
+    console.error('applyState error:', e);
   }
 }
 
@@ -4035,6 +4041,7 @@ function updatePnlTicker(unrealized, unrealizedPct, openPositions) {
   const ticker = document.getElementById('pnl-ticker');
   const valEl  = document.getElementById('pnl-ticker-val');
   const pctEl  = document.getElementById('pnl-ticker-pct');
+  if (!ticker) return;
   if (!openPositions || unrealized == null) { ticker.style.display = 'none'; return; }
   ticker.style.display = '';
   const sign = unrealized >= 0 ? '+' : '';
@@ -4145,7 +4152,7 @@ function switchTab(name) {
   localStorage.setItem('activeTab', name);
   // Lazy-load tab data on first visit (or on each switch for live tabs)
   if (name === 'trades' && !_tabLoaded.trades) { loadJournalTrades(); _tabLoaded.trades = true; }
-  if (name === 'heatmap') loadHeatmap();
+  if (name === 'watchlist') loadHeatmap();
 }
 (function restoreTab() {
   const saved = localStorage.getItem('activeTab');
