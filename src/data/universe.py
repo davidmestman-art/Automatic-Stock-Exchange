@@ -21,16 +21,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
-import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
-import yfinance as yf
 
 from .scanner import SP500_UNIVERSE
 
@@ -89,7 +87,7 @@ TOP_N:           int   = 50
 # ── Mega-cap seed: stocks with market cap ≥ ~$80B ──────────────────────────────
 # Used to pre-filter the 10,000+ Alpaca asset list BEFORE any data download.
 # When Alpaca returns the full exchange list, we intersect with this set so that
-# yf.download only ever touches ~80 tickers instead of 10,000+.
+# Alpaca bars are only fetched for these ~80 tickers instead of 10,000+.
 # Update periodically as companies cross the threshold.
 _MEGA_CAP_SEED: frozenset = frozenset([
     # Technology
@@ -125,9 +123,6 @@ _MEGA_CAP_SEED: frozenset = frozenset([
 _CACHE_PATH   = Path(__file__).resolve().parent.parent.parent / "universe_cache.json"
 _LOG_PATH     = Path(__file__).resolve().parent.parent.parent / "screener_log.json"
 
-# 5-minute in-memory cache for market-cap lookups (avoids repeated yfinance calls on rescan)
-_mcap_cache: Dict[str, Any] = {}   # sym → {"mc": float|None, "name": str, "exp": float}
-_MCAP_CACHE_TTL = 300              # seconds
 
 # ── Category helpers ───────────────────────────────────────────────────────────
 
@@ -273,7 +268,7 @@ class DynamicUniverse:
                 using_alpaca = True
                 # Pre-filter to mega-cap seed BEFORE any data download.
                 # Alpaca returns 10,000+ tickers; we only want the ~80 with
-                # market cap ≥ $100B so that yf.download touches a tiny list.
+                # market cap ≥ $100B so that Alpaca only fetches a tiny list.
                 candidates = [s for s in raw_candidates if s in _MEGA_CAP_SEED]
                 log.info(
                     "[Universe] Pre-filtered %d Alpaca tickers → %d mega-cap candidates",
@@ -307,6 +302,8 @@ class DynamicUniverse:
                 max_price=self.max_price,
                 min_market_cap=self.min_market_cap,
                 top_n=self.top_n,
+                api_key=self.alpaca_api_key,
+                secret_key=self.alpaca_secret_key,
             )
         except Exception as exc:
             log.error("[Universe] Screen failed: %s — keeping previous universe", exc)
@@ -373,6 +370,62 @@ class DynamicUniverse:
 
 # ── Screening logic ────────────────────────────────────────────────────────────
 
+def _alpaca_bars_wide(
+    symbols: List[str],
+    lookback_days: int,
+    api_key: str,
+    secret_key: str,
+) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    """Fetch daily bars for *symbols* and return (close_wide, vol_wide).
+
+    Returns (None, None) on failure.  Wide DataFrames have symbols as columns
+    and a plain DatetimeIndex (timezone stripped).
+    """
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from datetime import timezone
+
+        if not api_key or not secret_key:
+            return None, None
+
+        client = StockHistoricalDataClient(api_key, secret_key)
+        end = pd.Timestamp.now(tz="UTC")
+        start = end - pd.Timedelta(days=int(lookback_days * 1.5))
+
+        req = StockBarsRequest(
+            symbol_or_symbols=symbols,
+            timeframe=TimeFrame.Day,
+            start=start.to_pydatetime(),
+            end=end.to_pydatetime(),
+            feed="iex",
+        )
+        df_all = client.get_stock_bars(req).df
+
+        if df_all is None or df_all.empty:
+            return None, None
+
+        if isinstance(df_all.index, pd.MultiIndex):
+            close_wide = df_all["close"].unstack(level=0)
+            vol_wide   = df_all["volume"].unstack(level=0)
+        else:
+            sym = symbols[0] if symbols else "?"
+            close_wide = df_all[["close"]].rename(columns={"close": sym})
+            vol_wide   = df_all[["volume"]].rename(columns={"volume": sym})
+
+        # Strip timezone
+        for w in (close_wide, vol_wide):
+            if hasattr(w.index, "tz") and w.index.tz is not None:
+                w.index = w.index.tz_localize(None)
+
+        return close_wide, vol_wide
+
+    except Exception as exc:
+        log.error("[Universe] _alpaca_bars_wide failed: %s", exc)
+        return None, None
+
+
 def _screen(
     candidates:     List[str],
     always_include: List[str],
@@ -382,72 +435,49 @@ def _screen(
     max_price:      float,
     min_market_cap: float,
     top_n:          int,
+    api_key:        str = "",
+    secret_key:     str = "",
 ) -> Tuple[List[str], Dict, Dict[str, str], Dict[str, int]]:
     """Return (tickers, filter_stats, categories, exchange_breakdown)."""
     stats: Dict = {"total": len(candidates)}
 
-    # Separate ETFs from regular candidates to avoid polluting the filter
-    etf_set    = frozenset(always_include)
-    regulars   = [s for s in candidates if s not in etf_set]
+    etf_set  = frozenset(always_include)
+    regulars = [s for s in candidates if s not in etf_set]
 
-    # ── Step 1: Batch 10-day OHLCV for vol+price pre-filter ───────────────────
-    log.info("[Universe] Fetching 10d data for %d tickers…", len(regulars))
-    raw10 = yf.download(
-        tickers=regulars,
-        period="10d",
-        interval="1d",
-        auto_adjust=True,
-        progress=False,
-        threads=True,
-    )
-    if raw10.empty:
-        raise RuntimeError("yf.download(10d) returned empty DataFrame")
+    # ── Step 1: 10-day OHLCV for vol+price pre-filter ────────────────────────
+    log.info("[Universe] Fetching 10d data for %d tickers via Alpaca…", len(regulars))
+    close10, vol10 = _alpaca_bars_wide(regulars, 14, api_key, secret_key)
 
-    if isinstance(raw10.columns, pd.MultiIndex):
-        close10 = raw10["Close"]
-        vol10   = raw10["Volume"]
+    if close10 is None or vol10 is None or close10.empty:
+        # Fall back to full candidate list without vol/price filter
+        log.warning("[Universe] 10d fetch failed — skipping vol/price filter")
+        pre_candidates = regulars[:300]
+        stats["after_vol_price"] = len(pre_candidates)
     else:
-        sym     = regulars[0]
-        close10 = pd.DataFrame({sym: raw10["Close"]})
-        vol10   = pd.DataFrame({sym: raw10["Volume"]})
+        avg_vol    = vol10.mean(skipna=True)
+        last_price = close10.iloc[-1]
 
-    avg_vol    = vol10.mean(skipna=True)
-    last_price = close10.iloc[-1]
+        mask = (
+            (avg_vol    >= min_avg_volume) &
+            (last_price >= min_price) &
+            (last_price <= max_price)
+        )
+        after_vp = avg_vol[mask].sort_values(ascending=False)
+        stats["after_vol_price"] = int(mask.sum())
+        log.info("[Universe] After vol/price filter: %d tickers", stats["after_vol_price"])
+        pre_candidates = [str(s) for s in after_vp.index[:300]]
 
-    mask = (
-        (avg_vol    >= min_avg_volume) &
-        (last_price >= min_price) &
-        (last_price <= max_price)
-    )
-    after_vp = avg_vol[mask].sort_values(ascending=False)
-    stats["after_vol_price"] = int(mask.sum())
-    log.info("[Universe] After vol/price filter: %d tickers", stats["after_vol_price"])
-
-    # Take top 300 candidates for composite ranking
-    pre_candidates = [str(s) for s in after_vp.index[:300]]
-
-    # ── Step 2: Fetch 1-year data for composite ranking ───────────────────────
+    # ── Step 2: 1-year data for composite ranking ─────────────────────────────
     all_fetch = list(dict.fromkeys(pre_candidates + list(always_include)))
-    log.info("[Universe] Fetching 1y data for %d tickers…", len(all_fetch))
-    raw1y = yf.download(
-        tickers=all_fetch,
-        period="1y",
-        interval="1d",
-        auto_adjust=True,
-        progress=False,
-        threads=True,
-    )
+    log.info("[Universe] Fetching 1y data for %d tickers via Alpaca…", len(all_fetch))
+    close1y, vol1y = _alpaca_bars_wide(all_fetch, 252, api_key, secret_key)
 
-    if raw1y.empty or not isinstance(raw1y.columns, pd.MultiIndex):
-        # Fall back to volume-only ranking
-        tickers   = pre_candidates[:top_n]
-        cats      = {s: tag_category(s) for s in tickers}
-        ex_bkd    = _exchange_breakdown(tickers, cats)
+    if close1y is None or vol1y is None or close1y.empty:
+        tickers = pre_candidates[:top_n]
+        cats    = {s: tag_category(s) for s in tickers}
+        ex_bkd  = _exchange_breakdown(tickers, cats)
         stats["after_mcap"] = len(tickers)
         return tickers, stats, cats, ex_bkd
-
-    close1y = raw1y["Close"]
-    vol1y   = raw1y["Volume"]
 
     # ── Step 3: Composite score ───────────────────────────────────────────────
     raw_scores: Dict[str, Dict[str, float]] = {}
@@ -460,12 +490,10 @@ def _screen(
         if len(col) < 5:
             continue
 
-        # IPO detection: fewer than 20 trading days of history
         if len(col) < 20:
             removed_ipo += 1
             continue
 
-        # SPAC detection by name (alpaca_names or skip for constituent lists)
         name = alpaca_names.get(sym, "")
         if name and _is_spac(name):
             removed_spac += 1
@@ -477,15 +505,14 @@ def _screen(
         price_5d  = float(col.iloc[-6]) if len(col) >= 6 else price_now
         p52_high  = float(col.max())
 
-        momentum  = (price_now - price_5d) / price_5d if price_5d > 0 else 0.0
-        dist_52w  = (p52_high - price_now) / p52_high if p52_high > 0 else 1.0
+        momentum = (price_now - price_5d) / price_5d if price_5d > 0 else 0.0
+        dist_52w = (p52_high - price_now) / p52_high if p52_high > 0 else 1.0
 
         raw_scores[sym] = {"vol": avg_v, "mom": momentum, "dist52w": dist_52w}
 
     stats["removed_ipo"]  = removed_ipo
     stats["removed_spac"] = removed_spac
 
-    # Normalize each component to [0, 1] then compute weighted composite
     composite: Dict[str, float] = {}
     if raw_scores:
         vals_vol  = [v["vol"]    for v in raw_scores.values()]
@@ -502,43 +529,25 @@ def _screen(
         for sym, v in raw_scores.items():
             n_vol  = _norm(v["vol"],    vol_mn, vol_mx)
             n_mom  = _norm(v["mom"],    mom_mn, mom_mx)
-            n_prox = 1.0 - _norm(v["dist52w"], dist_mn, dist_mx)  # lower dist = better
+            n_prox = 1.0 - _norm(v["dist52w"], dist_mn, dist_mx)
             composite[sym] = 0.50 * n_vol + 0.30 * n_mom + 0.20 * n_prox
 
     ranked = sorted(composite, key=lambda s: -composite[s])
 
-    # ── Step 4: Market-cap filter on top 250 (parallel, includes name lookup) ─
-    check_list = ranked[:250]
-    mc_map     = _fetch_market_caps_with_names(check_list)
-
-    passed: List[str] = []
-    for sym in check_list:
-        info = mc_map.get(sym, {})
-        mc   = info.get("mc")
-        # If name unknown via Alpaca, try yfinance name for SPAC check
-        if not alpaca_names:
-            name = info.get("name", "")
-            if name and _is_spac(name):
-                removed_spac += 1
-                continue
-        if mc is not None and mc < min_market_cap:
-            continue
-        passed.append(sym)
-        if len(passed) >= top_n:
-            break
-
-    stats["after_mcap"]  = len(passed)
-    stats["removed_spac"] = removed_spac  # update after yf name check
+    # ── Step 4: All candidates passed _MEGA_CAP_SEED pre-filter ─────────────
+    # Market cap ≥ $100B is guaranteed by the seed; no per-ticker lookup needed.
+    passed = ranked[:top_n]
+    stats["after_mcap"] = len(passed)
 
     # ── Step 5: Prepend ETFs and tag categories ───────────────────────────────
     etf_tickers = [s for s in always_include if s in close1y.columns]
     all_tickers = list(dict.fromkeys(etf_tickers + passed))
 
-    cats  = {s: tag_category(s) for s in all_tickers}
+    cats   = {s: tag_category(s) for s in all_tickers}
     ex_bkd = _exchange_breakdown(all_tickers, cats)
 
     log.info(
-        "[Universe] After mcap filter: %d tickers (incl %d ETFs, target %d)",
+        "[Universe] Screen complete: %d tickers (incl %d ETFs, target %d)",
         len(all_tickers), len(etf_tickers), top_n,
     )
     return all_tickers, stats, cats, ex_bkd
@@ -557,37 +566,3 @@ def _exchange_breakdown(tickers: List[str], cats: Dict[str, str]) -> Dict[str, i
     return bkd
 
 
-def _fetch_market_caps_with_names(symbols: List[str]) -> Dict[str, Dict]:
-    """Parallel fast_info.market_cap lookup with 5-minute in-memory cache."""
-    now = time.time()
-    results: Dict[str, Dict] = {}
-    to_fetch: List[str] = []
-
-    for sym in symbols:
-        entry = _mcap_cache.get(sym)
-        if entry and now < entry.get("exp", 0):
-            results[sym] = {"mc": entry["mc"], "name": entry["name"]}
-        else:
-            to_fetch.append(sym)
-
-    if not to_fetch:
-        return results
-
-    def _get(sym: str) -> Tuple[str, Dict]:
-        try:
-            mc = yf.Ticker(sym).fast_info.market_cap
-            return sym, {"mc": float(mc) if mc else None, "name": ""}
-        except Exception:
-            return sym, {}
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_get, sym): sym for sym in to_fetch}
-        for fut in as_completed(futures, timeout=90):
-            try:
-                sym, info = fut.result()
-                _mcap_cache[sym] = {**info, "exp": now + _MCAP_CACHE_TTL}
-                results[sym] = info
-            except Exception:
-                pass
-
-    return results

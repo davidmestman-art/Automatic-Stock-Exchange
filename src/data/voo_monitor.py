@@ -1,6 +1,9 @@
+"""VOO 200-week MA monitor using Alpaca weekly bars."""
+
 import logging
+import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -33,8 +36,15 @@ class VOOMonitor:
     the result.  Call check(force=True) to bypass the cache.
     """
 
-    def __init__(self, alert_threshold_pct: float = 2.0):
+    def __init__(
+        self,
+        alert_threshold_pct: float = 2.0,
+        api_key: str = "",
+        secret_key: str = "",
+    ):
         self.alert_threshold_pct = alert_threshold_pct
+        self._api_key = api_key or os.getenv("ALPACA_API_KEY", "")
+        self._secret_key = secret_key or os.getenv("ALPACA_SECRET_KEY", "")
         self._last_status: Optional[VOOStatus] = None
         self._last_check_date: Optional[str] = None
         self._prev_above_ma: Optional[bool] = None
@@ -45,20 +55,41 @@ class VOOMonitor:
             return self._last_status
 
         try:
-            import yfinance as yf
+            import pandas as pd
+            from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.data.requests import StockBarsRequest
+            from alpaca.data.timeframe import TimeFrame
 
-            raw = yf.download(
-                "VOO",
-                period="5y",
-                interval="1wk",
-                auto_adjust=True,
-                progress=False,
+            if not self._api_key or not self._secret_key:
+                logger.warning("VOOMonitor: no Alpaca credentials")
+                return self._last_status
+
+            client = StockHistoricalDataClient(self._api_key, self._secret_key)
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(weeks=210)  # ~4 years, enough for 200-week MA
+
+            req = StockBarsRequest(
+                symbol_or_symbols="VOO",
+                timeframe=TimeFrame.Week,
+                start=start,
+                end=end,
+                feed="iex",
             )
-            if raw is None or raw.empty:
+            df_all = client.get_stock_bars(req).df
+
+            if df_all is None or df_all.empty:
                 logger.warning("VOOMonitor: empty data returned")
                 return self._last_status
 
-            close = raw["Close"].squeeze().dropna()
+            if isinstance(df_all.index, pd.MultiIndex):
+                df = df_all.xs("VOO", level=0).copy()
+            else:
+                df = df_all.copy()
+
+            if hasattr(df.index, "tz") and df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+
+            close = (df["close"] if "close" in df.columns else df["Close"]).dropna()
             if len(close) < 10:
                 logger.warning(f"VOOMonitor: only {len(close)} weeks of data")
                 return self._last_status

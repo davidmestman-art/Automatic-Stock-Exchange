@@ -1,7 +1,7 @@
 """Dynamic stock scanner.
 
 Pipeline executed once per trading session:
-  1. Batch-fetch 1-day volume for the full S&P 500 universe via yfinance
+  1. Batch-fetch 1-day volume for the full S&P 500 universe via Alpaca
   2. Keep the top ``volume_top_n`` symbols (default 100) by volume
   3. Compute technical indicators + composite signal score for every candidate
   4. Rank by |score| and return the top ``signal_top_n`` (default 10) symbols
@@ -11,11 +11,11 @@ session are free.  Call ``scan()`` with ``force=True`` to override.
 """
 
 import logging
+import os
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
-import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
@@ -191,29 +191,25 @@ class StockScanner:
     # ── Volume filter ─────────────────────────────────────────────────────────
 
     def _top_by_volume(self) -> List[str]:
-        logger.info(f"Scanner: fetching volume for {len(self.universe)} symbols…")
+        logger.info(f"Scanner: fetching volume for {len(self.universe)} symbols via Alpaca…")
         try:
-            raw = yf.download(
-                tickers=self.universe,
-                period="3d",
-                interval="1d",
-                auto_adjust=True,
-                progress=False,
-                threads=True,
-            )
-            # Multi-ticker download returns MultiIndex columns (metric, symbol)
-            if isinstance(raw.columns, pd.MultiIndex):
-                vol_row = raw["Volume"].iloc[-1].dropna()
-            else:
-                # Fallback: single-ticker edge case
-                sym = self.universe[0]
-                vol_row = pd.Series({sym: float(raw["Volume"].iloc[-1])})
+            from .fetcher import MarketDataFetcher
+            fetcher = MarketDataFetcher(lookback_days=5, interval="1d")
+            data = fetcher.fetch_many(self.universe)
 
-            vol_row = vol_row[vol_row > 0].sort_values(ascending=False)
-            top = list(vol_row.index[: self.volume_top_n])
+            vols: Dict[str, float] = {}
+            for sym, df in data.items():
+                if df is not None and not df.empty and "Volume" in df.columns:
+                    vols[sym] = float(df["Volume"].iloc[-1])
+
+            if not vols:
+                raise RuntimeError("Alpaca volume fetch returned no data")
+
+            vol_series = pd.Series(vols).sort_values(ascending=False)
+            top = list(vol_series.index[: self.volume_top_n])
             logger.info(
                 f"Scanner: volume filter → {len(top)} symbols "
-                f"(min vol {vol_row.iloc[min(len(vol_row)-1, self.volume_top_n-1)]:.0f})"
+                f"(min vol {vol_series.iloc[min(len(vol_series)-1, self.volume_top_n-1)]:.0f})"
             )
             return top
         except Exception as e:
