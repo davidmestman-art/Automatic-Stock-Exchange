@@ -146,12 +146,18 @@ class TradingEngine:
 
         if config.use_alpaca:
             from .alpaca_executor import AlpacaExecutor
-            self.executor: Union[AlpacaExecutor, PaperExecutor] = AlpacaExecutor(
-                api_key=config.alpaca_api_key,
-                secret_key=config.alpaca_secret_key,
-                paper=config.paper_trading,
-            )
-            mode = "Alpaca Paper" if config.paper_trading else "Alpaca LIVE"
+            try:
+                self.executor: Union[AlpacaExecutor, PaperExecutor] = AlpacaExecutor(
+                    api_key=config.alpaca_api_key,
+                    secret_key=config.alpaca_secret_key,
+                    paper=config.paper_trading,
+                )
+                mode = "Alpaca Paper" if config.paper_trading else "Alpaca LIVE"
+            except Exception as exc:
+                logger.warning(f"[ENGINE] AlpacaExecutor init failed ({exc}) — falling back to PaperExecutor")
+                self.executor = PaperExecutor()
+                config.use_alpaca = False
+                mode = "Local Simulation"
         else:
             self.executor = PaperExecutor()
             mode = "Local Simulation"
