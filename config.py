@@ -22,10 +22,7 @@ class TradingConfig:
     watchlist_size: int = 10        # Top N by signal to trade
 
     # Fallback static watchlist used by the backtester and on scan failure
-    symbols: List[str] = field(default_factory=lambda: [
-        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
-        "META", "TSLA", "JPM", "V", "JNJ",
-    ])
+    symbols: List[str] = field(default_factory=list)
 
     # ── Portfolio settings ────────────────────────────────────────────────────
     initial_capital: float = 100_000.0
@@ -88,7 +85,7 @@ class TradingConfig:
     universe_min_avg_volume: int   = 500_000          # shares / day
     universe_min_price:      float = 10.0
     universe_max_price:      float = 1_000.0
-    universe_min_market_cap: float = 100_000_000_000.0  # $100 B
+    universe_min_market_cap: float = 200_000_000_000.0  # $200 B
     universe_top_n:          int   = 150
     universe_include_etfs:   bool  = True
     universe_use_alpaca:     bool  = True             # attempt Alpaca assets API

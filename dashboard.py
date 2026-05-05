@@ -3083,7 +3083,6 @@ body.light .simple-verdict strong{color:#0f172a}
     <span class="market-dot market-unknown" id="market-dot"></span>
     <span id="market-label">Market —</span>
   </span>
-  <!-- Key stats strip — hidden on ≤ 900 px via media query -->
   <div class="hdr-stats">
     <div class="hdr-stat">
       <span class="hdr-stat-lbl">Total Value</span>
@@ -3097,23 +3096,6 @@ body.light .simple-verdict strong{color:#0f172a}
       <span class="hdr-stat-lbl">Unrealized</span>
       <span class="hdr-stat-val" id="hdr-unreal">—</span>
     </div>
-  </div>
-  <!-- Public ngrok URL badge — visible only when tunnel is active -->
-  <div class="public-url-wrap" id="public-url-wrap" style="display:none">
-    <span class="public-url-label">🌐 Public</span>
-    <span class="public-url-val" id="public-url-val">—</span>
-    <button class="btn-copy-url" onclick="copyPublicUrl()" title="Copy public URL">⎘ Copy</button>
-  </div>
-  <!-- Legacy P&L ticker (hidden — data now shown in hdr-stats above) -->
-  <div id="pnl-ticker" style="display:none">
-    <div id="pnl-ticker-val"></div>
-    <div id="pnl-ticker-pct"></div>
-  </div>
-  <div class="hdr-right">
-    <span class="ts" id="last-updated-text"></span>
-    <button class="btn-icon-refresh" onclick="refresh()" title="Refresh data">↻</button>
-    <span id="notif-indicator" title="Notifications" style="font-size:17px;cursor:default;opacity:.4" onclick="window.location='/stats'">🔔</span>
-    <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
   </div>
 </header>
 
@@ -3652,19 +3634,6 @@ function applyState(s) {
   // sector allocation pie
   renderSectorPie(positions);
 
-  // notification bell — full opacity when at least one channel is configured
-  const bell = document.getElementById('notif-indicator');
-  if (s.notifications && (s.notifications.ntfy || s.notifications.pushover)) {
-    bell.style.opacity = '1';
-    bell.title = 'Notifications ON — click for Stats';
-  } else {
-    bell.style.opacity = '.35';
-    bell.title = 'Notifications OFF — click for setup';
-  }
-
-  // public URL
-  if (s.public_url) updatePublicUrl(s.public_url);
-
   // error
   const eb = document.getElementById('err-banner');
   if (s.error) { eb.textContent = '⚠ ' + s.error; eb.style.display = 'block'; }
@@ -4053,28 +4022,12 @@ async function refresh() {
     // Only refresh the heatmap if the heatmap tab is currently active
     const heatmapActive = document.getElementById('tab-heatmap')?.classList.contains('active');
     if (heatmapActive) loadHeatmap();
-    _lastRefreshAt = Date.now();
-    updateLastUpdated();
   } catch(e) {
     document.getElementById('err-banner').textContent = 'Failed to fetch state: ' + e;
     document.getElementById('err-banner').style.display = 'block';
   }
 }
 
-
-// ── Dark / light theme ────────────────────────────────────────────────────────
-function toggleTheme() {
-  const light = document.body.classList.toggle('light');
-  localStorage.setItem('theme', light ? 'light' : 'dark');
-  document.getElementById('theme-btn').textContent = light ? '🌙' : '☀️';
-}
-(function initTheme() {
-  if (localStorage.getItem('theme') === 'light') {
-    document.body.classList.add('light');
-    const btn = document.getElementById('theme-btn');
-    if (btn) btn.textContent = '🌙';
-  }
-})();
 
 // ── Live P&L ticker ───────────────────────────────────────────────────────────
 let _prevPnlVal = null;
@@ -4108,17 +4061,6 @@ async function pollPnl() {
 // Poll the lightweight pnl endpoint between full state refreshes
 setInterval(pollPnl, 5000);
 pollPnl();
-
-// Last-updated indicator — updates every second without a server round-trip
-let _lastRefreshAt = null;
-function updateLastUpdated() {
-  const el = document.getElementById('last-updated-text');
-  if (!el) return;
-  if (!_lastRefreshAt) { el.textContent = ''; return; }
-  const ago = Math.round((Date.now() - _lastRefreshAt) / 1000);
-  el.textContent = ago < 5 ? 'Just updated' : 'Updated ' + (ago < 60 ? ago + 's ago' : Math.round(ago/60) + 'm ago');
-}
-setInterval(updateLastUpdated, 1000);
 
 // Tab switching — persists active tab in localStorage
 // ── Trades tab filters ────────────────────────────────────────────────────────
@@ -4997,29 +4939,6 @@ async function loadPinnedWatchlist() {
   } catch(e) {}
 }
 
-// ── Public URL ─────────────────────────────────────────────────────────────────
-function updatePublicUrl(url) {
-  const wrap = document.getElementById('public-url-wrap');
-  const val  = document.getElementById('public-url-val');
-  if (!url || !wrap) return;
-  wrap.style.display = 'flex';
-  val.textContent    = url;
-}
-
-function copyPublicUrl() {
-  const val = document.getElementById('public-url-val');
-  if (!val) return;
-  const url = val.textContent;
-  (navigator.clipboard
-    ? navigator.clipboard.writeText(url)
-    : Promise.reject()
-  ).then(() => {
-    const orig = val.textContent;
-    val.textContent = 'Copied!';
-    setTimeout(() => { val.textContent = orig; }, 1500);
-  }).catch(() => { window.prompt('Copy this URL:', url); });
-}
-
 // Load pinned watchlist on init; refresh every 30s
 loadPinnedWatchlist();
 setInterval(loadPinnedWatchlist, 30000);
@@ -5598,12 +5517,6 @@ td.diff-dn{color:#f87171}
       <span class="hdr-stat-val" id="hdr-unreal">—</span>
     </div>
   </div>
-  <div class="hdr-right">
-    <span class="ts" id="hdr-ts"></span>
-    <button class="btn-icon-refresh" onclick="location.reload()" title="Refresh">↻</button>
-    <span style="font-size:17px;cursor:pointer;opacity:.6" onclick="window.location='/stats'" title="Stats">🔔</span>
-    <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
-  </div>
 </header>
 <nav class="nav-tabs-bar">
   <button class="nav-tab" onclick="window.location='/dashboard'">Dashboard</button>
@@ -5876,19 +5789,6 @@ async function saveAlpacaKeys() {
 
 function openChart(sym) { window.location = '/dashboard'; }
 
-function toggleTheme() {
-  const light = document.body.classList.toggle('light');
-  localStorage.setItem('theme', light ? 'light' : 'dark');
-  document.getElementById('theme-btn').textContent = light ? '🌙' : '☀️';
-}
-(function initTheme() {
-  if (localStorage.getItem('theme') === 'light') {
-    document.body.classList.add('light');
-    const btn = document.getElementById('theme-btn');
-    if (btn) btn.textContent = '🌙';
-  }
-})();
-
 async function initHeader() {
   try {
     const s = await fetch('/api/state').then(r => r.json());
@@ -6061,11 +5961,6 @@ tr:hover td{background:rgba(18,26,46,.8)}
     <div class="hdr-stat"><span class="hdr-stat-lbl">Total Value</span><span class="hdr-stat-val" id="hdr-total">—</span></div>
     <div class="hdr-stat"><span class="hdr-stat-lbl">Day P&amp;L</span><span class="hdr-stat-val" id="hdr-day-pnl">—</span></div>
     <div class="hdr-stat"><span class="hdr-stat-lbl">Unrealized</span><span class="hdr-stat-val" id="hdr-unreal">—</span></div>
-  </div>
-  <div class="hdr-right">
-    <span class="ts" id="hdr-ts"></span>
-    <button class="btn-icon-refresh" onclick="location.reload()" title="Refresh">↻</button>
-    <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
   </div>
 </header>
 <nav class="nav-tabs-bar">
@@ -6244,19 +6139,6 @@ async function loadJournal() {
 
 loadJournal();
 
-function toggleTheme() {
-  const light = document.body.classList.toggle('light');
-  localStorage.setItem('theme', light ? 'light' : 'dark');
-  document.getElementById('theme-btn').textContent = light ? '🌙' : '☀️';
-}
-(function initTheme() {
-  if (localStorage.getItem('theme') === 'light') {
-    document.body.classList.add('light');
-    const btn = document.getElementById('theme-btn');
-    if (btn) btn.textContent = '🌙';
-  }
-})();
-
 async function initHeader() {
   try {
     const s = await fetch('/api/state').then(r => r.json());
@@ -6416,11 +6298,6 @@ tr:hover td{background:#263044}
     <div class="hdr-stat"><span class="hdr-stat-lbl">Total Value</span><span class="hdr-stat-val" id="hdr-total">—</span></div>
     <div class="hdr-stat"><span class="hdr-stat-lbl">Day P&amp;L</span><span class="hdr-stat-val" id="hdr-day-pnl">—</span></div>
     <div class="hdr-stat"><span class="hdr-stat-lbl">Unrealized</span><span class="hdr-stat-val" id="hdr-unreal">—</span></div>
-  </div>
-  <div class="hdr-right">
-    <span class="ts" id="hdr-ts"></span>
-    <button class="btn-icon-refresh" onclick="location.reload()" title="Refresh">↻</button>
-    <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
   </div>
 </header>
 <nav class="nav-tabs-bar">
@@ -7023,19 +6900,6 @@ async function runBacktest() {
 }
 
 loadBacktest();
-
-function toggleTheme() {
-  const light = document.body.classList.toggle('light');
-  localStorage.setItem('theme', light ? 'light' : 'dark');
-  document.getElementById('theme-btn').textContent = light ? '🌙' : '☀️';
-}
-(function initTheme() {
-  if (localStorage.getItem('theme') === 'light') {
-    document.body.classList.add('light');
-    const btn = document.getElementById('theme-btn');
-    if (btn) btn.textContent = '🌙';
-  }
-})();
 
 async function initHeader() {
   try {

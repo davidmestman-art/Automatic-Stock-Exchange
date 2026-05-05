@@ -172,6 +172,17 @@ class TradingEngine:
             alpaca_secret_key = config.alpaca_secret_key if use_alpaca_uni else "",
             paper_trading     = config.paper_trading,
         )
+        # Seed watchlist from cached universe immediately so first page load
+        # never shows an empty/hardcoded list.
+        _cached_uni = self.dynamic_universe.tickers
+        if _cached_uni:
+            self.watchlist = list(_cached_uni)
+            self.scanner.universe     = list(dict.fromkeys(_cached_uni))
+            self.scanner.volume_top_n = len(_cached_uni)
+        elif not self.watchlist:
+            # No cache and no config symbols — trigger a background scan
+            import threading as _th
+            _th.Thread(target=self.dynamic_universe.run, daemon=True).start()
         # Sector ETF 5-day returns — refreshed once per calendar day
         self._sector_returns: Dict[str, float] = {}
         self._sector_returns_date: Optional[str] = None
