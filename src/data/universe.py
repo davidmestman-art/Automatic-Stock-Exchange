@@ -444,9 +444,12 @@ def _screen(
     close10, vol10 = _alpaca_bars_wide(regulars, 14, api_key, secret_key)
 
     if close10 is None or vol10 is None or close10.empty:
-        # Fall back to full candidate list without vol/price filter
-        log.warning("[Universe] 10d fetch failed — skipping vol/price filter")
-        pre_candidates = regulars[:300]
+        # Fall back: apply the mega-cap seed filter so we still enforce the
+        # $200B market-cap threshold even without live data.
+        log.warning("[Universe] 10d fetch failed — filtering to mega-cap seed only")
+        pre_candidates = [s for s in regulars if s in _MEGA_CAP_SEED][:300]
+        if not pre_candidates:
+            pre_candidates = regulars[:300]
         stats["after_vol_price"] = len(pre_candidates)
     else:
         avg_vol    = vol10.mean(skipna=True)
@@ -468,7 +471,8 @@ def _screen(
     close1y, vol1y = _alpaca_bars_wide(all_fetch, 252, api_key, secret_key)
 
     if close1y is None or vol1y is None or close1y.empty:
-        tickers = pre_candidates
+        # Still enforce mega-cap filter in the 1-year fallback path.
+        tickers = [s for s in pre_candidates if s in _MEGA_CAP_SEED] or pre_candidates
         cats    = {s: tag_category(s) for s in tickers}
         ex_bkd  = _exchange_breakdown(tickers, cats)
         stats["after_mcap"] = len(tickers)
