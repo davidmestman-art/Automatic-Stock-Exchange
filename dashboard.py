@@ -1280,11 +1280,13 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
 
     market_open = None
     next_close = None
+    next_open = None
     if eng.config.use_alpaca:
         try:
             market_open = eng.executor.is_market_open()
             clock = eng.executor.get_clock_info()
             next_close = clock.get("next_close")
+            next_open = clock.get("next_open")
         except Exception:
             market_open = None
 
@@ -1349,6 +1351,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "alpaca_connected": eng.config.use_alpaca,
         "universe_categories": eng.dynamic_universe.last_result.get("categories", {}),
         "next_close": next_close,
+        "next_open": next_open,
         "risk_rules": eng.risk_rules_status(price_lookup) if price_lookup else {},
         "today": {
             "pnl": today_perf.get("today_pnl"),
@@ -3532,7 +3535,7 @@ function applyState(s) {
   }
 
   // today's performance strip
-  renderToday(s.today || {}, s.market_open, s.next_close);
+  renderToday(s.today || {}, s.market_open, s.next_close, s.next_open);
 
   // unrealized P&L — sum from open positions; update header stat
   {
@@ -4052,7 +4055,7 @@ function renderSparkline(equity) {
     <circle cx="${W}" cy="${(H - ((last - min) / range) * (H - 4) - 2).toFixed(1)}" r="3" fill="${lineCol}"/>`;
 }
 
-function renderToday(today, marketOpen, nextClose) {
+function renderToday(today, marketOpen, nextClose, nextOpen) {
   const pnlEl    = document.getElementById('td-pnl');
   const pnlPctEl = document.getElementById('td-pnl-pct');
   const tradesEl = document.getElementById('td-trades');
@@ -4089,7 +4092,7 @@ function renderToday(today, marketOpen, nextClose) {
   } else if (marketOpen === false) {
     mktEl.textContent = 'CLOSED';
     mktEl.className   = 'today-val neu';
-    mktSubEl.textContent = nextClose ? 'Opens ' + new Date(nextClose).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '';
+    mktSubEl.textContent = nextOpen ? 'Opens ' + new Date(nextOpen).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',timeZone:'America/New_York'}) + ' ET' : '';
   } else {
     mktEl.textContent = '—';
     mktEl.className   = 'today-val neu';
