@@ -34,7 +34,7 @@ from src.utils.journal import TradeJournal
 from src.utils.models import User, db
 from src.utils.sectors import get_sector, positions_by_sector
 
-CYCLE_INTERVAL = 60  # seconds between automatic trading cycles
+CYCLE_INTERVAL = 90  # seconds between automatic trading cycles
 
 # Configure logging at module level so it works under gunicorn too
 logging.basicConfig(
@@ -48,6 +48,26 @@ app = Flask(__name__)
 # Tell Flask it's behind Railway's HTTPS reverse proxy so it reads
 # X-Forwarded-Proto/Host correctly — required for secure session cookies.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+
+@app.after_request
+def _compress_response(response):
+    """Gzip JSON responses larger than 1 KB when the client accepts it."""
+    if (
+        response.status_code == 200
+        and "gzip" in request.headers.get("Accept-Encoding", "")
+        and response.content_type.startswith("application/json")
+        and response.content_length is not None
+        and response.content_length > 1024
+    ):
+        import gzip as _gzip, io as _io
+        buf = _io.BytesIO()
+        with _gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=6) as f:
+            f.write(response.data)
+        response.data = buf.getvalue()
+        response.headers["Content-Encoding"] = "gzip"
+        response.headers["Content-Length"] = len(response.data)
+    return response
 
 # ── Database ──────────────────────────────────────────────────────────────────
 _DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -431,23 +451,28 @@ _LOGIN_HTML = """<!doctype html>
 <title>Login — Automatic Trading Engine</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;
-     min-height:100vh;display:flex;align-items:center;justify-content:center}
-.card{background:#1e293b;border:1px solid #334155;border-radius:14px;
-      padding:40px 36px;width:100%;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,.4)}
-.logo{font-size:18px;font-weight:700;color:#38bdf8;margin-bottom:4px;text-align:center}
-.sub{font-size:12px;color:#475569;text-align:center;margin-bottom:28px}
-label{display:block;font-size:11px;color:#64748b;text-transform:uppercase;
-      letter-spacing:.5px;margin-bottom:5px}
-input{width:100%;background:#0f172a;border:1px solid #334155;border-radius:7px;
-      padding:10px 13px;color:#e2e8f0;font-size:14px;margin-bottom:16px;outline:none}
-input:focus{border-color:#0ea5e9}
-input::placeholder{color:#475569}
-.btn{width:100%;background:#0ea5e9;color:#fff;border:none;border-radius:7px;
-     padding:11px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
-.btn:hover{opacity:.88}
-.error{background:#7f1d1d;color:#fca5a5;border-radius:7px;padding:9px 12px;
-       font-size:13px;margin-bottom:16px;text-align:center}
+:root{--bg0:#0d1520;--bg1:#111c2d;--bg2:#1a2540;--border:rgba(255,255,255,0.07);
+  --border-strong:rgba(255,255,255,0.13);--text0:#f1f5f9;--text1:#94a3b8;--text2:#64748b;
+  --blue:#3b82f6;--red:#ef4444;--radius:8px}
+body{background:var(--bg0);color:var(--text1);font-family:'Inter','Segoe UI',system-ui,sans-serif;
+     font-size:13px;-webkit-font-smoothing:antialiased;min-height:100vh;
+     display:flex;align-items:center;justify-content:center}
+.card{background:var(--bg1);border:1px solid var(--border-strong);border-radius:14px;
+      padding:40px 36px;width:100%;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+.logo{font-size:17px;font-weight:700;color:var(--text0);margin-bottom:4px;text-align:center;letter-spacing:-.2px}
+.sub{font-size:12px;color:var(--text2);text-align:center;margin-bottom:28px}
+label{display:block;font-size:11px;color:var(--text2);text-transform:uppercase;
+      letter-spacing:.5px;margin-bottom:5px;font-weight:600}
+input{width:100%;background:var(--bg0);border:1px solid var(--border-strong);border-radius:var(--radius);
+      padding:10px 13px;color:var(--text0);font-size:13px;margin-bottom:16px;outline:none;font-family:inherit}
+input:focus{border-color:var(--blue)}
+input::placeholder{color:var(--text2)}
+.btn{width:100%;background:var(--blue);color:#fff;border:none;border-radius:var(--radius);
+     padding:11px;font-size:14px;font-weight:700;cursor:pointer;margin-top:4px;font-family:inherit;
+     letter-spacing:.01em;transition:background .15s}
+.btn:hover{background:#2563eb}
+.error{background:rgba(239,68,68,.12);color:#fca5a5;border:1px solid rgba(239,68,68,.3);
+       border-radius:var(--radius);padding:9px 12px;font-size:12px;margin-bottom:16px;text-align:center}
 </style>
 </head>
 <body>
@@ -464,9 +489,9 @@ input::placeholder{color:#475569}
            placeholder="Enter password" required/>
     <button class="btn" type="submit">Sign In</button>
   </form>
-  <p style="text-align:center;margin-top:20px;font-size:13px;color:#475569">
+  <p style="text-align:center;margin-top:20px;font-size:13px;color:var(--text2)">
     Don't have an account?
-    <a href="/register" style="color:#38bdf8;font-weight:600">Sign up free</a>
+    <a href="/register" style="color:var(--blue);font-weight:600">Sign up free</a>
   </p>
 </div>
 </body>
@@ -481,25 +506,30 @@ _REGISTER_HTML = """<!doctype html>
 <title>Sign Up — Automatic Trading Engine</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;
-     min-height:100vh;display:flex;align-items:center;justify-content:center}
-.card{background:#1e293b;border:1px solid #334155;border-radius:14px;
-      padding:40px 36px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.4)}
-.logo{font-size:18px;font-weight:700;color:#38bdf8;margin-bottom:4px;text-align:center}
-.sub{font-size:12px;color:#475569;text-align:center;margin-bottom:28px}
-label{display:block;font-size:11px;color:#64748b;text-transform:uppercase;
-      letter-spacing:.5px;margin-bottom:5px}
-input{width:100%;background:#0f172a;border:1px solid #334155;border-radius:7px;
-      padding:10px 13px;color:#e2e8f0;font-size:14px;margin-bottom:16px;outline:none}
-input:focus{border-color:#0ea5e9}
-input::placeholder{color:#475569}
-.btn{width:100%;background:#0ea5e9;color:#fff;border:none;border-radius:7px;
-     padding:11px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
-.btn:hover{opacity:.88}
-.error{background:#7f1d1d;color:#fca5a5;border-radius:7px;padding:9px 12px;
-       font-size:13px;margin-bottom:16px;text-align:center}
+:root{--bg0:#0d1520;--bg1:#111c2d;--bg2:#1a2540;--border:rgba(255,255,255,0.07);
+  --border-strong:rgba(255,255,255,0.13);--text0:#f1f5f9;--text1:#94a3b8;--text2:#64748b;
+  --blue:#3b82f6;--red:#ef4444;--radius:8px}
+body{background:var(--bg0);color:var(--text1);font-family:'Inter','Segoe UI',system-ui,sans-serif;
+     font-size:13px;-webkit-font-smoothing:antialiased;min-height:100vh;
+     display:flex;align-items:center;justify-content:center}
+.card{background:var(--bg1);border:1px solid var(--border-strong);border-radius:14px;
+      padding:40px 36px;width:100%;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+.logo{font-size:17px;font-weight:700;color:var(--text0);margin-bottom:4px;text-align:center;letter-spacing:-.2px}
+.sub{font-size:12px;color:var(--text2);text-align:center;margin-bottom:28px}
+label{display:block;font-size:11px;color:var(--text2);text-transform:uppercase;
+      letter-spacing:.5px;margin-bottom:5px;font-weight:600}
+input{width:100%;background:var(--bg0);border:1px solid var(--border-strong);border-radius:var(--radius);
+      padding:10px 13px;color:var(--text0);font-size:13px;margin-bottom:16px;outline:none;font-family:inherit}
+input:focus{border-color:var(--blue)}
+input::placeholder{color:var(--text2)}
+.btn{width:100%;background:var(--blue);color:#fff;border:none;border-radius:var(--radius);
+     padding:11px;font-size:14px;font-weight:700;cursor:pointer;margin-top:4px;font-family:inherit;
+     letter-spacing:.01em;transition:background .15s}
+.btn:hover{background:#2563eb}
+.error{background:rgba(239,68,68,.12);color:#fca5a5;border:1px solid rgba(239,68,68,.3);
+       border-radius:var(--radius);padding:9px 12px;font-size:12px;margin-bottom:16px;text-align:center}
 .field-error{font-size:11px;color:#f87171;margin-top:-12px;margin-bottom:12px}
-.hint{font-size:11px;color:#475569;margin-top:-12px;margin-bottom:14px}
+.hint{font-size:11px;color:var(--text2);margin-top:-12px;margin-bottom:14px}
 </style>
 </head>
 <body>
@@ -527,9 +557,9 @@ input::placeholder{color:#475569}
     {% if errors.confirm %}<div class="field-error">{{ errors.confirm }}</div>{% endif %}
     <button class="btn" type="submit">Create Account</button>
   </form>
-  <p style="text-align:center;margin-top:20px;font-size:13px;color:#475569">
+  <p style="text-align:center;margin-top:20px;font-size:13px;color:var(--text2)">
     Already have an account?
-    <a href="/login" style="color:#38bdf8;font-weight:600">Sign in</a>
+    <a href="/login" style="color:var(--blue);font-weight:600">Sign in</a>
   </p>
 </div>
 </body>
@@ -1216,6 +1246,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "next_cycle_at": _next_cycle_at.isoformat() if _next_cycle_at else None,
         "cycle_interval": CYCLE_INTERVAL,
         "watchlist": eng.watchlist,
+        "universe_tickers": eng.dynamic_universe.last_result.get("universe", []),
         "scan": eng.scanner.last_result.to_dict() if eng.scanner.last_result else None,
         "voo": eng.voo_monitor.last_status.to_dict() if eng.voo_monitor.last_status else None,
         "notifications": {
@@ -1460,11 +1491,20 @@ def _run_backtest_bg() -> None:
 
 # ── API endpoints ─────────────────────────────────────────────────────────────
 
+_state_built_at: float = 0.0   # epoch seconds of last full state build
+_STATE_CACHE_TTL = 30           # re-build at most every 30 s; background cycle owns 90 s
+
 @app.route("/api/state")
 def api_state():
-    global _last_state
-    # If the engine lock is held by a running cycle, return the last cached
-    # state immediately so the Refresh button never hangs.
+    global _last_state, _state_built_at
+    # Serve the in-memory cache if it's still fresh (avoids redundant get_signals() calls
+    # when multiple browser tabs hit the endpoint between trading cycles).
+    import time as _time_mod
+    now = _time_mod.time()
+    if _last_state and (now - _state_built_at) < _STATE_CACHE_TTL:
+        return jsonify(_last_state)
+
+    # If the engine lock is held by a running cycle, return cached state immediately.
     acquired = _lock.acquire(timeout=3)
     if not acquired:
         cached = dict(_last_state)
@@ -1475,6 +1515,7 @@ def api_state():
             eng = _get_engine()
             signals, prices, ind_map = eng.get_signals()
             _last_state = _build_state(signals, prices, ind_map)
+            _state_built_at = _time_mod.time()
         except Exception as e:
             try:
                 _last_state = _build_state(error=str(e))
@@ -3512,10 +3553,11 @@ function applyState(s) {
     detail.textContent = `Limit −${dl.limit_pct}%  ·  Today: ${sign}${dl.current_pct}%${dl.triggered ? '  — NEW BUYS HALTED' : ''}`;
   }
 
-  // watchlist + unified view
-  const wl = s.watchlist || [];
-  _wlSymbols = wl;
-  document.getElementById('wl-count').textContent = wl.length;
+  // watchlist + unified view — show ALL screener results, not just top-N trading list
+  const wl     = s.watchlist || [];
+  const uniTix = (s.universe_tickers && s.universe_tickers.length) ? s.universe_tickers : wl;
+  _wlSymbols = uniTix;
+  document.getElementById('wl-count').textContent = uniTix.length;
   const scan = s.scan;
   if (scan) {
     document.getElementById('scan-meta').textContent =
@@ -3538,17 +3580,15 @@ function applyState(s) {
   // build _wlSigData from signals array
   _wlSigData = {};
   (s.signals || []).forEach(r => { _wlSigData[r.symbol] = r; });
-  // fill in watchlist symbols that have no signal yet
-  if (scan && wl.length) {
-    wl.forEach(sym => {
-      if (!_wlSigData[sym]) _wlSigData[sym] = {
-        symbol: sym, sector: null, price: null,
-        score:  scan.scores  ? (scan.scores[sym]  ?? null) : null,
-        action: scan.actions ? (scan.actions[sym] || 'HOLD') : 'HOLD',
-        volume_ratio: null,
-      };
-    });
-  }
+  // fill in ALL universe tickers that have no live signal yet (show scores from scan)
+  uniTix.forEach(sym => {
+    if (!_wlSigData[sym]) _wlSigData[sym] = {
+      symbol: sym, sector: null, price: null,
+      score:  scan && scan.scores  ? (scan.scores[sym]  ?? null) : null,
+      action: scan && scan.actions ? (scan.actions[sym] || 'HOLD') : 'HOLD',
+      volume_ratio: null,
+    };
+  });
   // update category map from universe
   if (s.universe_categories) _wlCategories = s.universe_categories;
   _buildSectorButtons();
@@ -4169,8 +4209,9 @@ async function refresh() {
     const res = await fetch('/api/state');
     const data = await res.json();
     applyState(data);
-    loadHeatmap();
-    loadJournalTrades();
+    // Only refresh the heatmap if the heatmap tab is currently active
+    const heatmapActive = document.getElementById('tab-heatmap')?.classList.contains('active');
+    if (heatmapActive) loadHeatmap();
     _lastRefreshAt = Date.now();
     updateLastUpdated();
   } catch(e) {
@@ -4308,6 +4349,8 @@ async function loadJournalTrades() {
 }
 
 const _TAB_IDS = ['dashboard','positions','watchlist','signals','trades'];
+const _tabLoaded = {};  // tracks which tabs have loaded their data at least once
+
 function switchTab(name) {
   if (!_TAB_IDS.includes(name)) return;
   _TAB_IDS.forEach(id => {
@@ -4317,7 +4360,9 @@ function switchTab(name) {
     if (btn) btn.classList.toggle('active', id === name);
   });
   localStorage.setItem('activeTab', name);
-  if (name === 'trades') loadJournalTrades();
+  // Lazy-load tab data on first visit (or on each switch for live tabs)
+  if (name === 'trades' && !_tabLoaded.trades) { loadJournalTrades(); _tabLoaded.trades = true; }
+  if (name === 'heatmap') loadHeatmap();
 }
 (function restoreTab() {
   const saved = localStorage.getItem('activeTab');
@@ -4325,10 +4370,10 @@ function switchTab(name) {
   else switchTab('dashboard');
 })();
 
-// Initial load + auto-refresh every 5s (picks up background engine-cycle results quickly)
+// Initial load + auto-refresh every 90s (matches server-side trading cycle)
 refresh();
-setInterval(refresh, 5000);
-// Heat map refreshes on each full state refresh (called inside refresh()) — also once on init
+setInterval(refresh, 90000);
+// Heat map refreshes lazily with the state cycle — initial load on startup
 loadHeatmap();
 
 // ── Stock detail modal ────────────────────────────────────────────────────────
@@ -5611,7 +5656,8 @@ body.light .theme-toggle{border-color:#cbd5e1;color:#1e293b}
 .nav-tab.active{color:var(--text0);border-bottom-color:var(--blue)}
 .nav-tab-logout{margin-left:auto;color:var(--red)!important;font-size:12px;font-weight:600;padding:3px 12px;border-radius:6px;background:var(--red-bg)!important;border:1px solid rgba(239,68,68,.25)!important;cursor:pointer;min-height:unset;white-space:nowrap;font-family:inherit}
 /* ── Settings content ────────────────────────────────────────────────────── */
-.settings-content{max-width:860px;margin:0 auto;padding:28px 20px}
+main{padding:0}
+.settings-content{max-width:1000px;margin:0 auto;padding:28px 24px}
 /* Profile cards */
 .profiles{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:40px}
 @media(max-width:640px){.profiles{grid-template-columns:1fr}}
