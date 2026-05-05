@@ -1245,7 +1245,7 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "symbol":       sym,
                 "price":        round(price, 2) if price else None,
                 "action":       scan_result.actions.get(sym, "HOLD") if scan_result else "HOLD",
-                "score":        round(scan_result.scores.get(sym, 0.0), 3) if scan_result else 0.0,
+                "score":        round(scan_result.scores[sym], 3) if scan_result and sym in scan_result.scores else None,
                 "confidence":   None,
                 "rsi":          None,
                 "z_score":      None,
@@ -1686,10 +1686,12 @@ def api_heatmap():
     heatmap, watchlist) read from the same fetched data without extra API calls.
     """
     eng = _get_engine()
-    watchlist = (eng.watchlist
-                 or eng.dynamic_universe.last_result.get("universe", [])
-                 or _engine.watchlist
-                 or _engine.dynamic_universe.last_result.get("universe", []))
+    # Use the full universe as primary so heatmap matches the watchlist table.
+    # Fall back through ORB watchlist → global engine if universe is empty.
+    watchlist = (eng.dynamic_universe.last_result.get("universe", [])
+                 or _engine.dynamic_universe.last_result.get("universe", [])
+                 or eng.watchlist
+                 or _engine.watchlist)
     if not watchlist:
         return jsonify({"ok": True, "items": []})
     try:
