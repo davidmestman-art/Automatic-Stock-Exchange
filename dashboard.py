@@ -789,6 +789,14 @@ def _create_user_engine(user_id: int) -> TradingEngine:
     if user and user.notify_email:
         eng.emailer.notify_email = user.notify_email
         eng.emailer.active = bool(user.email_notifications_enabled)
+    # Seed watchlist, universe, and scanner results from the global engine so
+    # the user engine shows live data immediately without waiting for its own scan.
+    if not eng.watchlist and _engine.watchlist:
+        eng.watchlist = list(_engine.watchlist)
+    if not eng.dynamic_universe._last_result and _engine.dynamic_universe._last_result:
+        eng.dynamic_universe._last_result = _engine.dynamic_universe._last_result
+    if not eng.scanner.last_result and _engine.scanner.last_result:
+        eng.scanner.last_result = _engine.scanner.last_result
     return eng
 
 
@@ -1671,7 +1679,10 @@ def api_heatmap():
     heatmap, watchlist) read from the same fetched data without extra API calls.
     """
     eng = _get_engine()
-    watchlist = eng.watchlist
+    watchlist = (eng.watchlist
+                 or eng.dynamic_universe.last_result.get("universe", [])
+                 or _engine.watchlist
+                 or _engine.dynamic_universe.last_result.get("universe", []))
     if not watchlist:
         return jsonify({"ok": True, "items": []})
     try:
