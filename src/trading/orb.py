@@ -203,7 +203,7 @@ def _sym_df(df_all, sym: str):
 # ── Data helpers ──────────────────────────────────────────────────────────────
 
 def screen_orb_universe(
-    min_market_cap: float = 100e9,
+    min_market_cap: float = 200e9,
     min_avg_volume: float = 1e6,
     target_n: int = 50,
     api_key: str = "",

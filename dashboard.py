@@ -7140,7 +7140,9 @@ def settings_page():
 
 @app.route("/")
 def home():
-    _logged_in = bool(session.get("logged_in"))
+    if session.get("logged_in"):
+        return redirect("/dashboard")
+    _logged_in = False
     logging.info("[HOME] logged_in=%s session_keys=%s", _logged_in, list(session.keys()))
     resp = make_response(render_template_string(
         _LANDING_HTML,

@@ -167,7 +167,6 @@ class TradingEngine:
             min_price         = getattr(config, "universe_min_price",      10.0),
             max_price         = getattr(config, "universe_max_price",      1_000.0),
             min_market_cap    = getattr(config, "universe_min_market_cap", 200_000_000_000.0),
-            top_n             = getattr(config, "universe_top_n",          50),
             include_etfs      = getattr(config, "universe_include_etfs",   True),
             alpaca_api_key    = config.alpaca_api_key    if use_alpaca_uni else "",
             alpaca_secret_key = config.alpaca_secret_key if use_alpaca_uni else "",
