@@ -121,6 +121,8 @@ class StockScanner:
         self.fundamental_filter = fundamental_filter
         self.earnings_calendar = earnings_calendar
         self._last_result: Optional[ScanResult] = None
+        self._vol_fetcher = None   # reused across scans to preserve bar cache
+        self._sig_fetcher = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -194,7 +196,9 @@ class StockScanner:
         logger.info(f"Scanner: fetching volume for {len(self.universe)} symbols via Alpaca…")
         try:
             from .fetcher import MarketDataFetcher
-            fetcher = MarketDataFetcher(lookback_days=5, interval="1d")
+            if self._vol_fetcher is None:
+                self._vol_fetcher = MarketDataFetcher(lookback_days=5, interval="1d")
+            fetcher = self._vol_fetcher
             data = fetcher.fetch_many(self.universe)
 
             vols: Dict[str, float] = {}
@@ -223,8 +227,9 @@ class StockScanner:
     ) -> Tuple[List[str], Dict[str, float], Dict[str, str]]:
         from ..data.fetcher import MarketDataFetcher
 
-        fetcher = MarketDataFetcher(lookback_days=self.lookback_days, interval="1d")
-        market_data = fetcher.fetch_many(candidates)
+        if self._sig_fetcher is None:
+            self._sig_fetcher = MarketDataFetcher(lookback_days=self.lookback_days, interval="1d")
+        market_data = self._sig_fetcher.fetch_many(candidates)
 
         scored: List[Tuple[str, float, str]] = []
         all_scores: Dict[str, float] = {}

@@ -40,6 +40,8 @@ _QUOTE_TTL        = 60     # seconds — quote cache TTL (shared across all endp
 _CLOCK_TTL        = 300    # 5 min  — market open status changes slowly
 _PERF_TTL         = 300    # 5 min  — daily P&L sparkline
 _POSITIONS_TTL    = 60     # 1 min  — live position list
+_ACCOUNT_TTL      = 60     # 1 min  — account summary (equity / cash)
+_ORDERS_TTL       = 60     # 1 min  — filled orders list
 
 # ── Global rate limiter ───────────────────────────────────────────────────────
 _rate_lock = threading.Lock()
@@ -150,14 +152,16 @@ class AlpacaExecutor:
     # ── Account info ──────────────────────────────────────────────────────────
 
     def get_account_summary(self) -> dict:
-        acct = self._call_with_retry(self.trading.get_account)
-        return {
-            "equity": float(acct.equity),
-            "cash": float(acct.cash),
-            "buying_power": float(acct.buying_power),
-            "portfolio_value": float(acct.portfolio_value),
-            "daytrade_count": int(acct.daytrade_count),
-        }
+        def _fetch():
+            acct = self._call_with_retry(self.trading.get_account)
+            return {
+                "equity": float(acct.equity),
+                "cash": float(acct.cash),
+                "buying_power": float(acct.buying_power),
+                "portfolio_value": float(acct.portfolio_value),
+                "daytrade_count": int(acct.daytrade_count),
+            }
+        return self._get_cached(f"{self._tag}:account", _fetch, _ACCOUNT_TTL)
 
     # ── Live quotes ───────────────────────────────────────────────────────────
 
@@ -313,31 +317,33 @@ class AlpacaExecutor:
             return {}
 
     def get_filled_orders(self, limit: int = 30) -> List[dict]:
-        """Return recent filled orders from Alpaca, newest first."""
-        orders = self._call_with_retry(
-            self.trading.get_orders,
-            GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=limit * 2),
-        )
-        result = []
-        for o in orders:
-            if not o.filled_at:
-                continue
-            side = "BUY" if "buy" in str(o.side).lower() else "SELL"
-            order_class = str(getattr(o, "order_class", "") or "")
-            reason = "bracket order" if "bracket" in order_class else "market"
-            result.append({
-                "timestamp": o.filled_at.strftime("%Y-%m-%d %H:%M:%S"),
-                "action": side,
-                "symbol": o.symbol,
-                "shares": round(float(o.filled_qty), 4) if o.filled_qty else 0,
-                "price": round(float(o.filled_avg_price), 2) if o.filled_avg_price else 0,
-                "pnl": None,
-                "pnl_pct": None,
-                "reason": reason,
-            })
-            if len(result) >= limit:
-                break
-        return result
+        """Return recent filled orders from Alpaca, newest first (cached 1 min)."""
+        def _fetch():
+            orders = self._call_with_retry(
+                self.trading.get_orders,
+                GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=limit * 2),
+            )
+            result = []
+            for o in orders:
+                if not o.filled_at:
+                    continue
+                side = "BUY" if "buy" in str(o.side).lower() else "SELL"
+                order_class = str(getattr(o, "order_class", "") or "")
+                reason = "bracket order" if "bracket" in order_class else "market"
+                result.append({
+                    "timestamp": o.filled_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "action": side,
+                    "symbol": o.symbol,
+                    "shares": round(float(o.filled_qty), 4) if o.filled_qty else 0,
+                    "price": round(float(o.filled_avg_price), 2) if o.filled_avg_price else 0,
+                    "pnl": None,
+                    "pnl_pct": None,
+                    "reason": reason,
+                })
+                if len(result) >= limit:
+                    break
+            return result
+        return self._get_cached(f"{self._tag}:orders:{limit}", _fetch, _ORDERS_TTL)
 
     # ── Order execution ───────────────────────────────────────────────────────
 
