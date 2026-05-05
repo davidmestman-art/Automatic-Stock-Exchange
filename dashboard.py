@@ -1019,9 +1019,12 @@ def _background_loop() -> None:
 
 def _safe_empty_state(error: str = "") -> dict:
     """Minimal valid state returned when _build_state fails completely."""
+    # Determine mode from env vars so a transient error doesn't flip the badge.
+    _api_key = os.getenv("ALPACA_API_KEY", "")
+    _mode = "Alpaca Paper" if _api_key else "Local Simulation"
     return {
         "timestamp": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
-        "mode": "Local Simulation",
+        "mode": _mode,
         "market_open": None,
         "portfolio": {
             "total_value": 0, "cash": 0, "position_value": 0,
@@ -3477,7 +3480,7 @@ function applyState(s) {
   // no-keys banner
 
   // mode badge
-  const mode = s.mode || 'Local Simulation';
+  const mode = s.mode || 'Connecting…';
   const badge = document.getElementById('mode-badge');
   badge.textContent = mode;
   badge.className = 'badge ' + (mode.includes('Paper') ? 'badge-paper' : mode.includes('LIVE') ? 'badge-live' : 'badge-sim');
@@ -5881,7 +5884,7 @@ async function initHeader() {
   try {
     const s = await fetch('/api/state').then(r => r.json());
     const p = s.portfolio || {};
-    const mode = s.mode || 'Local Simulation';
+    const mode = s.mode || 'Connecting…';
     const badge = document.getElementById('mode-badge');
     badge.textContent = mode;
     badge.className = 'badge ' + (mode.includes('Paper') ? 'badge-paper' : mode.includes('LIVE') ? 'badge-live' : 'badge-sim');
@@ -6040,7 +6043,7 @@ tr:hover td{background:rgba(18,26,46,.8)}
 <body>
 <header>
   <div class="logo">Automatic Trading Engine</div>
-  <span class="badge badge-sim" id="mode-badge">LOCAL SIMULATION</span>
+  <span class="badge badge-connecting" id="mode-badge">Connecting…</span>
   <span id="market-status">
     <span class="market-dot market-unknown" id="market-dot"></span>
     <span id="market-label">Market —</span>
@@ -6231,7 +6234,7 @@ async function initHeader() {
   try {
     const s = await fetch('/api/state').then(r => r.json());
     const p = s.portfolio || {};
-    const mode = s.mode || 'Local Simulation';
+    const mode = s.mode || 'Connecting…';
     const badge = document.getElementById('mode-badge');
     badge.textContent = mode;
     badge.className = 'badge ' + (mode.includes('Paper') ? 'badge-paper' : mode.includes('LIVE') ? 'badge-live' : 'badge-sim');
@@ -6377,7 +6380,7 @@ tr:hover td{background:#263044}
 <body>
 <header>
   <div class="logo">Automatic Trading Engine</div>
-  <span class="badge badge-sim" id="mode-badge">LOCAL SIMULATION</span>
+  <span class="badge badge-connecting" id="mode-badge">Connecting…</span>
   <span id="market-status">
     <span class="market-dot market-unknown" id="market-dot"></span>
     <span id="market-label">Market —</span>
@@ -6993,7 +6996,7 @@ async function initHeader() {
   try {
     const s = await fetch('/api/state').then(r => r.json());
     const p = s.portfolio || {};
-    const mode = s.mode || 'Local Simulation';
+    const mode = s.mode || 'Connecting…';
     const badge = document.getElementById('mode-badge');
     badge.textContent = mode;
     badge.className = 'badge ' + (mode.includes('Paper') ? 'badge-paper' : mode.includes('LIVE') ? 'badge-live' : 'badge-sim');
@@ -7073,6 +7076,8 @@ def settings_page():
                 if _u.alpaca_api_key_enc:
                     alpaca_connected = True
                     alpaca_paper     = bool(_u.alpaca_paper)
+                elif os.getenv("ALPACA_API_KEY") and os.getenv("ALPACA_SECRET_KEY"):
+                    alpaca_connected = True
                 user_notify_email  = _u.notify_email or ""
                 user_email_enabled = bool(_u.email_notifications_enabled)
     resp = make_response(render_template_string(
