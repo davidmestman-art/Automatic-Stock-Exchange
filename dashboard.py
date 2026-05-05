@@ -809,7 +809,11 @@ def _get_engine() -> TradingEngine:
         return _engine
     with _ue_lock:
         if user_id not in _user_engines:
-            _user_engines[user_id] = _create_user_engine(user_id)
+            try:
+                _user_engines[user_id] = _create_user_engine(user_id)
+            except Exception as e:
+                log.error(f"[ENGINE] Failed to create user engine (user={user_id}): {e} — falling back to global engine")
+                return _engine
         return _user_engines[user_id]
 
 
