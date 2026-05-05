@@ -983,6 +983,15 @@ def _background_loop() -> None:
                 _last_cycle_at = datetime.now()
             except Exception as e:
                 log.error(f"Background cycle error: {e}")
+            # Also cycle all cached user engines so their portfolios stay live.
+            if _AUTH_ENABLED:
+                with _ue_lock:
+                    engines_snapshot = list(_user_engines.items())
+                for uid, ueng in engines_snapshot:
+                    try:
+                        ueng.run_cycle()
+                    except Exception as e:
+                        log.error(f"Background user-engine cycle error (user={uid}): {e}")
         # Auto-trigger weekend backtest on Fridays after market close (≥16:00 ET)
         _now = _now_et()
         if _now.weekday() == 4 and _now.hour >= 16 and not _backtest_running:
@@ -1577,6 +1586,36 @@ def api_state():
     finally:
         _lock.release()
     return jsonify(_last_state)
+
+
+@app.route("/api/alpaca-status")
+def api_alpaca_status():
+    """Debug endpoint — returns Alpaca config info to help diagnose connection issues."""
+    try:
+        eng = _get_engine()
+        cfg = eng.config
+        user_id = session.get("user_id") if _AUTH_ENABLED else None
+        db_key_set = False
+        if user_id:
+            try:
+                _u = db.session.get(User, user_id)
+                db_key_set = bool(_u and _u.alpaca_api_key_enc)
+            except Exception:
+                pass
+        return jsonify({
+            "use_alpaca": cfg.use_alpaca,
+            "paper_trading": cfg.paper_trading,
+            "api_key_set": bool(cfg.alpaca_api_key),
+            "api_key_prefix": cfg.alpaca_api_key[:6] + "…" if cfg.alpaca_api_key else "",
+            "env_api_key_set": bool(os.getenv("ALPACA_API_KEY")),
+            "db_key_set": db_key_set,
+            "auth_enabled": _AUTH_ENABLED,
+            "user_id": user_id,
+            "mode": "Alpaca Paper" if cfg.use_alpaca and cfg.paper_trading else
+                    "Alpaca LIVE" if cfg.use_alpaca else "Local Simulation",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/cycle", methods=["POST"])
@@ -7063,8 +7102,11 @@ def index():
         if user_id:
             try:
                 _u = db.session.get(User, user_id)
-                # Keys in DB → show ALPACA PAPER regardless of live-API reachability
+                # Keys in DB take precedence; fall back to env vars so the badge
+                # shows ALPACA PAPER even if the user hasn't used the Settings page.
                 if _u and _u.alpaca_api_key_enc:
+                    alpaca_connected = True
+                elif os.getenv("ALPACA_API_KEY") and os.getenv("ALPACA_SECRET_KEY"):
                     alpaca_connected = True
             except Exception:
                 pass
