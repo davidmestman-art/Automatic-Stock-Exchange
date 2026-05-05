@@ -54,12 +54,9 @@ DOW_30: List[str] = [
     "MRK", "MSFT", "NKE", "PG", "SHW", "TRV", "UNH", "V", "VZ", "WMT",
 ]
 
-# Core ETFs always included in the screened universe
+# Core ETFs — index benchmarks always included in universe for reference
 CORE_ETFS: List[str] = [
     "SPY", "QQQ", "DIA", "IWM",
-    "XLF", "XLE", "XLK", "XLV", "XLP", "XLI", "XLB", "XLC", "XLRE", "XLU", "XLY",
-    "ARKK", "VTI", "VOO",
-    "GLD", "SLV", "TLT", "HYG", "LQD",
 ]
 
 # Set lookups for category tagging
@@ -83,41 +80,39 @@ MIN_PRICE:       float = 10.0
 MAX_PRICE:       float = 1_000.0
 MIN_MARKET_CAP:  float = 200_000_000_000.0  # $200 B
 
-# ── Mega-cap seed: stocks with market cap ≥ ~$80B ──────────────────────────────
+# ── Mega-cap seed: stocks with market cap ≥ $200B ─────────────────────────────
 # Used to pre-filter the 10,000+ Alpaca asset list BEFORE any data download.
-# When Alpaca returns the full exchange list, we intersect with this set so that
-# Alpaca bars are only fetched for these ~80 tickers instead of 10,000+.
-# Update periodically as companies cross the threshold.
+# After pre-filtering, bars are only fetched for these tickers instead of 10,000+.
+# The final universe is capped at MAX_UNIVERSE_STOCKS ranked by composite score.
+# Update periodically as companies cross/fall below the threshold.
 _MEGA_CAP_SEED: frozenset = frozenset([
     # Technology
     "AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CRM", "ADBE", "AMD", "QCOM", "TXN",
-    "INTC", "AMAT", "LRCX", "KLAC", "MU", "ADI", "MRVL", "NOW", "PANW", "SNPS",
-    "CDNS", "INTU", "CSCO", "ACN", "IBM", "FICO", "PLTR", "ANET", "CRWD", "APP",
+    "AMAT", "LRCX", "KLAC", "MU", "NOW", "PANW", "SNPS", "CDNS", "INTU", "CSCO",
+    "ACN", "IBM", "PLTR", "ANET", "CRWD", "APP",
     # Communication Services
-    "GOOGL", "GOOG", "META", "NFLX", "T", "VZ", "TMUS", "DIS", "CMCSA",
+    "GOOGL", "GOOG", "META", "NFLX", "TMUS",
     # Consumer Discretionary
-    "AMZN", "TSLA", "HD", "MCD", "NKE", "BKNG", "LOW", "SBUX", "TJX",
-    "UBER", "ABNB", "CMG", "ORLY",
+    "AMZN", "TSLA", "HD", "MCD", "BKNG", "LOW", "TJX", "UBER",
     # Consumer Staples
-    "WMT", "COST", "PG", "KO", "PEP", "PM", "MO", "CL", "MDLZ",
+    "WMT", "COST", "PG", "KO", "PEP",
     # Financials
-    "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "AXP",
-    "C", "COF", "CME", "SPGI", "MCO", "MMC", "AON", "ICE", "BK", "FI", "PYPL",
+    "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "AXP", "C",
     # Health Care
-    "UNH", "LLY", "JNJ", "MRK", "ABBV", "TMO", "ABT", "DHR", "BMY", "PFE",
-    "AMGN", "GILD", "CI", "ELV", "MDT", "SYK", "BSX", "ISRG", "ZTS", "REGN",
-    "VRTX", "CVS", "HUM",
+    "UNH", "LLY", "JNJ", "MRK", "ABBV", "TMO", "PFE", "AMGN", "SYK", "BSX",
+    "ISRG", "REGN", "VRTX",
     # Industrials
-    "GE", "RTX", "HON", "CAT", "DE", "BA", "UNP", "UPS", "LMT", "NOC",
-    "GD", "ETN", "EMR", "ITW", "MMM", "CTAS", "CSX", "NSC", "ODFL",
+    "GE", "RTX", "HON", "CAT", "DE", "UNP", "UPS", "LMT", "ETN",
     # Energy
-    "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "MPC", "PSX", "WMB", "LNG",
+    "XOM", "CVX", "COP",
     # Materials
-    "LIN", "APD", "SHW", "ECL", "NEM", "FCX",
-    # Utilities / Real Estate
-    "NEE", "DUK", "SO",
-    # Mega-cap ETFs always pass through separately — no need to list here
+    "LIN",
+    # Utilities
+    "NEE",
 ])
+
+# Maximum number of equity stocks in the screened universe (excludes ETFs)
+MAX_UNIVERSE_STOCKS = 60
 
 _CACHE_PATH   = Path(__file__).resolve().parent.parent.parent / "universe_cache.json"
 _LOG_PATH     = Path(__file__).resolve().parent.parent.parent / "screener_log.json"
@@ -444,12 +439,10 @@ def _screen(
     close10, vol10 = _alpaca_bars_wide(regulars, 14, api_key, secret_key)
 
     if close10 is None or vol10 is None or close10.empty:
-        # Fall back: apply the mega-cap seed filter so we still enforce the
-        # $200B market-cap threshold even without live data.
         log.warning("[Universe] 10d fetch failed — filtering to mega-cap seed only")
-        pre_candidates = [s for s in regulars if s in _MEGA_CAP_SEED][:300]
+        pre_candidates = [s for s in regulars if s in _MEGA_CAP_SEED][:MAX_UNIVERSE_STOCKS]
         if not pre_candidates:
-            pre_candidates = regulars[:300]
+            pre_candidates = regulars[:MAX_UNIVERSE_STOCKS]
         stats["after_vol_price"] = len(pre_candidates)
     else:
         avg_vol    = vol10.mean(skipna=True)
@@ -471,8 +464,8 @@ def _screen(
     close1y, vol1y = _alpaca_bars_wide(all_fetch, 252, api_key, secret_key)
 
     if close1y is None or vol1y is None or close1y.empty:
-        # Still enforce mega-cap filter in the 1-year fallback path.
-        tickers = [s for s in pre_candidates if s in _MEGA_CAP_SEED] or pre_candidates
+        tickers = ([s for s in pre_candidates if s in _MEGA_CAP_SEED]
+                   or pre_candidates)[:MAX_UNIVERSE_STOCKS]
         cats    = {s: tag_category(s) for s in tickers}
         ex_bkd  = _exchange_breakdown(tickers, cats)
         stats["after_mcap"] = len(tickers)
@@ -533,9 +526,9 @@ def _screen(
 
     ranked = sorted(composite, key=lambda s: -composite[s])
 
-    # ── Step 4: All candidates passed _MEGA_CAP_SEED pre-filter ─────────────
-    # Market cap ≥ $200B is guaranteed by the seed; keep every stock that passed.
-    passed = ranked
+    # ── Step 4: Cap at MAX_UNIVERSE_STOCKS ranked by composite score ────────
+    # Market cap ≥ $200B is guaranteed by the seed; take the top N by score.
+    passed = ranked[:MAX_UNIVERSE_STOCKS]
     stats["after_mcap"] = len(passed)
 
     # ── Step 5: Prepend ETFs and tag categories ───────────────────────────────
