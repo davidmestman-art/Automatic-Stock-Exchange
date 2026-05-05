@@ -3349,26 +3349,10 @@ body.light .simple-verdict strong{color:#0f172a}
         </table>
       </div>
     </div>
-    <!-- controls: search filter + category + sector buttons -->
-    <div class="wl-controls" style="flex-direction:column;align-items:stretch;gap:6px">
-      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
-        <input type="text" id="wl-filter" class="wl-filter-input" placeholder="Filter tickers…"
-               maxlength="6" oninput="this.value=this.value.toUpperCase();applyWlFilters()"
-               autocomplete="off" spellcheck="false"/>
-        <button class="btn-save" onclick="triggerRescan()" id="wl-rescan-btn"
-                style="font-size:11px;padding:4px 10px;background:#1d4ed8">Rescan</button>
-      </div>
-      <div class="tab-btns" id="wl-category-btns">
-        <button class="tab-btn active" onclick="setWlCategory('all',this)">All</button>
-        <button class="tab-btn" onclick="setWlCategory('S&P 500',this)">S&amp;P 500</button>
-        <button class="tab-btn" onclick="setWlCategory('Nasdaq 100',this)">Nasdaq 100</button>
-        <button class="tab-btn" onclick="setWlCategory('Dow 30',this)">Dow 30</button>
-        <button class="tab-btn" onclick="setWlCategory('ETF',this)">ETFs</button>
-        <button class="tab-btn" onclick="setWlCategory('Other',this)">Other</button>
-      </div>
-      <div class="tab-btns" id="wl-sector-btns">
-        <button class="tab-btn active" onclick="setWlSector('all',this)">All Sectors</button>
-      </div>
+    <!-- controls: rescan button only -->
+    <div class="wl-controls" style="flex-direction:row;align-items:center;gap:8px">
+      <button class="btn-save" onclick="triggerRescan()" id="wl-rescan-btn"
+              style="font-size:11px;padding:4px 10px;background:#1d4ed8">Rescan</button>
     </div>
     <!-- heat map — primary visual -->
     <div class="panel grid1" id="heatmap-panel">
