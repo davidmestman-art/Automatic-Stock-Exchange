@@ -10,7 +10,6 @@ Phases each trading day:
 """
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import time as _time
 from typing import Dict, List, Optional, Tuple
@@ -203,13 +202,12 @@ def _sym_df(df_all, sym: str):
 # ── Data helpers ──────────────────────────────────────────────────────────────
 
 def screen_orb_universe(
-    min_market_cap: float = 200e9,
     min_avg_volume: float = 1e6,
     target_n: int = 50,
     api_key: str = "",
     secret_key: str = "",
 ) -> Tuple[List[str], Dict[str, float], Dict[str, float]]:
-    """Filter _ORB_SEED to large caps with volume > min_avg_volume via Alpaca bars."""
+    """Filter _ORB_SEED ($200B+ mega-caps) to stocks with avg daily volume > min_avg_volume."""
     candidates = list(dict.fromkeys(_ORB_SEED))
 
     # Fetch 30 days of daily bars for all candidates in one call
