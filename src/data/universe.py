@@ -81,8 +81,7 @@ _ALL_CANDIDATES: List[str] = sorted(set(SP500_UNIVERSE + NASDAQ_100 + DOW_30))
 MIN_AVG_VOLUME:  int   = 500_000           # shares / day
 MIN_PRICE:       float = 10.0
 MAX_PRICE:       float = 1_000.0
-MIN_MARKET_CAP:  float = 100_000_000_000.0  # $100 B
-TOP_N:           int   = 50
+MIN_MARKET_CAP:  float = 200_000_000_000.0  # $200 B
 
 # ── Mega-cap seed: stocks with market cap ≥ ~$80B ──────────────────────────────
 # Used to pre-filter the 10,000+ Alpaca asset list BEFORE any data download.
@@ -198,7 +197,6 @@ class DynamicUniverse:
         min_price:         float = MIN_PRICE,
         max_price:         float = MAX_PRICE,
         min_market_cap:    float = MIN_MARKET_CAP,
-        top_n:             int   = TOP_N,
         include_etfs:      bool  = True,
         alpaca_api_key:    str   = "",
         alpaca_secret_key: str   = "",
@@ -208,7 +206,6 @@ class DynamicUniverse:
         self.min_price         = min_price
         self.max_price         = max_price
         self.min_market_cap    = min_market_cap
-        self.top_n             = top_n
         self.include_etfs      = include_etfs
         self.alpaca_api_key    = alpaca_api_key
         self.alpaca_secret_key = alpaca_secret_key
@@ -268,7 +265,7 @@ class DynamicUniverse:
                 using_alpaca = True
                 # Pre-filter to mega-cap seed BEFORE any data download.
                 # Alpaca returns 10,000+ tickers; we only want the ~80 with
-                # market cap ≥ $100B so that Alpaca only fetches a tiny list.
+                # market cap ≥ $200B so that Alpaca only fetches a tiny list.
                 candidates = [s for s in raw_candidates if s in _MEGA_CAP_SEED]
                 log.info(
                     "[Universe] Pre-filtered %d Alpaca tickers → %d mega-cap candidates",
@@ -286,9 +283,9 @@ class DynamicUniverse:
         always_include = CORE_ETFS if self.include_etfs else []
 
         log.info(
-            "[Universe] Starting screen — %d candidates, top_n=%d, "
-            "vol≥%d, price $%.0f–$%.0f, mcap≥$%.0fB",
-            len(candidates), self.top_n, self.min_avg_volume,
+            "[Universe] Starting screen — %d candidates, "
+            "vol≥%d, price $%.0f–$%.0f, mcap≥$%.0fB (no top-N cap)",
+            len(candidates), self.min_avg_volume,
             self.min_price, self.max_price, self.min_market_cap / 1e9,
         )
 
@@ -301,7 +298,6 @@ class DynamicUniverse:
                 min_price=self.min_price,
                 max_price=self.max_price,
                 min_market_cap=self.min_market_cap,
-                top_n=self.top_n,
                 api_key=self.alpaca_api_key,
                 secret_key=self.alpaca_secret_key,
             )
@@ -434,7 +430,6 @@ def _screen(
     min_price:      float,
     max_price:      float,
     min_market_cap: float,
-    top_n:          int,
     api_key:        str = "",
     secret_key:     str = "",
 ) -> Tuple[List[str], Dict, Dict[str, str], Dict[str, int]]:
@@ -473,7 +468,7 @@ def _screen(
     close1y, vol1y = _alpaca_bars_wide(all_fetch, 252, api_key, secret_key)
 
     if close1y is None or vol1y is None or close1y.empty:
-        tickers = pre_candidates[:top_n]
+        tickers = pre_candidates
         cats    = {s: tag_category(s) for s in tickers}
         ex_bkd  = _exchange_breakdown(tickers, cats)
         stats["after_mcap"] = len(tickers)
@@ -535,8 +530,8 @@ def _screen(
     ranked = sorted(composite, key=lambda s: -composite[s])
 
     # ── Step 4: All candidates passed _MEGA_CAP_SEED pre-filter ─────────────
-    # Market cap ≥ $100B is guaranteed by the seed; no per-ticker lookup needed.
-    passed = ranked[:top_n]
+    # Market cap ≥ $200B is guaranteed by the seed; keep every stock that passed.
+    passed = ranked
     stats["after_mcap"] = len(passed)
 
     # ── Step 5: Prepend ETFs and tag categories ───────────────────────────────
@@ -547,8 +542,8 @@ def _screen(
     ex_bkd = _exchange_breakdown(all_tickers, cats)
 
     log.info(
-        "[Universe] Screen complete: %d tickers (incl %d ETFs, target %d)",
-        len(all_tickers), len(etf_tickers), top_n,
+        "[Universe] Screen complete: %d tickers (incl %d ETFs, no top-N cap)",
+        len(all_tickers), len(etf_tickers),
     )
     return all_tickers, stats, cats, ex_bkd
 
