@@ -28,7 +28,6 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from config import TradingConfig, config
-from src.data.extended_hours import ExtendedHoursMonitor
 from src.trading.engine import TradingEngine
 from src.utils.journal import TradeJournal
 from src.utils.models import User, db
@@ -742,7 +741,6 @@ _last_cycle_at: Optional[datetime] = None
 _next_cycle_at: Optional[datetime] = None
 _equity_snapshots: list = []          # [{ts, value}] — portfolio value over time
 _last_snapshot_ts: Optional[datetime] = None
-_ext_hours = ExtendedHoursMonitor(cache_ttl_seconds=120)
 
 
 def _create_user_engine(user_id: int) -> TradingEngine:
@@ -991,7 +989,7 @@ def _safe_empty_state(error: str = "") -> dict:
         "mtf_enabled": False, "sector_exposure": {},
         "max_per_sector": 3, "earnings_enabled": False, "earnings_warnings": {},
         "trailing_stop_enabled": False, "confirmation_enabled": False,
-        "pending_confirmation": [], "extended_hours": [],
+        "pending_confirmation": [],
         "mean_reversion_enabled": False, "correlation_filter_enabled": False,
         "adaptive_sizing_enabled": False, "regime": None, "ml_status": None,
         "public_url": None, "personal_watchlist": [],
@@ -1174,6 +1172,42 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
             })
         sig_list.sort(key=lambda x: -abs(x["score"]))
 
+    # ── Add lightweight rows for remaining universe tickers ───────────────────
+    sig_syms = {r["symbol"] for r in sig_list}
+    universe_tickers = eng.dynamic_universe.last_result.get("universe", [])
+    if universe_tickers:
+        scan_result = eng.scanner.last_result
+        uni_prices  = eng.get_cached_prices(universe_tickers)
+        for sym in universe_tickers:
+            if sym in sig_syms:
+                continue
+            price = uni_prices.get(sym)
+            if price is None:
+                # fall back to last bar close from fetcher cache
+                try:
+                    df = eng.fetcher.fetch(sym, force_refresh=False)
+                    if df is not None and not df.empty:
+                        price = float(df["Close"].iloc[-1])
+                except Exception:
+                    pass
+            sig_list.append({
+                "symbol":       sym,
+                "price":        round(price, 2) if price else None,
+                "action":       scan_result.actions.get(sym, "HOLD") if scan_result else "HOLD",
+                "score":        round(scan_result.scores.get(sym, 0.0), 3) if scan_result else 0.0,
+                "confidence":   None,
+                "rsi":          None,
+                "z_score":      None,
+                "atr_pct":      None,
+                "volume_ratio": None,
+                "est_size_pct": None,
+                "corr_blocked": None,
+                "reasons":      [],
+                "adx":          None,
+                "sector":       get_sector(sym) or "—",
+                "category":     eng.dynamic_universe.last_result.get("categories", {}).get(sym, "Other"),
+            })
+
     # ── Earnings warnings ─────────────────────────────────────────────────────
     earnings_warnings: dict = {}
     if eng.earnings_cal:
@@ -1217,13 +1251,6 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         1 for t in trades_list if (t.get("timestamp") or "").startswith(today_str)
     )
 
-    # ── Extended hours ────────────────────────────────────────────────────────
-    ext_hours = []
-    try:
-        ext_hours = _ext_hours.fetch(eng.watchlist)
-    except Exception as e:
-        log.debug(f"Extended hours fetch error: {e}")
-
     return {
         "timestamp": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
         "mode": mode,
@@ -1261,7 +1288,6 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
         "trailing_stop_enabled": eng.config.use_trailing_stop,
         "confirmation_enabled": eng.config.use_confirmation,
         "pending_confirmation": list(eng.pending_confirmations.keys()),
-        "extended_hours": ext_hours,
         "mean_reversion_enabled": eng.config.use_mean_reversion,
         "correlation_filter_enabled": eng.config.use_correlation_filter,
         "adaptive_sizing_enabled": eng.config.use_adaptive_sizing,
@@ -3095,7 +3121,6 @@ body.light .simple-verdict strong{color:#0f172a}
   <button class="nav-tab active" id="ntab-dashboard" onclick="switchTab('dashboard')">Dashboard</button>
   <button class="nav-tab" id="ntab-positions" onclick="switchTab('positions')">Positions</button>
   <button class="nav-tab" id="ntab-watchlist" onclick="switchTab('watchlist')">Watchlist</button>
-  <button class="nav-tab" id="ntab-signals" onclick="switchTab('signals')">Signals</button>
   <button class="nav-tab" id="ntab-trades" onclick="switchTab('trades')">Trades</button>
   <button class="nav-tab" onclick="window.location='/settings'">Settings</button>
   {% if auth %}<button class="nav-tab nav-tab-logout" onclick="window.location='/logout'">Logout</button>{% endif %}
@@ -3323,36 +3348,6 @@ body.light .simple-verdict strong{color:#0f172a}
         <span style="font-size:11px;color:#475569;margin-left:8px">saved between restarts</span>
       </div>
       <div class="pin-grid" id="pin-grid"></div>
-    </div>
-  </div>
-
-  <!-- ══ Signals tab ══ -->
-  <div id="tab-signals" class="tab-section">
-    <div class="panel grid1" id="ext-hours-panel" style="display:none">
-      <div class="panel-title">Pre / Post-Market
-        <span style="font-size:11px;color:#475569;margin-left:8px" id="ext-hours-note">2-min cache</span>
-      </div>
-      <div class="tbl-wrap"><table>
-        <thead><tr>
-          <th>Ticker</th><th>Regular Close</th><th>Pre-Market</th><th>Pre Chg</th><th>Post-Market</th><th>Post Chg</th>
-        </tr></thead>
-        <tbody id="ext-hours-body"><tr><td colspan="6" class="empty">No data</td></tr></tbody>
-      </table></div>
-    </div>
-    <div class="panel grid1">
-      <div class="panel-title">Signal Analysis <span class="count" id="sig-count">0</span>
-        <span id="mtf-badge" style="display:none;margin-left:6px;font-size:10px;padding:2px 8px;border-radius:99px;background:#1e3a5f;color:#93c5fd;font-weight:600">MTF ON · 1d 50% · 1h 30% · 15m 20%</span>
-        <span id="mr-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#14532d;color:#4ade80;font-weight:600">MR ON</span>
-        <span id="corr-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#1e3a5f;color:#93c5fd;font-weight:600">CORR FILTER ON</span>
-        <span id="sizing-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#451a03;color:#fdba74;font-weight:600">ADAPTIVE SIZE</span>
-        <span id="ml-badge" style="display:none;margin-left:4px;font-size:10px;padding:2px 8px;border-radius:99px;background:#312e81;color:#a5b4fc;font-weight:600">ML RANKING</span>
-      </div>
-      <div class="tbl-wrap"><table>
-        <thead><tr>
-          <th>Ticker</th><th>Sector</th><th>Price</th><th>Signal</th><th>Score</th><th>RSI</th><th class="z-col">ADX</th><th class="vol-col">Volume</th><th></th>
-        </tr></thead>
-        <tbody id="sig-body"><tr><td colspan="9" class="empty">No data yet — run a cycle</td></tr></tbody>
-      </table></div>
     </div>
   </div>
 
@@ -3594,123 +3589,6 @@ function applyState(s) {
   _buildSectorButtons();
   renderWatchlistTable();
 
-  // MTF badge
-  const mtfBadge = document.getElementById('mtf-badge');
-  if (s.mtf_enabled) mtfBadge.style.display = 'inline-block';
-  else               mtfBadge.style.display = 'none';
-
-  // feature badges in signal panel header
-  const mrBadge   = document.getElementById('mr-badge');
-  const corrBadge = document.getElementById('corr-badge');
-  const sizeBadge = document.getElementById('sizing-badge');
-  const mlBadge   = document.getElementById('ml-badge');
-  if (mrBadge)   mrBadge.style.display   = s.mean_reversion_enabled      ? 'inline-block' : 'none';
-  if (corrBadge) corrBadge.style.display = s.correlation_filter_enabled   ? 'inline-block' : 'none';
-  if (sizeBadge) sizeBadge.style.display = s.adaptive_sizing_enabled      ? 'inline-block' : 'none';
-  if (mlBadge && s.ml_status) {
-    if (s.ml_status.trained) {
-      mlBadge.style.display = 'inline-block';
-      const acc = s.ml_status.accuracy != null ? ` · ${(s.ml_status.accuracy * 100).toFixed(0)}% acc` : '';
-      mlBadge.textContent = `ML ON · ${s.ml_status.samples} trades${acc}`;
-      mlBadge.title = `Last trained: ${s.ml_status.last_trained || '—'}`;
-    } else if (s.ml_status.sklearn_available) {
-      mlBadge.style.display = 'inline-block';
-      mlBadge.style.opacity = '.5';
-      mlBadge.textContent = `ML · ${s.ml_status.samples || 0}/${20} samples`;
-      mlBadge.title = 'Needs 20 completed trades to train';
-    } else {
-      mlBadge.style.display = 'none';
-    }
-  }
-
-  // signals
-  document.getElementById('sig-count').textContent = signals.length;
-  const sb = document.getElementById('sig-body');
-  if (!signals.length) {
-    sb.innerHTML = '<tr><td colspan="9" class="empty">No signals — click Refresh</td></tr>';
-  } else {
-    sb.innerHTML = signals.map(r => {
-      const barPct = Math.round(Math.abs(r.score) * 100);
-      const barCol = r.action === 'BUY' ? '#22c55e' : r.action === 'SELL' ? '#ef4444' : '#6b7280';
-      const fmtTF  = v => v == null ? '' : `<span style="color:${v>=0?'#4ade80':'#f87171'}">${v>=0?'+':''}${fmt(v,3)}</span>`;
-      const agreeStr = r.mtf_agreement != null ? `<span style="color:#64748b"> agree ${r.mtf_agreement}/3</span>` : '';
-      const mtfRow = s.mtf_enabled && (r.tf_1d != null || r.tf_1h != null || r.tf_15m != null)
-        ? `<div class="mtf-scores">
-             <span>1d ${fmtTF(r.tf_1d)}</span>
-             <span>1h ${fmtTF(r.tf_1h)}</span>
-             <span>15m ${fmtTF(r.tf_15m)}</span>
-             ${agreeStr}
-           </div>`
-        : '';
-      const vr = r.volume_ratio;
-      const vrCol  = vr == null ? '#475569' : vr >= 3 ? '#f97316' : vr >= 2 ? '#fb923c' : vr >= 1.5 ? '#fbbf24' : '#475569';
-      const vrIcon = vr >= 3 ? ' ●' : vr >= 2 ? ' ▲' : '';
-      const vrBold = vr >= 1.5 ? 'font-weight:600;' : '';
-      const vrStr  = vr == null ? '—' : `${vr.toFixed(1)}×${vrIcon}`;
-      const rowHighlight = vr >= 2 ? 'background:rgba(249,115,22,0.05);' : '';
-
-      // Pending confirmation badge
-      const isPending = s.confirmation_enabled && (s.pending_confirmation||[]).includes(r.symbol);
-      const pendingBadge = isPending
-        ? `<span title="Awaiting next-candle confirmation" style="margin-left:5px;font-size:10px;color:#f59e0b;font-weight:700">⏳</span>`
-        : '';
-
-      // Correlation-blocked badge
-      const corrBlock = r.corr_blocked;
-      const corrBadgeCell = corrBlock
-        ? `<span title="Blocked: correlated with ${corrBlock}" style="margin-left:5px;font-size:10px;color:#f87171;font-weight:700">ρ</span>`
-        : '';
-
-      // ADX column (replaces Z-score)
-      const adx = r.adx;
-      const adxCol  = adx == null ? '#475569' : adx >= 30 ? '#f59e0b' : adx >= 20 ? '#fbbf24' : '#64748b';
-      const adxBold = adx != null && adx >= 25 ? 'font-weight:600;' : '';
-      const adxStr  = adx == null ? '—' : adx.toFixed(0);
-      const zCol = adxCol; const zBold = adxBold; const zStr = adxStr;
-      // VWAP + sector momentum sub-lines in Score cell
-      const vwapDev = r.vwap_dev;
-      const sm      = r.sector_mom;
-      const extraRow = (vwapDev != null || sm != null)
-        ? `<div class="sig-sub">`
-          + (vwapDev != null ? `<span style="color:${vwapDev<=0?'#4ade80':'#f87171'}">VWAP ${vwapDev>=0?'+':''}${vwapDev.toFixed(1)}%</span>` : '')
-          + (sm != null ? `<span style="color:${sm>=0?'#4ade80':'#f87171'}">Sect ${sm>=0?'+':''}${sm.toFixed(1)}%</span>` : '')
-          + `</div>`
-        : '';
-
-      // Adaptive size sub-line (shown for BUY signals when adaptive sizing is on)
-      const sizeRow = s.adaptive_sizing_enabled && r.est_size_pct != null && r.action === 'BUY'
-        ? `<div class="sig-sub"><span style="color:#f59e0b">~${r.est_size_pct}% portfolio</span>` +
-          (r.atr_pct != null ? `<span>ATR ${r.atr_pct.toFixed(1)}%</span>` : '') + `</div>`
-        : '';
-
-      // ML multiplier sub-line under Score
-      const mlRow = s.ml_status && s.ml_status.trained && r.ml_mult != null
-        ? `<div class="sig-sub"><span style="color:#a5b4fc">ML×${r.ml_mult.toFixed(2)}</span></div>`
-        : '';
-
-      return `<tr style="${rowHighlight}">
-        <td class="sym-link" style="font-weight:600" onclick="openChart('${r.symbol}')" title="Click for chart">${r.symbol}${pendingBadge}${corrBadgeCell}</td>
-        <td style="color:#64748b;font-size:12px">${r.sector||'—'}</td>
-        <td>$${fmt(r.price)}</td>
-        <td>
-          <span class="pill pill-${r.action}">${r.action}</span>
-          ${sizeRow}
-        </td>
-        <td>
-          <div class="score-wrap">
-            <span style="color:${barCol};font-weight:600">${r.score >= 0 ? '+' : ''}${fmt(r.score, 3)}</span>
-            <div class="score-bar-bg"><div class="score-bar" style="width:${barPct}%;background:${barCol}"></div></div>
-          </div>
-          ${mtfRow}${mlRow}${extraRow}
-        </td>
-        <td>${r.rsi != null ? fmt(r.rsi, 1) : '—'}</td>
-        <td class="z-col" style="color:${zCol};${zBold}">${zStr}</td>
-        <td class="vol-col" style="color:${vrCol};${vrBold}">${vrStr}</td>
-        <td><button onclick="explainSignal('${r.symbol}')" style="padding:4px 10px;font-size:11px;font-weight:600;background:rgba(59,130,246,.12);color:#93c5fd;border:1px solid rgba(59,130,246,.25);border-radius:5px;cursor:pointer;white-space:nowrap;min-height:unset" title="Explain this signal in plain English">Explain</button></td>
-      </tr>`;
-    }).join('');
-  }
-
   // sector exposure strip
   const strip = document.getElementById('sector-strip');
   const maxPerSector = s.max_per_sector || 3;
@@ -3773,9 +3651,6 @@ function applyState(s) {
 
   // sector allocation pie
   renderSectorPie(positions);
-
-  // after-hours panel
-  renderExtHours(s.extended_hours || [], s.market_open);
 
   // notification bell — full opacity when at least one channel is configured
   const bell = document.getElementById('notif-indicator');
@@ -4101,40 +3976,6 @@ function renderWatchlistTable() {
   }).join('');
 }
 
-function renderExtHours(rows, marketOpen) {
-  const panel = document.getElementById('ext-hours-panel');
-  const body  = document.getElementById('ext-hours-body');
-  const note  = document.getElementById('ext-hours-note');
-
-  if (!rows || !rows.length) { panel.style.display = 'none'; return; }
-  panel.style.display = '';
-
-  const hasAnyExt = rows.some(r => r.pre_market_price != null || r.post_market_price != null);
-  if (!hasAnyExt) {
-    note.textContent = marketOpen ? 'Market is open — extended hours data not available' : '2-min cache';
-    body.innerHTML = '<tr><td colspan="6" class="empty" style="font-size:12px">' +
-      (marketOpen ? 'Pre/post-market prices are unavailable while market is open.' : 'No extended-hours data available.') +
-      '</td></tr>';
-    return;
-  }
-  note.textContent = '2-min cache';
-
-  const chgCell = (price, pct) => {
-    if (price == null) return '<td style="color:#475569">—</td><td style="color:#475569">—</td>';
-    const col = pct == null ? '#e2e8f0' : pct > 0 ? '#22c55e' : pct < 0 ? '#ef4444' : '#94a3b8';
-    const pctStr = pct == null ? '—' : (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
-    return `<td>$${fmt(price)}</td><td style="color:${col};font-weight:600">${pctStr}</td>`;
-  };
-  body.innerHTML = rows.map(r =>
-    `<tr>
-      <td style="font-weight:600">${r.symbol}</td>
-      <td>${r.regular_price != null ? '$' + fmt(r.regular_price) : '—'}</td>
-      ${chgCell(r.pre_market_price, r.pre_market_change_pct)}
-      ${chgCell(r.post_market_price, r.post_market_change_pct)}
-    </tr>`
-  ).join('');
-}
-
 function renderSparkline(equity) {
   const svg = document.getElementById('today-spark');
   if (!svg || !equity || equity.length < 2) {
@@ -4348,7 +4189,7 @@ async function loadJournalTrades() {
   } catch(e) {}
 }
 
-const _TAB_IDS = ['dashboard','positions','watchlist','signals','trades'];
+const _TAB_IDS = ['dashboard','positions','watchlist','trades'];
 const _tabLoaded = {};  // tracks which tabs have loaded their data at least once
 
 function switchTab(name) {
@@ -5724,17 +5565,6 @@ td.diff-dn{color:#f87171}
 /* Toggle switch */
 .toggle-wrap{display:flex;align-items:center;gap:10px;flex-shrink:0}
 .toggle-label{font-size:12px;color:var(--text1);min-width:36px;text-align:right}
-/* Universe section */
-.universe-card{background:var(--bg1);border:1px solid var(--border);border-radius:14px;padding:24px}
-.universe-meta{display:flex;flex-wrap:wrap;gap:20px;margin-bottom:18px}
-.universe-stat{display:flex;flex-direction:column;gap:3px}
-.universe-stat-val{font-size:22px;font-weight:700;color:var(--text0)}
-.universe-stat-lbl{font-size:11px;color:var(--text1);text-transform:uppercase;letter-spacing:.5px}
-.universe-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
-.universe-chip{background:var(--bg2);border:1px solid var(--border-strong);border-radius:6px;
-               padding:4px 10px;font-size:12px;font-weight:600;color:var(--text0);font-family:monospace}
-.universe-note{font-size:11px;color:var(--text2);margin-top:14px}
-.universe-loading{font-size:13px;color:var(--text1)}
 .toggle{position:relative;width:48px;height:26px;flex-shrink:0}
 .toggle input{opacity:0;width:0;height:0;position:absolute}
 .toggle-slider{position:absolute;inset:0;background:var(--bg2);border-radius:26px;
@@ -5779,7 +5609,6 @@ td.diff-dn{color:#f87171}
   <button class="nav-tab" onclick="window.location='/dashboard'">Dashboard</button>
   <button class="nav-tab" onclick="window.location='/dashboard'">Positions</button>
   <button class="nav-tab" onclick="window.location='/dashboard'">Watchlist</button>
-  <button class="nav-tab" onclick="window.location='/dashboard'">Signals</button>
   <button class="nav-tab" onclick="window.location='/dashboard'">Trades</button>
   <button class="nav-tab active">Settings</button>
   {% if auth %}<button class="nav-tab nav-tab-logout" onclick="window.location='/logout'">Logout</button>{% endif %}
@@ -5865,54 +5694,6 @@ td.diff-dn{color:#f87171}
     <div id="email-save-status" style="font-size:12px;display:none"></div>
   </div>
 
-  <!-- Universe -->
-  <div class="section-title">Trading Universe</div>
-  <div class="section-sub">Dynamically screens NYSE, NASDAQ, and AMEX equities daily at 9:15 AM ET. Core ETFs are always included. Composite ranking by volume, momentum, and 52-week proximity.</div>
-  <div class="universe-card" id="universe-card">
-    <div class="universe-loading" id="universe-loading">Loading universe…</div>
-    <div id="universe-content" style="display:none">
-      <div class="universe-meta">
-        <div class="universe-stat">
-          <div class="universe-stat-val" id="u-size">—</div>
-          <div class="universe-stat-lbl">In Universe</div>
-        </div>
-        <div class="universe-stat">
-          <div class="universe-stat-val" id="u-candidates">—</div>
-          <div class="universe-stat-lbl">Candidates Checked</div>
-        </div>
-        <div class="universe-stat">
-          <div class="universe-stat-val" id="u-watchlist">—</div>
-          <div class="universe-stat-lbl">Active Watchlist</div>
-        </div>
-        <div class="universe-stat">
-          <div class="universe-stat-val" id="u-source" style="font-size:13px">—</div>
-          <div class="universe-stat-lbl">Data Source</div>
-        </div>
-        <div class="universe-stat" style="margin-left:auto">
-          <div class="universe-stat-val" style="font-size:13px;color:var(--text2)" id="u-date">—</div>
-          <div class="universe-stat-lbl">Last Screened</div>
-        </div>
-      </div>
-      <!-- Exchange breakdown -->
-      <div id="u-exchange-row" style="display:flex;gap:12px;padding:10px 16px;border-top:1px solid var(--border);flex-wrap:wrap"></div>
-      <!-- Rescan button -->
-      <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:10px;align-items:center">
-        <button class="btn-save" onclick="rescanUniverse()" id="rescan-btn"
-                style="background:#1d4ed8">Rescan Now</button>
-        <div id="u-filter-status" style="font-size:12px;display:none"></div>
-      </div>
-      <!-- Universe chips -->
-      <div style="padding:8px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Universe Tickers</div>
-      <div class="universe-chips" id="u-chips"></div>
-      <!-- Screener log -->
-      <div style="padding:10px 16px;border-top:1px solid var(--border)">
-        <div style="font-size:12px;font-weight:600;color:var(--text1);margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em">Screener Log
-          <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text2)"> — last 7 runs</span>
-        </div>
-        <div id="u-log" style="font-size:12px;color:var(--text1)"></div>
-      </div>
-    </div>
-  </div>
 </div>
 </main>
 
@@ -6055,116 +5836,8 @@ async function saveNotifyEmail() {
   status.style.display = "block";
 }
 
-async function loadUniverse() {
-  try {
-    const res  = await fetch('/api/universe');
-    const data = await res.json();
-    document.getElementById('universe-loading').style.display = 'none';
-    const content = document.getElementById('universe-content');
-    if (!data.ok) {
-      document.getElementById('universe-loading').textContent = 'Failed to load universe.';
-      document.getElementById('universe-loading').style.display = '';
-      return;
-    }
-    content.style.display = '';
-    document.getElementById('u-size').textContent       = data.universe_size || 0;
-    document.getElementById('u-candidates').textContent = data.total_candidates || '—';
-    document.getElementById('u-watchlist').textContent  = (data.current_watchlist || []).length;
-    document.getElementById('u-date').textContent       = data.scanned_at || data.screen_date || 'Not yet run';
-    document.getElementById('u-source').textContent     = data.using_alpaca ? 'Alpaca API' : 'Index Lists';
-
-    // Exchange breakdown
-    const exRow = document.getElementById('u-exchange-row');
-    const bkd   = data.exchange_breakdown || {};
-    exRow.innerHTML = Object.entries(bkd).map(([k,v]) =>
-      `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:5px 12px;text-align:center">
-        <div style="font-size:16px;font-weight:700">${v}</div>
-        <div style="font-size:11px;color:var(--text2)">${k}</div>
-      </div>`
-    ).join('');
-
-    // Universe chips with category badge
-    const cats  = data.categories || {};
-    const catColor = {
-      'S&P 500': '#1d4ed8', 'Nasdaq 100': '#7c3aed', 'Dow 30': '#0369a1',
-      'ETF': '#065f46', 'Other': '#374151',
-    };
-    const chips = document.getElementById('u-chips');
-    const tickers = data.universe || [];
-    if (tickers.length) {
-      chips.innerHTML = tickers.map(t => {
-        const cat = cats[t] || 'Other';
-        const bg  = catColor[cat] || '#374151';
-        return `<span class="universe-chip" onclick="openChart('${t}')" style="cursor:pointer" title="${cat}">
-          ${t}<span style="background:${bg};color:#fff;font-size:9px;border-radius:3px;padding:0 3px;margin-left:3px">${cat.split(' ')[0]}</span>
-        </span>`;
-      }).join('');
-    } else {
-      chips.innerHTML = '<span style="font-size:12px;color:var(--text2)">No screen results yet — screener runs at 9:15 AM ET before market open.</span>';
-    }
-
-    // Load screener log
-    loadUniverseLog();
-  } catch(e) {
-    document.getElementById('universe-loading').textContent = 'Failed to load universe.';
-  }
-}
-
-async function loadUniverseLog() {
-  try {
-    const res  = await fetch('/api/universe/log');
-    const data = await res.json();
-    const entries = (data.entries || []).slice(0, 7);
-    const el = document.getElementById('u-log');
-    if (!entries.length) {
-      el.innerHTML = '<span style="color:var(--text2)">No screener history yet.</span>';
-      return;
-    }
-    el.innerHTML = `<table style="width:100%;border-collapse:collapse">
-      <thead><tr style="color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:.04em">
-        <th style="text-align:left;padding:4px 8px">Date</th>
-        <th style="text-align:left;padding:4px 8px">Time</th>
-        <th style="text-align:right;padding:4px 8px">Universe</th>
-        <th style="text-align:right;padding:4px 8px">Candidates</th>
-        <th style="text-align:right;padding:4px 8px">Source</th>
-      </tr></thead>
-      <tbody>${entries.map(e => `<tr style="border-top:1px solid var(--border)">
-        <td style="padding:5px 8px">${e.date || '—'}</td>
-        <td style="padding:5px 8px;color:var(--text2)">${(e.scanned_at || '').split(' ')[1] || '—'}</td>
-        <td style="padding:5px 8px;text-align:right;font-weight:600">${e.universe_size || 0}</td>
-        <td style="padding:5px 8px;text-align:right;color:var(--text2)">${e.total_candidates || 0}</td>
-        <td style="padding:5px 8px;text-align:right">${e.using_alpaca ? 'Alpaca' : 'Index'}</td>
-      </tr>`).join('')}</tbody>
-    </table>`;
-  } catch(e) {
-    document.getElementById('u-log').innerHTML = '<span style="color:var(--text2)">Could not load log.</span>';
-  }
-}
-
-
-async function rescanUniverse() {
-  const btn    = document.getElementById('rescan-btn');
-  const status = document.getElementById('u-filter-status');
-  btn.disabled = true; btn.textContent = 'Scanning…';
-  status.style.display = 'block'; status.style.color = 'var(--text2)'; status.textContent = 'Rescanning universe — this may take 1–2 minutes…';
-  try {
-    const res  = await fetch('/api/universe/rescan', {method:'POST'});
-    const data = await res.json();
-    status.style.color = data.ok ? '#10b981' : '#f87171';
-    status.textContent = data.ok
-      ? `✓ Rescan complete — ${data.universe_size} tickers in universe.`
-      : 'Error: ' + (data.error || 'unknown');
-    if (data.ok) loadUniverse();
-  } catch(e) {
-    status.style.color = '#f87171'; status.textContent = 'Network error.';
-  } finally {
-    btn.disabled = false; btn.textContent = 'Rescan Now';
-  }
-}
-
 renderCards();
 renderDetail();
-loadUniverse();
 
 async function saveAlpacaKeys() {
   const apiKey    = document.getElementById('alpaca-api-key').value.trim();
@@ -6399,7 +6072,6 @@ tr:hover td{background:rgba(18,26,46,.8)}
   <button class="nav-tab" onclick="window.location='/dashboard'">Dashboard</button>
   <button class="nav-tab" onclick="window.location='/dashboard'">Positions</button>
   <button class="nav-tab" onclick="window.location='/dashboard'">Watchlist</button>
-  <button class="nav-tab" onclick="window.location='/dashboard'">Signals</button>
   <button class="nav-tab active">Trades</button>
   <button class="nav-tab" onclick="window.location='/settings'">Settings</button>
   {% if auth %}<button class="nav-tab nav-tab-logout" onclick="window.location='/logout'">Logout</button>{% endif %}
@@ -6755,7 +6427,6 @@ tr:hover td{background:#263044}
   <button class="nav-tab" onclick="window.location='/dashboard'">Dashboard</button>
   <button class="nav-tab" onclick="window.location='/dashboard'">Positions</button>
   <button class="nav-tab" onclick="window.location='/dashboard'">Watchlist</button>
-  <button class="nav-tab" onclick="window.location='/dashboard'">Signals</button>
   <button class="nav-tab" onclick="window.location='/dashboard'">Trades</button>
   <button class="nav-tab" onclick="window.location='/settings'">Settings</button>
   {% if auth %}<button class="nav-tab nav-tab-logout" onclick="window.location='/logout'">Logout</button>{% endif %}
