@@ -571,9 +571,31 @@ _DASH_USER = os.getenv("DASH_USERNAME", "").strip()
 _DASH_PASS = os.getenv("DASH_PASSWORD", "").strip()
 _AUTH_ENABLED = bool(_DASH_USER and _DASH_PASS)
 
-# Secret key signs session cookies. Set DASH_SECRET_KEY in .env for persistence
-# across restarts; otherwise a random key is generated (sessions reset on restart).
-app.secret_key = os.getenv("DASH_SECRET_KEY") or secrets.token_hex(32)
+# Secret key signs session cookies and is used to derive the Fernet key that
+# encrypts DB-stored Alpaca API keys.  We persist it to a local file so that
+# restarts reuse the same key (and can therefore still decrypt stored keys).
+# Override by setting DASH_SECRET_KEY in the environment / .env file.
+_SECRET_KEY_FILE = Path(__file__).resolve().parent / ".dash_secret_key"
+
+
+def _get_or_create_secret_key() -> str:
+    env_key = os.getenv("DASH_SECRET_KEY")
+    if env_key:
+        return env_key
+    try:
+        if _SECRET_KEY_FILE.exists():
+            return _SECRET_KEY_FILE.read_text().strip()
+    except Exception:
+        pass
+    key = secrets.token_hex(32)
+    try:
+        _SECRET_KEY_FILE.write_text(key)
+    except Exception:
+        pass
+    return key
+
+
+app.secret_key = _get_or_create_secret_key()
 app.config["SESSION_PERMANENT"] = False
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=4)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -750,11 +772,16 @@ def _create_user_engine(user_id: int) -> TradingEngine:
     if user:
         api_key    = _decrypt_key(user.alpaca_api_key_enc or "")
         secret_key = _decrypt_key(user.alpaca_secret_key_enc or "")
+        if not api_key or not secret_key:
+            # Decryption failed (e.g. key rotated before persistence fix) —
+            # fall back to environment variables so live trading still works.
+            api_key    = os.getenv("ALPACA_API_KEY", "")
+            secret_key = os.getenv("ALPACA_SECRET_KEY", "")
         if api_key and secret_key:
-            cfg.use_alpaca       = True
-            cfg.alpaca_api_key   = api_key
+            cfg.use_alpaca        = True
+            cfg.alpaca_api_key    = api_key
             cfg.alpaca_secret_key = secret_key
-            cfg.paper_trading    = bool(user.alpaca_paper)
+            cfg.paper_trading     = bool(user.alpaca_paper)
     journal_dir = Path(__file__).resolve().parent / "journals"
     journal_dir.mkdir(exist_ok=True)
     eng = TradingEngine(cfg)
