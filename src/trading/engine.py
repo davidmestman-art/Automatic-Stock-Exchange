@@ -251,6 +251,30 @@ class TradingEngine:
                 self.portfolio.update_day_start(prices)
             return {}
 
+        # ── Late-start catch-up: server restarted after 10:00 AM ────────────
+        # If it's ACTIVE time but we missed the pre-market scan window (cycle 1
+        # only), do a quick screen + backfill the OR from 1-min bar history.
+        if (et_mins >= 10 * 60 and et_mins < 15 * 60 + 45
+                and not self._orb_session.screened
+                and self._cycle == 1):
+            logger.info("  [ORB] Late-start catch-up — backfilling OR from 1-min bars")
+            try:
+                syms, pm_vols, avg_vols = screen_orb_universe(
+                    api_key=self.config.alpaca_api_key,
+                    secret_key=self.config.alpaca_secret_key,
+                )
+                self._orb_session.set_universe(syms, pm_vols, avg_vols)
+                or_bars = fetch_opening_range_bars(
+                    syms,
+                    api_key=self.config.alpaca_api_key,
+                    secret_key=self.config.alpaca_secret_key,
+                )
+                for sym, (oh, ol) in or_bars.items():
+                    self._orb_session.update_range(sym, oh, ol)
+                logger.info(f"  [ORB] Catch-up: {len(or_bars)} OR ranges loaded")
+            except Exception as exc:
+                logger.warning(f"  [ORB] Late-start catch-up failed: {exc}")
+
         # ── Finalize opening range once at 10:00 ─────────────────────────────
         if not self._orb_session.range_formed and self._orb_session.screened:
             self._orb_update_ranges()
