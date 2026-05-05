@@ -5517,12 +5517,6 @@ td.diff-dn{color:#f87171}
       <span class="hdr-stat-val" id="hdr-unreal">—</span>
     </div>
   </div>
-  <div class="hdr-right">
-    <span class="ts" id="hdr-ts"></span>
-    <button class="btn-icon-refresh" onclick="location.reload()" title="Refresh">↻</button>
-    <span style="font-size:17px;cursor:pointer;opacity:.6" onclick="window.location='/stats'" title="Stats">🔔</span>
-    <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
-  </div>
 </header>
 <nav class="nav-tabs-bar">
   <button class="nav-tab" onclick="window.location='/dashboard'">Dashboard</button>
@@ -5795,19 +5789,6 @@ async function saveAlpacaKeys() {
 
 function openChart(sym) { window.location = '/dashboard'; }
 
-function toggleTheme() {
-  const light = document.body.classList.toggle('light');
-  localStorage.setItem('theme', light ? 'light' : 'dark');
-  document.getElementById('theme-btn').textContent = light ? '🌙' : '☀️';
-}
-(function initTheme() {
-  if (localStorage.getItem('theme') === 'light') {
-    document.body.classList.add('light');
-    const btn = document.getElementById('theme-btn');
-    if (btn) btn.textContent = '🌙';
-  }
-})();
-
 async function initHeader() {
   try {
     const s = await fetch('/api/state').then(r => r.json());
@@ -5980,11 +5961,6 @@ tr:hover td{background:rgba(18,26,46,.8)}
     <div class="hdr-stat"><span class="hdr-stat-lbl">Total Value</span><span class="hdr-stat-val" id="hdr-total">—</span></div>
     <div class="hdr-stat"><span class="hdr-stat-lbl">Day P&amp;L</span><span class="hdr-stat-val" id="hdr-day-pnl">—</span></div>
     <div class="hdr-stat"><span class="hdr-stat-lbl">Unrealized</span><span class="hdr-stat-val" id="hdr-unreal">—</span></div>
-  </div>
-  <div class="hdr-right">
-    <span class="ts" id="hdr-ts"></span>
-    <button class="btn-icon-refresh" onclick="location.reload()" title="Refresh">↻</button>
-    <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
   </div>
 </header>
 <nav class="nav-tabs-bar">
@@ -6163,19 +6139,6 @@ async function loadJournal() {
 
 loadJournal();
 
-function toggleTheme() {
-  const light = document.body.classList.toggle('light');
-  localStorage.setItem('theme', light ? 'light' : 'dark');
-  document.getElementById('theme-btn').textContent = light ? '🌙' : '☀️';
-}
-(function initTheme() {
-  if (localStorage.getItem('theme') === 'light') {
-    document.body.classList.add('light');
-    const btn = document.getElementById('theme-btn');
-    if (btn) btn.textContent = '🌙';
-  }
-})();
-
 async function initHeader() {
   try {
     const s = await fetch('/api/state').then(r => r.json());
@@ -6335,11 +6298,6 @@ tr:hover td{background:#263044}
     <div class="hdr-stat"><span class="hdr-stat-lbl">Total Value</span><span class="hdr-stat-val" id="hdr-total">—</span></div>
     <div class="hdr-stat"><span class="hdr-stat-lbl">Day P&amp;L</span><span class="hdr-stat-val" id="hdr-day-pnl">—</span></div>
     <div class="hdr-stat"><span class="hdr-stat-lbl">Unrealized</span><span class="hdr-stat-val" id="hdr-unreal">—</span></div>
-  </div>
-  <div class="hdr-right">
-    <span class="ts" id="hdr-ts"></span>
-    <button class="btn-icon-refresh" onclick="location.reload()" title="Refresh">↻</button>
-    <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode">☀️</button>
   </div>
 </header>
 <nav class="nav-tabs-bar">
@@ -6942,19 +6900,6 @@ async function runBacktest() {
 }
 
 loadBacktest();
-
-function toggleTheme() {
-  const light = document.body.classList.toggle('light');
-  localStorage.setItem('theme', light ? 'light' : 'dark');
-  document.getElementById('theme-btn').textContent = light ? '🌙' : '☀️';
-}
-(function initTheme() {
-  if (localStorage.getItem('theme') === 'light') {
-    document.body.classList.add('light');
-    const btn = document.getElementById('theme-btn');
-    if (btn) btn.textContent = '🌙';
-  }
-})();
 
 async function initHeader() {
   try {
