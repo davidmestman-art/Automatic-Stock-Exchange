@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Set, Union
 
 from ..data.earnings import EarningsCalendar
 from ..data.fetcher import MarketDataFetcher
@@ -180,6 +180,10 @@ class TradingEngine:
         self._pending_signals: Dict[str, dict] = {}
         # Symbols blocked by correlation filter in the most recent signal pass
         self._last_corr_blocked: Dict[str, str] = {}
+        # 3-day rebuy cooldown after selling: symbol → datetime of last sell
+        self._rebuy_cooldowns: Dict[str, datetime] = {}
+        # Symbols with an in-flight order (duplicate guard)
+        self._order_in_flight: Set[str] = set()
         # ── ORB strategy session state ─────────────────────────────────────────
         self._orb_session = ORBSession()
 
@@ -260,6 +264,15 @@ class TradingEngine:
             if self.portfolio.positions:
                 logger.info("  [ORB] 3:45 PM — closing all open positions")
                 self._orb_close_all()
+            # ── FIX 9: Also close any non-ORB positions at EOD ───────────────
+            if self.portfolio.positions:
+                logger.info("  [EOD] 3:45 PM — closing remaining non-ORB positions")
+                eod_prices = self._get_prices(list(self.portfolio.positions.keys()))
+                for sym in list(self.portfolio.positions.keys()):
+                    pos = self.portfolio.positions[sym]
+                    price = eod_prices.get(sym, pos.entry_price)
+                    self.executor.execute_sell(sym, price, "EOD close 3:45 PM", self.portfolio)
+                    self._rebuy_cooldowns[sym] = datetime.now()
             self._orb_session.phase = "DONE"
             logger.info(f"  [CYCLE] #{self._cycle} — session DONE")
             return {}
@@ -375,6 +388,32 @@ class TradingEngine:
                     signal = orb_sig
             else:
                 signal = self._compute_signal(symbol, ind)
+
+            # ── FIX 1: Confluence gate for BUY signals (non-ORB only) ─────────
+            confluence_ok = True
+            if signal.action == "BUY" and not orb_active:
+                if ind.rsi is not None and not (40 <= ind.rsi <= 70):
+                    logger.info(
+                        f"  {symbol}: confluence FAIL — RSI {ind.rsi:.1f} outside 40-70, downgrading to HOLD"
+                    )
+                    signal = SignalResult(action="HOLD", score=signal.score,
+                                         confidence=signal.confidence, reasons=signal.reasons)
+                    confluence_ok = False
+                elif ind.vwap is not None and current_price < ind.vwap:
+                    logger.info(
+                        f"  {symbol}: confluence FAIL — price ${current_price:.2f} < VWAP ${ind.vwap:.2f}, downgrading to HOLD"
+                    )
+                    signal = SignalResult(action="HOLD", score=signal.score,
+                                         confidence=signal.confidence, reasons=signal.reasons)
+                    confluence_ok = False
+                elif ind.adx is not None and ind.adx < 20:
+                    logger.info(
+                        f"  {symbol}: confluence FAIL — ADX {ind.adx:.1f} < 20, downgrading to HOLD"
+                    )
+                    signal = SignalResult(action="HOLD", score=signal.score,
+                                         confidence=signal.confidence, reasons=signal.reasons)
+                    confluence_ok = False
+
             results[symbol] = signal
 
             rsi_str = f"RSI {ind.rsi:5.1f}" if ind.rsi else "RSI  n/a"
@@ -384,11 +423,33 @@ class TradingEngine:
                 f"{rsi_str}  {'  '.join(signal.reasons[:2])}"
             )
 
+            # ── FIX 5: Structured decision log ───────────────────────────────
+            _rsi_str = f"{ind.rsi:.1f}" if ind.rsi is not None else "n/a"
+            _adx_str = f"{ind.adx:.1f}" if ind.adx is not None else "n/a"
+            _vwap_ok = (current_price >= ind.vwap) if ind.vwap is not None else "n/a"
+            logger.info(
+                f"  DECISION {symbol}: action={signal.action} score={signal.score:+.3f}"
+                f" confluence={'PASS' if confluence_ok else 'FAIL'}"
+                f" rsi={_rsi_str} adx={_adx_str} vwap_ok={_vwap_ok}"
+            )
+
             portfolio_value = self.portfolio.total_value_at(prices)
             daily_pnl       = self.portfolio.daily_pnl_pct(prices)
             ind_snap        = self._indicator_snapshot(ind, signal)
 
             if signal.action == "BUY" and not self.portfolio.has_position(symbol):
+                # ── FIX 4: Skip if order already in-flight ────────────────────
+                if symbol in self._order_in_flight:
+                    logger.info(f"  {symbol}: order already in-flight, skipping duplicate BUY")
+                    continue
+
+                # ── FIX 2: 3-day rebuy cooldown check ────────────────────────
+                if symbol in self._rebuy_cooldowns:
+                    days_since = (datetime.now() - self._rebuy_cooldowns[symbol]).days
+                    if days_since < 3:
+                        logger.info(f"  {symbol}: rebuy cooldown active ({days_since}d < 3d), skipping")
+                        continue
+
                 if self.earnings_cal and self.earnings_cal.has_upcoming_earnings(symbol):
                     logger.debug(f"  Earnings protection: skipping BUY {symbol}")
                     continue
@@ -447,15 +508,33 @@ class TradingEngine:
                         sl = self.risk.stop_loss_price(current_price)
                         tp = self.risk.take_profit_price(current_price)
 
-                    self.executor.execute_buy(
-                        symbol=symbol,
-                        shares=rc.max_shares,
-                        price=current_price,
-                        stop_loss=sl,
-                        take_profit=tp,
-                        reason=", ".join(signal.reasons[:2]),
-                        portfolio=self.portfolio,
+                    # ── FIX 6: Log qty/price/sl/tp before executing ───────────
+                    logger.info(
+                        f"  {symbol}: BUY approved qty={rc.max_shares:.0f}"
+                        f" @ ${current_price:.2f} sl=${sl:.2f} tp=${tp:.2f}"
                     )
+
+                    # ── FIX 4: Mark order as in-flight ────────────────────────
+                    self._order_in_flight.add(symbol)
+                    try:
+                        self.executor.execute_buy(
+                            symbol=symbol,
+                            shares=rc.max_shares,
+                            price=current_price,
+                            stop_loss=sl,
+                            take_profit=tp,
+                            reason=", ".join(signal.reasons[:2]),
+                            portfolio=self.portfolio,
+                        )
+                    finally:
+                        self._order_in_flight.discard(symbol)
+
+                    # ── FIX 7: Confirm fill before updating dashboard ──────────
+                    if not self.portfolio.has_position(symbol):
+                        logger.warning(
+                            f"  {symbol}: BUY submitted but position not confirmed in portfolio"
+                        )
+
                     if orb_st:
                         orb_st.breakout = "up"
                     self.notifier.trade_buy(
@@ -480,33 +559,39 @@ class TradingEngine:
                     # Covering an existing short on a BUY signal is handled below
                     pass
                 else:
-                    if orb_active and (orb_st := self._orb_session.get(symbol)):
-                        orb_st.breakout = "down"
-                    self.executor.execute_sell(
-                        symbol=symbol,
-                        price=current_price,
-                        reason=f"Signal: {', '.join(signal.reasons[:2])}",
-                        portfolio=self.portfolio,
-                    )
-                    if pos:
-                        pnl     = (current_price - pos.entry_price) * pos.shares
-                        pnl_pct = (current_price - pos.entry_price) / pos.entry_price
-                        self.notifier.trade_sell(
-                            symbol, pos.shares, current_price, pnl,
-                            f"Signal: {', '.join(signal.reasons[:2])}"
-                        )
-                        self.journal.log(
-                            action="SELL", symbol=symbol, shares=pos.shares,
+                    # ── FIX 4: Verify position still exists before selling ─────
+                    if symbol not in self.portfolio.positions:
+                        logger.info(f"  {symbol}: position already closed/sold, skipping SELL")
+                    else:
+                        if orb_active and (orb_st := self._orb_session.get(symbol)):
+                            orb_st.breakout = "down"
+                        self.executor.execute_sell(
+                            symbol=symbol,
                             price=current_price,
                             reason=f"Signal: {', '.join(signal.reasons[:2])}",
-                            indicators=ind_snap, pnl=pnl, pnl_pct=pnl_pct,
+                            portfolio=self.portfolio,
                         )
-                        self.emailer.send_trade(
-                            action="SELL", symbol=symbol, shares=pos.shares,
-                            price=current_price, score=signal.score,
-                            reasons=signal.reasons, indicators=ind_snap,
-                            pnl=pnl, pnl_pct=pnl_pct,
-                        )
+                        # ── FIX 2: Set rebuy cooldown after sell ──────────────
+                        self._rebuy_cooldowns[symbol] = datetime.now()
+                        if pos:
+                            pnl     = (current_price - pos.entry_price) * pos.shares
+                            pnl_pct = (current_price - pos.entry_price) / pos.entry_price
+                            self.notifier.trade_sell(
+                                symbol, pos.shares, current_price, pnl,
+                                f"Signal: {', '.join(signal.reasons[:2])}"
+                            )
+                            self.journal.log(
+                                action="SELL", symbol=symbol, shares=pos.shares,
+                                price=current_price,
+                                reason=f"Signal: {', '.join(signal.reasons[:2])}",
+                                indicators=ind_snap, pnl=pnl, pnl_pct=pnl_pct,
+                            )
+                            self.emailer.send_trade(
+                                action="SELL", symbol=symbol, shares=pos.shares,
+                                price=current_price, score=signal.score,
+                                reasons=signal.reasons, indicators=ind_snap,
+                                pnl=pnl, pnl_pct=pnl_pct,
+                            )
 
             # ── Cover short on BUY signal ─────────────────────────────────────
             elif signal.action == "BUY" and self.portfolio.has_position(symbol):
@@ -607,6 +692,11 @@ class TradingEngine:
     def pending_confirmations(self) -> Dict[str, dict]:
         """BUY signals queued for next-candle confirmation."""
         return dict(self._pending_signals)
+
+    @property
+    def rebuy_cooldowns(self) -> Dict[str, datetime]:
+        """Symbols under 3-day rebuy cooldown and when the cooldown started."""
+        return dict(self._rebuy_cooldowns)
 
     def get_signals(self):
         """Fetch data and compute signals without placing any orders."""
@@ -1049,6 +1139,11 @@ class TradingEngine:
                 else "Stop loss triggered"
             )
             if self.risk.check_stop_loss(pos.entry_price, price, pos):
+                # ── FIX 10: Log stop-loss hit explicitly ──────────────────────
+                logger.info(
+                    f"  {symbol}: STOP-LOSS HIT @ ${price:.2f}"
+                    f" (stop=${pos.stop_loss:.2f})"
+                )
                 exits.append((symbol, price, stop_reason))
             elif price >= pos.take_profit:
                 exits.append((symbol, price, "Take profit triggered"))
@@ -1081,6 +1176,8 @@ class TradingEngine:
         for symbol, price, reason in exits:
             pos = self.portfolio.positions.get(symbol)
             self.executor.execute_sell(symbol, price, reason, self.portfolio)
+            # ── FIX 2: Set rebuy cooldown after exit ──────────────────────────
+            self._rebuy_cooldowns[symbol] = datetime.now()
             if pos:
                 pnl     = (price - pos.entry_price) * pos.shares if not pos.is_short else (pos.entry_price - price) * pos.shares
                 pnl_pct = (price - pos.entry_price) / pos.entry_price if not pos.is_short else (pos.entry_price - price) / pos.entry_price
@@ -1179,6 +1276,12 @@ class TradingEngine:
         if orb_st is None or not orb_st.formed or orb_st.or_high is None:
             return SignalResult(action="HOLD", score=0.0, confidence=0.0,
                                 reasons=["ORB range not yet formed"])
+
+        # ── FIX 8: Only trade breakouts after 10:00AM ET ─────────────────────
+        now_et = self._get_et_time()
+        if now_et.hour < 10 or (now_et.hour == 10 and now_et.minute == 0):
+            return SignalResult(action="HOLD", score=0.0, confidence=0.0,
+                                reasons=["ORB: waiting for 10:00AM ET before trading breakouts"])
 
         or_high = orb_st.or_high
         or_low  = orb_st.or_low

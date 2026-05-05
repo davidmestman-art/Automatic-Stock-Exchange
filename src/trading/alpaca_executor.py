@@ -356,30 +356,34 @@ class AlpacaExecutor:
             logger.warning(f"[{self._tag} BUY SKIP] {symbol}: position rounds to 0 shares")
             return False
 
+        req = MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.BRACKET,
+            stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+            take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
+        )
+        order = None
         try:
-            order = self._call_with_retry(
-                self.trading.submit_order,
-                MarketOrderRequest(
-                    symbol=symbol,
-                    qty=qty,
-                    side=OrderSide.BUY,
-                    time_in_force=TimeInForce.DAY,
-                    order_class=OrderClass.BRACKET,
-                    stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
-                    take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
-                ),
-            )
-            # Mirror in local portfolio at the intended price
-            portfolio.buy(symbol, qty, price, stop_loss, take_profit, reason)
-            logger.info(
-                f"[{self._tag} BUY]  {qty} {symbol:6s} @ ~${price:.2f}"
-                f" | SL ${stop_loss:.2f}  TP ${take_profit:.2f}"
-                f" | order={order.id}"
-            )
-            return True
+            order = self._call_with_retry(self.trading.submit_order, req)
         except Exception as e:
-            logger.error(f"[{self._tag} BUY FAILED] {symbol}: {e}")
-            return False
+            logger.warning(f"[{self._tag} BUY] {symbol}: first attempt failed ({e}), retrying in 2s")
+            time.sleep(2)
+            try:
+                order = self._call_with_retry(self.trading.submit_order, req)
+            except Exception as e2:
+                logger.error(f"[{self._tag} BUY FAILED] {symbol}: retry also failed: {e2}")
+                return False
+        # Mirror in local portfolio at the intended price
+        portfolio.buy(symbol, qty, price, stop_loss, take_profit, reason)
+        logger.info(
+            f"[{self._tag} BUY]  {qty} {symbol:6s} @ ~${price:.2f}"
+            f" | SL ${stop_loss:.2f}  TP ${take_profit:.2f}"
+            f" | order={order.id}"
+        )
+        return True
 
     def execute_sell(
         self,
@@ -395,29 +399,33 @@ class AlpacaExecutor:
         if qty < 1:
             return portfolio.sell(symbol, price, reason)
 
+        self._cancel_open_orders(symbol)
+        sell_req = MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+        )
+        order = None
         try:
-            self._cancel_open_orders(symbol)
-            order = self._call_with_retry(
-                self.trading.submit_order,
-                MarketOrderRequest(
-                    symbol=symbol,
-                    qty=qty,
-                    side=OrderSide.SELL,
-                    time_in_force=TimeInForce.DAY,
-                ),
-            )
-            trade = portfolio.sell(symbol, price, reason)
-            if trade and trade.pnl is not None:
-                sign = "+" if trade.pnl >= 0 else ""
-                logger.info(
-                    f"[{self._tag} SELL] {qty} {symbol:6s} @ ~${price:.2f}"
-                    f" | P&L {sign}${trade.pnl:,.2f} ({sign}{trade.pnl_pct * 100:.2f}%)"
-                    f" | order={order.id}  {reason}"
-                )
-            return trade
+            order = self._call_with_retry(self.trading.submit_order, sell_req)
         except Exception as e:
-            logger.error(f"[{self._tag} SELL FAILED] {symbol}: {e}")
-            return None
+            logger.warning(f"[{self._tag} SELL] {symbol}: first attempt failed ({e}), retrying in 2s")
+            time.sleep(2)
+            try:
+                order = self._call_with_retry(self.trading.submit_order, sell_req)
+            except Exception as e2:
+                logger.error(f"[{self._tag} SELL FAILED] {symbol}: retry also failed: {e2}")
+                return None
+        trade = portfolio.sell(symbol, price, reason)
+        if trade and trade.pnl is not None:
+            sign = "+" if trade.pnl >= 0 else ""
+            logger.info(
+                f"[{self._tag} SELL] {qty} {symbol:6s} @ ~${price:.2f}"
+                f" | P&L {sign}${trade.pnl:,.2f} ({sign}{trade.pnl_pct * 100:.2f}%)"
+                f" | order={order.id}  {reason}"
+            )
+        return trade
 
     def execute_partial_sell(
         self,
@@ -467,30 +475,34 @@ class AlpacaExecutor:
         if qty < 1:
             logger.warning(f"[{self._tag} SHORT SKIP] {symbol}: rounds to 0 shares")
             return False
+        # For shorts: stop_loss > entry, take_profit < entry
+        short_req = MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.BRACKET,
+            stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+            take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
+        )
+        order = None
         try:
-            # For shorts: stop_loss > entry, take_profit < entry
-            order = self._call_with_retry(
-                self.trading.submit_order,
-                MarketOrderRequest(
-                    symbol=symbol,
-                    qty=qty,
-                    side=OrderSide.SELL,
-                    time_in_force=TimeInForce.DAY,
-                    order_class=OrderClass.BRACKET,
-                    stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
-                    take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
-                ),
-            )
-            portfolio.buy(symbol, qty, price, stop_loss, take_profit, reason, is_short=True)
-            logger.info(
-                f"[{self._tag} SHORT] {qty} {symbol:6s} @ ~${price:.2f}"
-                f" | SL ${stop_loss:.2f}  TP ${take_profit:.2f}"
-                f" | order={order.id}"
-            )
-            return True
+            order = self._call_with_retry(self.trading.submit_order, short_req)
         except Exception as e:
-            logger.error(f"[{self._tag} SHORT FAILED] {symbol}: {e}")
-            return False
+            logger.warning(f"[{self._tag} SHORT] {symbol}: first attempt failed ({e}), retrying in 2s")
+            time.sleep(2)
+            try:
+                order = self._call_with_retry(self.trading.submit_order, short_req)
+            except Exception as e2:
+                logger.error(f"[{self._tag} SHORT FAILED] {symbol}: retry also failed: {e2}")
+                return False
+        portfolio.buy(symbol, qty, price, stop_loss, take_profit, reason, is_short=True)
+        logger.info(
+            f"[{self._tag} SHORT] {qty} {symbol:6s} @ ~${price:.2f}"
+            f" | SL ${stop_loss:.2f}  TP ${take_profit:.2f}"
+            f" | order={order.id}"
+        )
+        return True
 
     def execute_cover(
         self,
