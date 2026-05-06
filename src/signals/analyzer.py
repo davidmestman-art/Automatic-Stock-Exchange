@@ -6,8 +6,6 @@ from .indicators import IndicatorValues
 SignalAction = Literal["BUY", "SELL", "HOLD"]
 
 # Keys that participate in the composite score (in weight order)
-# RSI is deliberately excluded — it only acts as an extreme blocker in ORB strategy,
-# never as a standalone buy/sell contributor.
 _WEIGHTED_KEYS = ["macd", "ema_cross", "bollinger", "vwap", "adx", "sector_mom"]
 
 
@@ -21,10 +19,6 @@ class SignalResult:
 
 
 class SignalAnalyzer:
-    # RSI weight redistributed proportionally across remaining indicators so
-    # composite still spans [-1, +1] and buy/sell thresholds are unchanged.
-    # Old: RSI=0.25, MACD=0.25, EMA=0.20, BB=0.15, VWAP=0.05, ADX=0.05, SM=0.05
-    # New (RSI removed, others rescaled to sum=1.0):
     _WEIGHTS: Dict[str, float] = {
         "macd":       0.34,
         "ema_cross":  0.27,
@@ -50,16 +44,13 @@ class SignalAnalyzer:
         scores: Dict[str, float] = {}
         reasons: List[str] = []
 
-        # Core signals (weighted) — RSI excluded; it never triggers trades alone
+        # Core signals (weighted)
         scores["macd"],       r = self._macd_signal(ind);        reasons.extend(r)
         scores["ema_cross"],  r = self._ema_cross_signal(ind);   reasons.extend(r)
         scores["bollinger"],  r = self._bollinger_signal(ind);   reasons.extend(r)
         scores["vwap"],       r = self._vwap_signal(ind);        reasons.extend(r)
         scores["adx"],        r = self._adx_signal(ind);         reasons.extend(r)
         scores["sector_mom"], r = self._sector_mom_signal(ind);  reasons.extend(r)
-
-        # RSI computed for display / ORB extreme blocking, not for composite score
-        scores["rsi"], _ = self._rsi_signal(ind)
 
         # Supplemental signals — still computed for signal reasons but not weighted
         _, mr_reasons  = self._mean_reversion_signal(ind)
@@ -87,29 +78,6 @@ class SignalAnalyzer:
         )
 
     # ── Core weighted signals ──────────────────────────────────────────────────
-
-    def _rsi_signal(self, ind: IndicatorValues):
-        if ind.rsi is None:
-            return 0.0, []
-        rsi = ind.rsi
-        reasons: List[str] = []
-
-        if rsi <= 30:
-            score = 1.0 - (rsi / 30)
-            reasons.append(f"RSI oversold ({rsi:.1f})")
-        elif rsi >= 70:
-            score = -((rsi - 70) / 30)
-            reasons.append(f"RSI overbought ({rsi:.1f})")
-        elif rsi < 45:
-            score = 0.3
-            reasons.append(f"RSI near oversold ({rsi:.1f})")
-        elif rsi > 55:
-            score = -0.3
-            reasons.append(f"RSI near overbought ({rsi:.1f})")
-        else:
-            score = 0.0
-
-        return score, reasons
 
     def _macd_signal(self, ind: IndicatorValues):
         if ind.macd_hist is None or ind.macd_hist_prev is None:
@@ -318,16 +286,6 @@ class SignalAnalyzer:
             score = -0.2
         else:
             score = roc * 20
-
-        if ind.stoch_rsi is not None:
-            if ind.stoch_rsi < 20:
-                score = min(score + 0.25, 1.0)
-                if score > 0.3:
-                    reasons.append(f"StochRSI oversold ({ind.stoch_rsi:.0f})")
-            elif ind.stoch_rsi > 80:
-                score = max(score - 0.25, -1.0)
-                if score < -0.3:
-                    reasons.append(f"StochRSI overbought ({ind.stoch_rsi:.0f})")
 
         return score, reasons
 

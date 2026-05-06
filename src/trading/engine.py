@@ -432,14 +432,7 @@ class TradingEngine:
             # ── FIX 1: Confluence gate for BUY signals (non-ORB only) ─────────
             confluence_ok = True
             if signal.action == "BUY" and not orb_active:
-                if ind.rsi is not None and not (40 <= ind.rsi <= 70):
-                    logger.info(
-                        f"  {symbol}: confluence FAIL — RSI {ind.rsi:.1f} outside 40-70, downgrading to HOLD"
-                    )
-                    signal = SignalResult(action="HOLD", score=signal.score,
-                                         confidence=signal.confidence, reasons=signal.reasons)
-                    confluence_ok = False
-                elif ind.vwap is not None and current_price < ind.vwap:
+                if ind.vwap is not None and current_price < ind.vwap:
                     logger.info(
                         f"  {symbol}: confluence FAIL — price ${current_price:.2f} < VWAP ${ind.vwap:.2f}, downgrading to HOLD"
                     )
@@ -456,21 +449,19 @@ class TradingEngine:
 
             results[symbol] = signal
 
-            rsi_str = f"RSI {ind.rsi:5.1f}" if ind.rsi else "RSI  n/a"
             logger.info(
                 f"  {symbol:6s}  ${current_price:>9.2f}  "
                 f"signal={signal.action:4s}  score={signal.score:+.3f}  "
-                f"{rsi_str}  {'  '.join(signal.reasons[:2])}"
+                f"{'  '.join(signal.reasons[:2])}"
             )
 
             # ── FIX 5: Structured decision log ───────────────────────────────
-            _rsi_str = f"{ind.rsi:.1f}" if ind.rsi is not None else "n/a"
             _adx_str = f"{ind.adx:.1f}" if ind.adx is not None else "n/a"
             _vwap_ok = (current_price >= ind.vwap) if ind.vwap is not None else "n/a"
             logger.info(
                 f"  DECISION {symbol}: action={signal.action} score={signal.score:+.3f}"
                 f" confluence={'PASS' if confluence_ok else 'FAIL'}"
-                f" rsi={_rsi_str} adx={_adx_str} vwap_ok={_vwap_ok}"
+                f" adx={_adx_str} vwap_ok={_vwap_ok}"
             )
 
             portfolio_value = self.portfolio.total_value_at(prices)
@@ -1311,7 +1302,6 @@ class TradingEngine:
         Trend filter:  BUY only above 20-day EMA; SELL only below 20-day EMA
         Retest entry:  on initial high-vol breakout above OR high, wait for pullback
                        within 0.3% of OR high on lower volume before entering
-        RSI blocks:    RSI>80 blocks BUY; RSI<15 blocks SELL (extreme only)
         """
         if orb_st is None or not orb_st.formed or orb_st.or_high is None:
             return SignalResult(action="HOLD", score=0.0, confidence=0.0,
@@ -1333,9 +1323,6 @@ class TradingEngine:
 
         # ── Breakdown SELL ────────────────────────────────────────────────────
         if current_price < or_low:
-            if ind.rsi is not None and ind.rsi < 15:
-                return SignalResult(action="HOLD", score=-0.1, confidence=0.1,
-                                    reasons=[f"ORB breakdown — RSI {ind.rsi:.1f} extreme oversold"])
             if ind.ema_fast is not None and current_price >= ind.ema_fast:
                 return SignalResult(action="HOLD", score=-0.1, confidence=0.1,
                                     reasons=["ORB breakdown — price above 20-day EMA, skip SELL"])
@@ -1355,9 +1342,6 @@ class TradingEngine:
                 if ind.ema_fast is not None and current_price <= ind.ema_fast:
                     return SignalResult(action="HOLD", score=0.1, confidence=0.1,
                                         reasons=["Retest — below 20-day EMA"])
-                if ind.rsi is not None and ind.rsi > 80:
-                    return SignalResult(action="HOLD", score=0.1, confidence=0.1,
-                                        reasons=[f"Retest — RSI {ind.rsi:.1f} extreme overbought"])
                 if ind.vwap is not None and current_price <= ind.vwap:
                     return SignalResult(action="HOLD", score=0.1, confidence=0.1,
                                         reasons=[f"Retest — below VWAP ${ind.vwap:.2f}"])
