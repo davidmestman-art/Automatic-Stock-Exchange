@@ -4,6 +4,8 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+
+from ..utils import now_et
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -50,7 +52,7 @@ class VOOMonitor:
         self._prev_above_ma: Optional[bool] = None
 
     def check(self, force: bool = False) -> Optional[VOOStatus]:
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = now_et().strftime("%Y-%m-%d")
         if not force and self._last_check_date == today and self._last_status:
             return self._last_status
 
@@ -114,7 +116,7 @@ class VOOMonitor:
                 gap_pct=round(gap_pct, 2),
                 above_ma=above_ma,
                 alert=alert,
-                checked_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                checked_at=now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
             )
             logger.info(
                 f"VOOMonitor: ${price:.2f}  200W MA ${ma200w:.2f}  gap {gap_pct:+.1f}%"

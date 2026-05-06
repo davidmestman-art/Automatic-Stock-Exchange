@@ -31,6 +31,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from .scanner import SP500_UNIVERSE
+from ..utils import now_et
 
 log = logging.getLogger(__name__)
 
@@ -302,7 +303,7 @@ class DynamicUniverse:
 
         result = {
             "screen_date":       today,
-            "scanned_at":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "scanned_at":        now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
             "total_candidates":  len(candidates),
             "universe":          tickers,
             "universe_size":     len(tickers),

@@ -17,6 +17,8 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from ..utils import now_et
+
 logger = logging.getLogger(__name__)
 
 # ── S&P 500 universe ──────────────────────────────────────────────────────────
@@ -131,7 +133,7 @@ class StockScanner:
 
         Cached for the calendar day unless *force* is True.
         """
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = now_et().strftime("%Y-%m-%d")
         if not force and self._last_result and self._last_result.scan_date == today:
             logger.info("Scanner: using cached watchlist from today's session scan")
             return self._last_result
@@ -177,7 +179,7 @@ class StockScanner:
             scores=scores,
             actions=actions,
             scan_date=today,
-            scanned_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            scanned_at=now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
             fund_passed=fund_passed,
             fund_failed=fund_failed,
             fund_enabled=fund_enabled,

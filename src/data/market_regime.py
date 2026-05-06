@@ -8,6 +8,8 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+
+from ..utils import now_et
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -135,7 +137,7 @@ class RegimeDetector:
                 vix=None,
                 above_sma50=above_sma50,
                 above_sma200=above_sma200,
-                checked_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                checked_at=now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
             )
 
         except Exception as e:

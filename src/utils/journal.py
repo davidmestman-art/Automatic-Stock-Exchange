@@ -1,7 +1,8 @@
 import json
 import logging
-from datetime import datetime
 from pathlib import Path
+
+from . import now_et
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ class TradeJournal:
         pnl_pct: Optional[float] = None,
     ) -> None:
         entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_et().isoformat(),
             "action": action,
             "symbol": symbol,
             "shares": shares,
