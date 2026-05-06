@@ -1923,10 +1923,12 @@ def api_bars(symbol):
     period_to_interval: dict = {
         "1d": "5m", "1w": "1h", "1m": "1d",
         "3m": "1d", "6m": "1d", "1y": "1d",
+        "2y": "1d", "3y": "1d", "5y": "1d", "10y": "1d", "all": "1d",
     }
     period_to_days: dict = {
         "1d": 2, "1w": 10, "1m": 30,
         "3m": 90, "6m": 180, "1y": 365,
+        "2y": 730, "3y": 1095, "5y": 1825, "10y": 3650, "all": 7300,
     }
     interval = period_to_interval.get(period, "1d")
     lookback = period_to_days.get(period, 90)
@@ -3122,6 +3124,11 @@ body.light .simple-verdict strong{color:#0f172a}
       <button class="chart-period-btn active" onclick="loadDetailBars(_detailSym,'3m',this)">3M</button>
       <button class="chart-period-btn" onclick="loadDetailBars(_detailSym,'6m',this)">6M</button>
       <button class="chart-period-btn" onclick="loadDetailBars(_detailSym,'1y',this)">1Y</button>
+      <button class="chart-period-btn" onclick="loadDetailBars(_detailSym,'2y',this)">2Y</button>
+      <button class="chart-period-btn" onclick="loadDetailBars(_detailSym,'3y',this)">3Y</button>
+      <button class="chart-period-btn" onclick="loadDetailBars(_detailSym,'5y',this)">5Y</button>
+      <button class="chart-period-btn" onclick="loadDetailBars(_detailSym,'10y',this)">10Y</button>
+      <button class="chart-period-btn" onclick="loadDetailBars(_detailSym,'all',this)">ALL</button>
     </div>
     <!-- Chart -->
     <div class="chart-body">
