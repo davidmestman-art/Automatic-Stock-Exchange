@@ -3125,7 +3125,7 @@ body.light .simple-verdict strong{color:#0f172a}
     </div>
     <!-- Chart -->
     <div class="chart-body">
-      <div id="chart-plotly" style="height:280px"></div>
+      <div id="chart-plotly" style="height:540px"></div>
     </div>
     <!-- Key stats grid -->
     <div class="detail-stats" id="detail-stats"></div>
@@ -4424,133 +4424,229 @@ async function loadDetailBars(symbol, period, btn) {
   }
 }
 
+// ── ThinkorSwim-style theme constants ────────────────────────────────────────
+const _TOS = {
+  bg:        '#0a0b0f',
+  grid:      'rgba(255,255,255,0.05)',
+  text:      '#6b7280',
+  candleUp:  '#26a69a',
+  candleDown:'#ef5350',
+  ma:        '#cc44ff',
+  vol:       'rgba(140,140,140,0.28)',
+  adx:       '#ef4444',
+  diPlus:    '#22c55e',
+  diMinus:   '#a855f7',
+  rsi:       '#d946ef',
+  orb:       'rgba(251,191,36,0.9)',
+  res:       'rgba(239,68,68,0.5)',
+  sup:       'rgba(34,197,94,0.5)',
+};
+
+// Panel y-axis domains (Plotly bottom=0, top=1)
+const _PANE = {
+  price: [0.44, 1.00],
+  adx:   [0.30, 0.42],
+  dmi:   [0.16, 0.28],
+  rsi:   [0.01, 0.13],
+};
+
+function _calcEMA(src, period) {
+  const k = 2 / (period + 1), out = new Array(src.length).fill(null);
+  let val = null, count = 0;
+  for (let i = 0; i < src.length; i++) {
+    if (src[i] == null) continue;
+    val = val == null ? src[i] : src[i] * k + val * (1 - k);
+    if (++count >= period) out[i] = val;
+  }
+  return out;
+}
+
+function _calcRSI(src, p) {
+  const out = new Array(src.length).fill(null);
+  let g = 0, l = 0;
+  for (let i = 1; i <= p && i < src.length; i++) { const d = src[i]-src[i-1]; d>=0?g+=d:l-=d; }
+  g /= p; l /= p;
+  out[p] = l === 0 ? 100 : 100 - 100/(1+g/l);
+  for (let i = p+1; i < src.length; i++) {
+    if (src[i]==null||src[i-1]==null) continue;
+    const d = src[i]-src[i-1];
+    g = (g*(p-1)+Math.max(d,0))/p; l = (l*(p-1)+Math.max(-d,0))/p;
+    out[i] = l===0?100:100-100/(1+g/l);
+  }
+  return out;
+}
+
+function _calcDMI(H, L, C, p) {
+  const n=C.length, diP=new Array(n).fill(null), diM=new Array(n).fill(null), adxOut=new Array(n).fill(null);
+  if (n < p*2+2) return {diP,diM,adx:adxOut};
+  let atr=0,pdm=0,mdm=0;
+  for (let i=1;i<=p;i++){
+    const h=H[i]??0,l=L[i]??0,pc=C[i-1]??0,ph=H[i-1]??0,pl=L[i-1]??0;
+    atr+=Math.max(h-l,Math.abs(h-pc),Math.abs(l-pc));
+    const um=h-ph,dm=pl-l;
+    pdm+=(um>dm&&um>0)?um:0; mdm+=(dm>um&&dm>0)?dm:0;
+  }
+  const dxA=[];
+  function store(idx,a,p_,m_){
+    const dp=a>0?p_/a*100:0, dm_=a>0?m_/a*100:0;
+    diP[idx]=dp; diM[idx]=dm_;
+    const s=dp+dm_; dxA.push(s>0?Math.abs(dp-dm_)/s*100:0);
+  }
+  store(p,atr,pdm,mdm);
+  for (let i=p+1;i<n;i++){
+    const h=H[i]??0,l=L[i]??0,pc=C[i-1]??0,ph=H[i-1]??0,pl=L[i-1]??0;
+    atr=atr-atr/p+Math.max(h-l,Math.abs(h-pc),Math.abs(l-pc));
+    const um=h-ph,dm=pl-l;
+    pdm=pdm-pdm/p+((um>dm&&um>0)?um:0); mdm=mdm-mdm/p+((dm>um&&dm>0)?dm:0);
+    store(i,atr,pdm,mdm);
+  }
+  if (dxA.length>=p){
+    let av=dxA.slice(0,p).reduce((a,b)=>a+b,0)/p;
+    if (p*2<n) adxOut[p*2]=av;
+    for (let i=p;i<dxA.length;i++){
+      av=(av*(p-1)+dxA[i])/p;
+      if (p+i+1<n) adxOut[p+i+1]=av;
+    }
+  }
+  return {diP,diM,adx:adxOut};
+}
+
 function _renderDetailChart(data) {
   if (!window.Plotly) return;
-  const isLight = document.body.classList.contains('light');
-  const fg   = isLight ? '#1e293b' : '#e2e8f0';
-  const grid = isLight ? 'rgba(0,0,0,0.07)' : 'rgba(255,255,255,0.06)';
-  const bg   = isLight ? '#f8fafc' : '#0d1520';
+  const C = _TOS;
+  const D = _PANE;
+  const closes=data.close||[], opens=data.open||[], highs=data.high||[];
+  const lows=data.low||[], vols=data.volume||[], dates=data.dates||[];
 
-  // ── Candlestick trace ────────────────────────────────────────────────────────
-  const candle = {
-    x: data.dates,
-    open: data.open, high: data.high, low: data.low, close: data.close,
-    type: 'candlestick',
-    name: data.symbol,
-    increasing: {line: {color: '#22c55e', width: 1}, fillcolor: '#22c55e'},
-    decreasing: {line: {color: '#ef4444', width: 1}, fillcolor: '#ef4444'},
-    hoverinfo: 'x+y',
-    whiskerwidth: 0.3,
-  };
+  // Compute indicators
+  const ma20   = _calcEMA(closes, 20);
+  const rsi14  = _calcRSI(closes, 14);
+  const {diP, diM, adx} = _calcDMI(highs, lows, closes, 14);
 
-  // ── Volume bars ──────────────────────────────────────────────────────────────
-  const volColors = (data.close || []).map((c, i) =>
-    (data.open[i] == null || c >= data.open[i]) ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)'
-  );
-  const vol = {
-    x: data.dates, y: data.volume, type: 'bar',
-    name: 'Volume', yaxis: 'y2',
-    marker: {color: volColors},
-    hovertemplate: '%{y:,.0f}<extra>Vol</extra>',
-  };
+  const maxVol = Math.max(...vols.filter(v=>v!=null), 1);
+  const volC   = closes.map((c,i)=>'rgba(140,140,140,0.28)');
 
-  const traces = [candle, vol];
+  const traces = [
+    // Candlesticks
+    {type:'candlestick', x:dates, open:opens, high:highs, low:lows, close:closes,
+     increasing:{line:{color:C.candleUp,width:1},fillcolor:C.candleUp},
+     decreasing:{line:{color:C.candleDown,width:1},fillcolor:C.candleDown},
+     name:'Price', yaxis:'y', xaxis:'x', whiskerwidth:0.25, hoverinfo:'x+y'},
+    // EMA 20 (purple MA)
+    {type:'scatter', mode:'lines', x:dates, y:ma20, name:'EMA20',
+     line:{color:C.ma,width:1.5}, yaxis:'y', xaxis:'x', hovertemplate:'EMA20: $%{y:.2f}<extra></extra>'},
+    // Volume bars (overlaid at bottom of price panel)
+    {type:'bar', x:dates, y:vols, name:'Vol', yaxis:'y2', xaxis:'x',
+     marker:{color:volC}, hovertemplate:'Vol: %{y:,.0f}<extra></extra>'},
+    // ADX pane
+    {type:'scatter', mode:'lines', x:dates, y:adx, name:'ADX',
+     line:{color:C.adx,width:1.5}, yaxis:'y3', xaxis:'x',
+     hovertemplate:'ADX: %{y:.1f}<extra></extra>'},
+    // DMI pane — DI+, DI-, ADX
+    {type:'scatter', mode:'lines', x:dates, y:diP, name:'DI+',
+     line:{color:C.diPlus,width:1.5}, yaxis:'y4', xaxis:'x',
+     hovertemplate:'DI+: %{y:.1f}<extra></extra>'},
+    {type:'scatter', mode:'lines', x:dates, y:diM, name:'DI-',
+     line:{color:C.diMinus,width:1.5}, yaxis:'y4', xaxis:'x',
+     hovertemplate:'DI-: %{y:.1f}<extra></extra>'},
+    {type:'scatter', mode:'lines', x:dates, y:adx, name:'ADX',
+     line:{color:C.adx,width:1,dash:'dot'}, yaxis:'y4', xaxis:'x', hoverinfo:'skip'},
+    // RSI pane
+    {type:'scatter', mode:'lines', x:dates, y:rsi14, name:'RSI',
+     line:{color:C.rsi,width:1.5}, yaxis:'y5', xaxis:'x',
+     hovertemplate:'RSI: %{y:.1f}<extra></extra>'},
+  ];
+
   const shapes = [];
   const annotations = [];
 
-  // ── Support & Resistance from swing highs/lows ───────────────────────────────
-  const highs  = (data.high  || []).filter(v => v != null);
-  const lows   = (data.low   || []).filter(v => v != null);
-  const closes = (data.close || []).filter(v => v != null);
+  // RSI reference lines (30, 50, 70)
+  [[70,'rgba(239,68,68,0.35)'],[50,'rgba(255,255,255,0.08)'],[30,'rgba(34,197,94,0.35)']].forEach(([v,col])=>{
+    shapes.push({type:'line',xref:'paper',x0:0,x1:1,yref:'y5',y0:v,y1:v,
+      line:{color:col,width:1,dash:'dot'}});
+  });
 
-  if (highs.length > 10) {
-    const n = Math.min(highs.length, 80);
-    const rH = highs.slice(-n);
-    const rL = lows.slice(-n);
-
-    // Swing highs/lows: local extrema over ±3 bars
-    const swingH = [], swingL = [];
-    for (let i = 3; i < rH.length - 3; i++) {
-      if (rH[i] === Math.max(...rH.slice(i-3, i+4))) swingH.push(rH[i]);
-      if (rL[i] === Math.min(...rL.slice(i-3, i+4))) swingL.push(rL[i]);
+  // Support & Resistance from swing highs/lows
+  const hArr=(data.high||[]).filter(v=>v!=null), lArr=(data.low||[]).filter(v=>v!=null);
+  const cArr=(data.close||[]).filter(v=>v!=null);
+  if (hArr.length > 12) {
+    const nn=Math.min(hArr.length,80), rH=hArr.slice(-nn), rL=lArr.slice(-nn);
+    const swH=[],swL=[];
+    for (let i=3;i<rH.length-3;i++){
+      if(rH[i]===Math.max(...rH.slice(i-3,i+4)))swH.push(rH[i]);
+      if(rL[i]===Math.min(...rL.slice(i-3,i+4)))swL.push(rL[i]);
     }
-
-    // Cluster levels within 1.5% of each other
-    function cluster(levels) {
-      const s = [...levels].sort((a, b) => a - b);
-      const out = [];
-      for (const l of s) {
-        if (!out.length || Math.abs(l - out[out.length-1]) / out[out.length-1] > 0.015) out.push(l);
-        else out[out.length-1] = (out[out.length-1] + l) / 2;
-      }
-      return out;
+    function cluster(lvls){
+      const s=[...lvls].sort((a,b)=>a-b),out=[];
+      for(const l of s){if(!out.length||Math.abs(l-out[out.length-1])/out[out.length-1]>0.015)out.push(l);
+        else out[out.length-1]=(out[out.length-1]+l)/2;}return out;
     }
-
-    const cur = closes[closes.length - 1];
-    const resistance = cluster(swingH).filter(l => l > cur * 1.003).slice(0, 3);
-    const support    = cluster(swingL).filter(l => l < cur * 0.997).slice(-3);
-
-    resistance.forEach(r => {
-      shapes.push({type:'line', xref:'paper', x0:0, x1:1, yref:'y', y0:r, y1:r,
-        line:{color:'rgba(239,68,68,0.55)', width:1, dash:'dash'}});
-      annotations.push({xref:'paper', x:1.01, yref:'y', y:r, text:`R $${r.toFixed(2)}`,
-        showarrow:false, font:{size:9, color:'#ef4444'}, xanchor:'left'});
+    const cur=cArr[cArr.length-1];
+    cluster(swH).filter(l=>l>cur*1.003).slice(0,3).forEach(r=>{
+      shapes.push({type:'line',xref:'paper',x0:0,x1:1,yref:'y',y0:r,y1:r,
+        line:{color:C.res,width:1,dash:'dash'}});
+      annotations.push({xref:'paper',x:1.01,yref:'y',y:r,text:`R $${r.toFixed(2)}`,
+        showarrow:false,font:{size:8,color:'#ef4444'},xanchor:'left'});
     });
-    support.forEach(s => {
-      shapes.push({type:'line', xref:'paper', x0:0, x1:1, yref:'y', y0:s, y1:s,
-        line:{color:'rgba(34,197,94,0.55)', width:1, dash:'dash'}});
-      annotations.push({xref:'paper', x:1.01, yref:'y', y:s, text:`S $${s.toFixed(2)}`,
-        showarrow:false, font:{size:9, color:'#22c55e'}, xanchor:'left'});
+    cluster(swL).filter(l=>l<cur*0.997).slice(-3).forEach(s=>{
+      shapes.push({type:'line',xref:'paper',x0:0,x1:1,yref:'y',y0:s,y1:s,
+        line:{color:C.sup,width:1,dash:'dash'}});
+      annotations.push({xref:'paper',x:1.01,yref:'y',y:s,text:`S $${s.toFixed(2)}`,
+        showarrow:false,font:{size:8,color:'#22c55e'},xanchor:'left'});
     });
   }
 
-  // ── ORB breakout lines ───────────────────────────────────────────────────────
+  // ORB breakout levels
   if (data.orb_high) {
-    shapes.push({type:'line', xref:'paper', x0:0, x1:1, yref:'y',
-      y0:data.orb_high, y1:data.orb_high,
-      line:{color:'rgba(251,191,36,0.9)', width:2, dash:'dot'}});
-    annotations.push({xref:'paper', x:1.01, yref:'y', y:data.orb_high,
-      text:`ORB H $${data.orb_high.toFixed(2)}`, showarrow:false,
-      font:{size:9, color:'#fbbf24'}, xanchor:'left'});
+    shapes.push({type:'line',xref:'paper',x0:0,x1:1,yref:'y',y0:data.orb_high,y1:data.orb_high,
+      line:{color:C.orb,width:2,dash:'dot'}});
+    annotations.push({xref:'paper',x:1.01,yref:'y',y:data.orb_high,
+      text:`ORB H`,showarrow:false,font:{size:8,color:'#fbbf24'},xanchor:'left'});
   }
   if (data.orb_low) {
-    shapes.push({type:'line', xref:'paper', x0:0, x1:1, yref:'y',
-      y0:data.orb_low, y1:data.orb_low,
-      line:{color:'rgba(251,191,36,0.65)', width:2, dash:'dot'}});
-    annotations.push({xref:'paper', x:1.01, yref:'y', y:data.orb_low,
-      text:`ORB L $${data.orb_low.toFixed(2)}`, showarrow:false,
-      font:{size:9, color:'#fbbf24'}, xanchor:'left'});
+    shapes.push({type:'line',xref:'paper',x0:0,x1:1,yref:'y',y0:data.orb_low,y1:data.orb_low,
+      line:{color:'rgba(251,191,36,0.6)',width:2,dash:'dot'}});
+    annotations.push({xref:'paper',x:1.01,yref:'y',y:data.orb_low,
+      text:`ORB L`,showarrow:false,font:{size:8,color:'#fbbf24'},xanchor:'left'});
   }
 
-  const maxVol = Math.max(...(data.volume || [0]).filter(v => v));
+  // Compact indicator readouts (bottom-left of each pane)
+  const lastOf = arr => [...arr].reverse().find(v=>v!=null);
+  const lAdx=lastOf(adx), lDiP=lastOf(diP), lDiM=lastOf(diM), lRsi=lastOf(rsi14);
+  const fmtI = v => v==null?'—':v.toFixed(1);
+
+  annotations.push(
+    {xref:'paper',yref:'paper',x:0.01,y:D.adx[1]-0.002,
+     text:`<span style="color:${C.adx}">ADX ${fmtI(lAdx)}</span>`,
+     showarrow:false,font:{size:9,color:C.adx},xanchor:'left',yanchor:'top'},
+    {xref:'paper',yref:'paper',x:0.01,y:D.dmi[1]-0.002,
+     text:`<span style="color:${C.diPlus}">DI+ ${fmtI(lDiP)}</span>  <span style="color:${C.diMinus}">DI- ${fmtI(lDiM)}</span>  <span style="color:${C.adx}">ADX ${fmtI(lAdx)}</span>`,
+     showarrow:false,font:{size:9},xanchor:'left',yanchor:'top'},
+    {xref:'paper',yref:'paper',x:0.01,y:D.rsi[1]-0.002,
+     text:`<span style="color:${C.rsi}">RSI ${fmtI(lRsi)}</span>  <span style="color:#6b7280;font-size:8px">OB:70  OS:30</span>`,
+     showarrow:false,font:{size:9},xanchor:'left',yanchor:'top'},
+  );
+
+  const ax = {gridcolor:C.grid,showgrid:true,tickfont:{size:9,color:C.text},
+               zeroline:false,showline:false,tickcolor:C.text};
+
   Plotly.newPlot('chart-plotly', traces, {
-    paper_bgcolor: bg, plot_bgcolor: bg,
-    margin: {l:52, r:72, t:8, b:36},
-    font: {color: fg, size: 11},
-    xaxis: {
-      gridcolor: grid, showgrid: true, tickfont: {size:10},
-      rangeslider: {visible: false},
-    },
-    yaxis: {
-      gridcolor: grid, showgrid: true, tickfont: {size:10},
-      tickprefix: '$', side: 'left', automargin: true,
-    },
-    yaxis2: {
-      overlaying: 'y', side: 'right', showgrid: false,
-      tickfont: {size: 9}, fixedrange: true,
-      range: [0, maxVol * 5], showticklabels: false,
-    },
-    showlegend: false,
-    hovermode: 'x',
-    dragmode: 'zoom',
-    shapes,
-    annotations,
-  }, {
-    responsive: true,
-    displayModeBar: true,
-    modeBarButtonsToRemove: ['select2d','lasso2d','toggleSpikelines','autoScale2d'],
-    displaylogo: false,
-    scrollZoom: true,
+    paper_bgcolor:C.bg, plot_bgcolor:C.bg,
+    margin:{l:0,r:54,t:4,b:20,pad:0},
+    font:{color:C.text,size:9},
+    xaxis:{...ax,domain:[0,1],rangeslider:{visible:false},showticklabels:true},
+    yaxis: {...ax,domain:D.price,side:'right',tickprefix:'$'},
+    yaxis2:{overlaying:'y',side:'right',showgrid:false,fixedrange:true,
+            range:[0,maxVol*5],showticklabels:false,zeroline:false},
+    yaxis3:{...ax,domain:D.adx,side:'right',tickfont:{size:8,color:C.text}},
+    yaxis4:{...ax,domain:D.dmi,side:'right',tickfont:{size:8,color:C.text}},
+    yaxis5:{...ax,domain:D.rsi,side:'right',range:[0,100],
+            tickvals:[30,70],tickfont:{size:8,color:C.text}},
+    showlegend:false, hovermode:'x', dragmode:'zoom',
+    shapes, annotations,
+  },{
+    responsive:true, displayModeBar:true, scrollZoom:true, displaylogo:false,
+    modeBarButtonsToRemove:['select2d','lasso2d','toggleSpikelines','autoScale2d'],
   });
 }
 
