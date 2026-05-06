@@ -4647,6 +4647,46 @@ function _renderDetailChart(data) {
   },{
     responsive:true, scrollZoom:true, displayModeBar:false,
   });
+  _initPinchZoom('chart-plotly');
+}
+
+// Custom pinch-to-zoom — Plotly's built-in touch detection is unreliable.
+// Reads two-finger distance, scales the x-axis range around its midpoint,
+// and calls Plotly.relayout directly.
+function _initPinchZoom(divId) {
+  const el = document.getElementById(divId);
+  if (!el) return;
+  let startDist = null, startRange = null;
+
+  function dist(e) {
+    const dx = e.touches[1].clientX - e.touches[0].clientX;
+    const dy = e.touches[1].clientY - e.touches[0].clientY;
+    return Math.sqrt(dx*dx + dy*dy);
+  }
+  function toMs(v) { return typeof v === 'number' ? v : new Date(v).getTime(); }
+  function toStr(ms) { return new Date(ms).toISOString().replace('T',' ').slice(0,19); }
+
+  el.addEventListener('touchstart', e => {
+    if (e.touches.length !== 2) { startDist = null; return; }
+    startDist = dist(e);
+    const ax = el._fullLayout && el._fullLayout.xaxis;
+    startRange = ax && ax.range ? ax.range.map(toMs) : null;
+  }, {passive:true});
+
+  el.addEventListener('touchmove', e => {
+    if (e.touches.length !== 2 || !startDist || !startRange) return;
+    e.preventDefault();
+    const scale = startDist / dist(e);  // pinch-in → dist grows → scale < 1 → zoom in
+    const [t0, t1] = startRange;
+    const mid = (t0 + t1) / 2;
+    const half = (t1 - t0) / 2 * scale;
+    Plotly.relayout(divId, {
+      'xaxis.range[0]': toStr(mid - half),
+      'xaxis.range[1]': toStr(mid + half),
+    });
+  }, {passive:false});
+
+  el.addEventListener('touchend', () => { startDist = null; startRange = null; }, {passive:true});
 }
 
 function switchDetailTab(tab, btn) {
