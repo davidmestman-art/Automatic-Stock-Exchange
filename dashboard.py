@@ -1917,7 +1917,7 @@ def api_chart(symbol):
 
 @app.route("/api/bars/<symbol>")
 def api_bars(symbol):
-    """Simple OHLCV data for the stock detail modal chart (multiple periods)."""
+    """OHLCV data for the stock detail modal chart (multiple periods)."""
     symbol = symbol.upper()
     period = request.args.get("period", "3m")
     period_to_interval: dict = {
@@ -1925,27 +1925,44 @@ def api_bars(symbol):
         "3m": "1d", "6m": "1d", "1y": "1d",
     }
     period_to_days: dict = {
-        "1d": 2, "1w": 7, "1m": 30,
+        "1d": 2, "1w": 10, "1m": 30,
         "3m": 90, "6m": 180, "1y": 365,
     }
-    interval   = period_to_interval.get(period, "1d")
-    lookback   = period_to_days.get(period, 90)
+    interval = period_to_interval.get(period, "1d")
+    lookback = period_to_days.get(period, 90)
     try:
         import math
         from src.data.fetcher import MarketDataFetcher
+        eng = _get_engine()
+        api_key    = eng.config.alpaca_api_key    or config.alpaca_api_key
+        secret_key = eng.config.alpaca_secret_key or config.alpaca_secret_key
         fetcher = MarketDataFetcher(
-            lookback_days=lookback,
-            interval=interval,
-            api_key=config.alpaca_api_key,
-            secret_key=config.alpaca_secret_key,
+            lookback_days=lookback, interval=interval,
+            api_key=api_key, secret_key=secret_key,
         )
         df = fetcher.fetch(symbol)
+        # 1D intraday fallback: IEX free feed often lacks sub-day bars
+        if (df is None or df.empty) and period == "1d":
+            fetcher2 = MarketDataFetcher(
+                lookback_days=5, interval="1d",
+                api_key=api_key, secret_key=secret_key,
+            )
+            df = fetcher2.fetch(symbol)
         if df is None or df.empty:
             return jsonify({"ok": False, "error": f"No data for {symbol}"}), 404
         def to_list(s):
             return [None if (v is None or (isinstance(v, float) and math.isnan(v))) else round(float(v), 4) for v in s]
         is_intraday = interval in ("5m", "1h")
         date_fmt = "%Y-%m-%d %H:%M" if is_intraday else "%Y-%m-%d"
+        # ORB opening-range levels (shown as breakout lines on chart)
+        orb_high = orb_low = None
+        try:
+            orb_state = eng._orb_session.get(symbol)
+            if orb_state and orb_state.or_high is not None:
+                orb_high = round(orb_state.or_high, 4)
+                orb_low  = round(orb_state.or_low,  4)
+        except Exception:
+            pass
         return jsonify({
             "ok":      True,
             "symbol":  symbol,
@@ -1956,6 +1973,8 @@ def api_bars(symbol):
             "low":     to_list(df["Low"]),
             "close":   to_list(df["Close"]),
             "volume":  [int(v) if v is not None else None for v in to_list(df["Volume"])],
+            "orb_high": orb_high,
+            "orb_low":  orb_low,
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -4408,39 +4427,131 @@ async function loadDetailBars(symbol, period, btn) {
 function _renderDetailChart(data) {
   if (!window.Plotly) return;
   const isLight = document.body.classList.contains('light');
-  const fg = isLight ? '#1e293b' : '#e2e8f0';
-  const grid = isLight ? 'rgba(0,0,0,0.07)' : 'rgba(255,255,255,0.05)';
+  const fg   = isLight ? '#1e293b' : '#e2e8f0';
+  const grid = isLight ? 'rgba(0,0,0,0.07)' : 'rgba(255,255,255,0.06)';
   const bg   = isLight ? '#f8fafc' : '#0d1520';
-  const close = data.close;
-  const up    = close[close.length-1] >= close[0];
-  const lineCol = up ? '#22c55e' : '#ef4444';
-  const fillCol = up ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)';
 
-  const traces = [{
-    x: data.dates, y: close, type: 'scatter', mode: 'lines',
-    line: {color: lineCol, width: 2},
-    fill: 'tozeroy', fillcolor: fillCol,
-    name: 'Price', hovertemplate: '%{x}<br>$%{y:.2f}<extra></extra>',
-  }];
+  // ── Candlestick trace ────────────────────────────────────────────────────────
+  const candle = {
+    x: data.dates,
+    open: data.open, high: data.high, low: data.low, close: data.close,
+    type: 'candlestick',
+    name: data.symbol,
+    increasing: {line: {color: '#22c55e', width: 1}, fillcolor: '#22c55e'},
+    decreasing: {line: {color: '#ef4444', width: 1}, fillcolor: '#ef4444'},
+    hoverinfo: 'x+y',
+    whiskerwidth: 0.3,
+  };
 
-  if (data.volume) {
-    traces.push({
-      x: data.dates, y: data.volume, type: 'bar',
-      name: 'Volume', yaxis: 'y2', marker: {color: 'rgba(100,116,139,0.35)'},
-      hovertemplate: '%{y:,.0f}<extra></extra>',
+  // ── Volume bars ──────────────────────────────────────────────────────────────
+  const volColors = (data.close || []).map((c, i) =>
+    (data.open[i] == null || c >= data.open[i]) ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)'
+  );
+  const vol = {
+    x: data.dates, y: data.volume, type: 'bar',
+    name: 'Volume', yaxis: 'y2',
+    marker: {color: volColors},
+    hovertemplate: '%{y:,.0f}<extra>Vol</extra>',
+  };
+
+  const traces = [candle, vol];
+  const shapes = [];
+  const annotations = [];
+
+  // ── Support & Resistance from swing highs/lows ───────────────────────────────
+  const highs  = (data.high  || []).filter(v => v != null);
+  const lows   = (data.low   || []).filter(v => v != null);
+  const closes = (data.close || []).filter(v => v != null);
+
+  if (highs.length > 10) {
+    const n = Math.min(highs.length, 80);
+    const rH = highs.slice(-n);
+    const rL = lows.slice(-n);
+
+    // Swing highs/lows: local extrema over ±3 bars
+    const swingH = [], swingL = [];
+    for (let i = 3; i < rH.length - 3; i++) {
+      if (rH[i] === Math.max(...rH.slice(i-3, i+4))) swingH.push(rH[i]);
+      if (rL[i] === Math.min(...rL.slice(i-3, i+4))) swingL.push(rL[i]);
+    }
+
+    // Cluster levels within 1.5% of each other
+    function cluster(levels) {
+      const s = [...levels].sort((a, b) => a - b);
+      const out = [];
+      for (const l of s) {
+        if (!out.length || Math.abs(l - out[out.length-1]) / out[out.length-1] > 0.015) out.push(l);
+        else out[out.length-1] = (out[out.length-1] + l) / 2;
+      }
+      return out;
+    }
+
+    const cur = closes[closes.length - 1];
+    const resistance = cluster(swingH).filter(l => l > cur * 1.003).slice(0, 3);
+    const support    = cluster(swingL).filter(l => l < cur * 0.997).slice(-3);
+
+    resistance.forEach(r => {
+      shapes.push({type:'line', xref:'paper', x0:0, x1:1, yref:'y', y0:r, y1:r,
+        line:{color:'rgba(239,68,68,0.55)', width:1, dash:'dash'}});
+      annotations.push({xref:'paper', x:1.01, yref:'y', y:r, text:`R $${r.toFixed(2)}`,
+        showarrow:false, font:{size:9, color:'#ef4444'}, xanchor:'left'});
+    });
+    support.forEach(s => {
+      shapes.push({type:'line', xref:'paper', x0:0, x1:1, yref:'y', y0:s, y1:s,
+        line:{color:'rgba(34,197,94,0.55)', width:1, dash:'dash'}});
+      annotations.push({xref:'paper', x:1.01, yref:'y', y:s, text:`S $${s.toFixed(2)}`,
+        showarrow:false, font:{size:9, color:'#22c55e'}, xanchor:'left'});
     });
   }
 
+  // ── ORB breakout lines ───────────────────────────────────────────────────────
+  if (data.orb_high) {
+    shapes.push({type:'line', xref:'paper', x0:0, x1:1, yref:'y',
+      y0:data.orb_high, y1:data.orb_high,
+      line:{color:'rgba(251,191,36,0.9)', width:2, dash:'dot'}});
+    annotations.push({xref:'paper', x:1.01, yref:'y', y:data.orb_high,
+      text:`ORB H $${data.orb_high.toFixed(2)}`, showarrow:false,
+      font:{size:9, color:'#fbbf24'}, xanchor:'left'});
+  }
+  if (data.orb_low) {
+    shapes.push({type:'line', xref:'paper', x0:0, x1:1, yref:'y',
+      y0:data.orb_low, y1:data.orb_low,
+      line:{color:'rgba(251,191,36,0.65)', width:2, dash:'dot'}});
+    annotations.push({xref:'paper', x:1.01, yref:'y', y:data.orb_low,
+      text:`ORB L $${data.orb_low.toFixed(2)}`, showarrow:false,
+      font:{size:9, color:'#fbbf24'}, xanchor:'left'});
+  }
+
+  const maxVol = Math.max(...(data.volume || [0]).filter(v => v));
   Plotly.newPlot('chart-plotly', traces, {
     paper_bgcolor: bg, plot_bgcolor: bg,
-    margin: {l:48, r:12, t:8, b:36},
+    margin: {l:52, r:72, t:8, b:36},
     font: {color: fg, size: 11},
-    xaxis: {gridcolor: grid, showgrid: true, tickfont: {size:10}},
-    yaxis: {gridcolor: grid, showgrid: true, tickfont: {size:10}, tickprefix: '$', side:'left'},
-    yaxis2: {overlaying:'y', side:'right', showgrid:false, tickfont:{size:9}, showticklabels:true, fixedrange:true, range:[0, Math.max(...data.volume)*5]},
+    xaxis: {
+      gridcolor: grid, showgrid: true, tickfont: {size:10},
+      rangeslider: {visible: false},
+    },
+    yaxis: {
+      gridcolor: grid, showgrid: true, tickfont: {size:10},
+      tickprefix: '$', side: 'left', automargin: true,
+    },
+    yaxis2: {
+      overlaying: 'y', side: 'right', showgrid: false,
+      tickfont: {size: 9}, fixedrange: true,
+      range: [0, maxVol * 5], showticklabels: false,
+    },
     showlegend: false,
-    hovermode: 'x unified',
-  }, {responsive: true, displayModeBar: false});
+    hovermode: 'x',
+    dragmode: 'zoom',
+    shapes,
+    annotations,
+  }, {
+    responsive: true,
+    displayModeBar: true,
+    modeBarButtonsToRemove: ['select2d','lasso2d','toggleSpikelines','autoScale2d'],
+    displaylogo: false,
+    scrollZoom: true,
+  });
 }
 
 function switchDetailTab(tab, btn) {
