@@ -230,9 +230,8 @@ function buildLayout(maxVol, extraShapes = [], extraAnnotations = []) {
 // - Mobile:  one-finger drag pans, pinch zooms (Plotly native touch handling)
 const TOS_CONFIG = {
   responsive:     true,
-  scrollZoom:     true,
-  displaylogo:    false,
-  modeBarButtons: [['pan2d', 'zoomIn2d', 'zoomOut2d']],
+  scrollZoom:     true,   // desktop scroll / trackpad
+  displayModeBar: false,  // no toolbar — pinch handles zoom, drag handles pan
 };
 
 // ── TOSChart class ────────────────────────────────────────────────────────────

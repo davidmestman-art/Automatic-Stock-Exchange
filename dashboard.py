@@ -3125,7 +3125,7 @@ body.light .simple-verdict strong{color:#0f172a}
     </div>
     <!-- Chart -->
     <div class="chart-body">
-      <div id="chart-plotly" style="height:540px"></div>
+      <div id="chart-plotly" style="height:540px;touch-action:none"></div>
     </div>
     <!-- Key stats grid -->
     <div class="detail-stats" id="detail-stats"></div>
@@ -4645,8 +4645,7 @@ function _renderDetailChart(data) {
     showlegend:false, hovermode:'x', dragmode:'pan',
     shapes, annotations,
   },{
-    responsive:true, scrollZoom:true, displaylogo:false,
-    modeBarButtons:[['pan2d','zoomIn2d','zoomOut2d']],
+    responsive:true, scrollZoom:true, displayModeBar:false,
   });
 }
 
