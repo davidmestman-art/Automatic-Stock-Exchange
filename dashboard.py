@@ -4642,11 +4642,11 @@ function _renderDetailChart(data) {
     yaxis4:{...ax,domain:D.dmi,side:'right',tickfont:{size:8,color:C.text}},
     yaxis5:{...ax,domain:D.rsi,side:'right',range:[0,100],
             tickvals:[30,70],tickfont:{size:8,color:C.text}},
-    showlegend:false, hovermode:'x', dragmode:'zoom',
+    showlegend:false, hovermode:'x', dragmode:'pan',
     shapes, annotations,
   },{
-    responsive:true, displayModeBar:true, scrollZoom:true, displaylogo:false,
-    modeBarButtonsToRemove:['select2d','lasso2d','toggleSpikelines','autoScale2d'],
+    responsive:true, scrollZoom:true, displaylogo:false,
+    modeBarButtons:[['pan2d','zoomIn2d','zoomOut2d']],
   });
 }
 
