@@ -1960,6 +1960,7 @@ def api_bars(symbol):
                 orb_low  = round(orb_state.or_low,  4)
         except Exception:
             pass
+        sr_levels = _compute_sr_levels(df)
         return jsonify({
             "ok":      True,
             "symbol":  symbol,
@@ -1972,6 +1973,7 @@ def api_bars(symbol):
             "volume":  [int(v) if v is not None else None for v in to_list(df["Volume"])],
             "orb_high": orb_high,
             "orb_low":  orb_low,
+            "sr_levels": sr_levels,
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
