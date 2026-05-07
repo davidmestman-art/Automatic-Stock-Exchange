@@ -1357,9 +1357,9 @@ class TradingEngine:
         # Breakout BUY — enter immediately when volume >= 1x avg per minute
         avg_per_min = orb_st.avg_daily_volume / 390.0 if orb_st.avg_daily_volume > 0 else 0
         bar_vol     = vol_1min.get(symbol, 0)
-        if avg_per_min > 0 and bar_vol < avg_per_min:
+        if avg_per_min > 0 and bar_vol < avg_per_min * 0.5:
             return SignalResult(action="HOLD", score=0.1, confidence=0.1,
-                                reasons=[f"ORB above ${or_high:.2f} — vol {bar_vol:.0f} < 1x avg {avg_per_min:.0f}"])
+                                reasons=[f"ORB above ${or_high:.2f} — vol {bar_vol:.0f} < 0.5x avg {avg_per_min:.0f}"])
 
         # Multi-timeframe confluence score
         score = 0.60   # base: OR high confirmed breakout
