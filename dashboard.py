@@ -1240,24 +1240,45 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 except Exception:
                     pass
             orb_st_uni = eng._orb_session.get(sym)
+            # Compute basic ORB score from session state + price so every stock shows a score
+            uni_score = 0.0
+            uni_action = "HOLD"
+            uni_reasons = []
+            uni_orb_pct = None
+            if orb_st_uni and orb_st_uni.formed and orb_st_uni.or_high is not None and price:
+                if orb_st_uni.gap_pct is not None and abs(orb_st_uni.gap_pct) > 0.05:
+                    uni_score = 0.0
+                    uni_reasons = [f"Gap filter: {orb_st_uni.gap_pct * 100:.1f}% at open"]
+                elif price < orb_st_uni.or_low:
+                    uni_score = -0.8
+                    uni_action = "SELL"
+                    uni_reasons = [f"ORB breakdown below ${orb_st_uni.or_low:.2f}"]
+                elif price > orb_st_uni.or_high:
+                    # Breakout — apply confluence without volume data (show 0.1 base, waiting for vol)
+                    uni_score = 0.1
+                    uni_reasons = [f"Above OR high ${orb_st_uni.or_high:.2f} — awaiting volume"]
+                    uni_orb_pct = round((price - orb_st_uni.or_high) / orb_st_uni.or_high * 100, 2)
+                else:
+                    uni_score = 0.0
+                    uni_reasons = ["Price inside OR"]
             sig_list.append({
                 "symbol":        sym,
                 "price":         round(price, 2) if price else None,
-                "action":        "HOLD",
-                "score":         None,
-                "confidence":    None,
+                "action":        uni_action,
+                "score":         round(uni_score, 3),
+                "confidence":    round(abs(uni_score), 3),
                 "atr_pct":       None,
                 "volume_ratio":  None,
                 "est_size_pct":  None,
                 "corr_blocked":  None,
-                "reasons":       [],
+                "reasons":       uni_reasons,
                 "or_high":       round(orb_st_uni.or_high, 2)  if orb_st_uni and orb_st_uni.or_high  is not None else None,
                 "or_low":        round(orb_st_uni.or_low, 2)   if orb_st_uni and orb_st_uni.or_low   is not None else None,
                 "gap_pct":       round(orb_st_uni.gap_pct * 100, 2) if orb_st_uni and orb_st_uni.gap_pct is not None else None,
                 "high_20d":      round(orb_st_uni.high_20d, 2) if orb_st_uni and orb_st_uni.high_20d is not None else None,
                 "high_52w":      round(orb_st_uni.high_52w, 2) if orb_st_uni and orb_st_uni.high_52w is not None else None,
                 "prev_day_high": round(orb_st_uni.prev_day_high, 2) if orb_st_uni and orb_st_uni.prev_day_high is not None else None,
-                "orb_pct_above": None,
+                "orb_pct_above": uni_orb_pct,
                 "orb_phase":     eng._orb_session.phase,
                 "sector":        get_sector(sym) or "—",
                 "category":      eng.dynamic_universe.last_result.get("categories", {}).get(sym, "Other"),
