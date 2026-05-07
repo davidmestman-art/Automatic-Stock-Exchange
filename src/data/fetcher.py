@@ -102,6 +102,7 @@ class MarketDataFetcher:
                 start=start,
                 end=end,
                 feed="iex",
+                adjustment="split",
             )
             return self._client.get_stock_bars(req).df
         except Exception as e:

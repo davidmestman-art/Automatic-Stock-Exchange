@@ -172,6 +172,7 @@ def _alpaca_bars(
             start=start,
             end=end,
             feed="iex",
+            adjustment="split",
         )
         return client.get_stock_bars(req).df
     except Exception as e:
