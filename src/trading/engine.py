@@ -725,11 +725,13 @@ class TradingEngine:
     def get_signals(self):
         """Fetch data and compute ORB signals without placing any orders."""
         symbols = self.watchlist or self.config.symbols
-        # Use cached bar data — run_cycle() keeps it fresh every 90s.
-        # Fall back to a fresh fetch only if the cache is empty.
+        # Use cached bar data first (run_cycle keeps it fresh every 90s)
         market_data = self.fetcher.fetch_many(symbols, force_refresh=False)
-        if not market_data:
-            market_data = self.fetcher.fetch_many(symbols, force_refresh=True)
+        # Fetch any symbols not yet in cache (e.g. new ORB universe after scan)
+        missing = [s for s in symbols if s not in market_data]
+        if missing:
+            fresh = self.fetcher.fetch_many(missing, force_refresh=True)
+            market_data.update(fresh)
 
         # Fetch position data needed for correlation filter (may not be on watchlist)
         if self.config.use_correlation_filter and self.portfolio.positions:
