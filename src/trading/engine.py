@@ -710,7 +710,7 @@ class TradingEngine:
         return dict(self._rebuy_cooldowns)
 
     def get_signals(self):
-        """Fetch data and compute signals without placing any orders."""
+        """Fetch data and compute ORB signals without placing any orders."""
         symbols = self.watchlist or self.config.symbols
         market_data = self.fetcher.fetch_many(symbols, force_refresh=True)
 
@@ -733,13 +733,30 @@ class TradingEngine:
             except Exception as e:
                 logger.warning(f"  Regime detection failed: {e}")
 
+        orb_active = self._orb_session.range_formed
+        vol_1min: Dict[str, float] = {}
+        if orb_active and symbols:
+            try:
+                vol_1min = fetch_latest_1min_volume(symbols)
+            except Exception as e:
+                logger.debug(f"  get_signals vol_1min: {e}")
+
         signals, ind_map = {}, {}
         for symbol in symbols:
             if symbol not in market_data or symbol not in prices:
                 continue
             ind = self.indicators.compute(market_data[symbol])
             ind.close = prices.get(symbol, ind.close)
-            signals[symbol] = self._compute_signal(symbol, ind)
+            current_price = prices[symbol]
+            orb_st = self._orb_session.get(symbol) if orb_active else None
+            sig = self._compute_orb_signal(symbol, ind, current_price, orb_st, vol_1min)
+            # Embed ORB metadata into indicator_scores for dashboard consumption
+            if orb_st is not None:
+                sig.indicator_scores["orb_or_high"]  = orb_st.or_high
+                sig.indicator_scores["orb_or_low"]   = orb_st.or_low
+                sig.indicator_scores["orb_gap_pct"]  = orb_st.gap_pct
+            sig.indicator_scores["orb_phase"] = self._orb_session.phase
+            signals[symbol] = sig
             ind_map[symbol] = ind
         return signals, prices, ind_map
 
