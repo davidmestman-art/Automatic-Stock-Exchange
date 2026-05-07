@@ -4657,43 +4657,57 @@ function _renderDetailChart(data) {
   _initPinchZoom('chart-plotly');
 }
 
-// Custom pinch-to-zoom — Plotly's built-in touch detection is unreliable.
-// Reads two-finger distance, scales the x-axis range around its midpoint,
-// and calls Plotly.relayout directly.
+// Custom pinch-to-zoom — smooth, x-axis only, intercepts before Plotly.
+// Uses capture phase so our handler fires before Plotly's inner listeners,
+// then stopPropagation prevents Plotly from processing 2-finger touches.
+// rAF throttle keeps updates at display refresh rate (no queue buildup).
 function _initPinchZoom(divId) {
   const el = document.getElementById(divId);
   if (!el) return;
-  let startDist = null, startRange = null;
+  let startDist = null, startRange = null, rafId = null;
 
   function dist(e) {
     const dx = e.touches[1].clientX - e.touches[0].clientX;
     const dy = e.touches[1].clientY - e.touches[0].clientY;
-    return Math.sqrt(dx*dx + dy*dy);
+    return Math.sqrt(dx * dx + dy * dy);
   }
   function toMs(v) { return typeof v === 'number' ? v : new Date(v).getTime(); }
-  function toStr(ms) { return new Date(ms).toISOString().replace('T',' ').slice(0,19); }
+  function toStr(ms) { return new Date(ms).toISOString().replace('T', ' ').slice(0, 19); }
 
+  // Capture phase: fires before Plotly's listeners on inner elements
   el.addEventListener('touchstart', e => {
-    if (e.touches.length !== 2) { startDist = null; return; }
+    if (e.touches.length !== 2) { startDist = null; startRange = null; return; }
+    e.stopPropagation();
     startDist = dist(e);
     const ax = el._fullLayout && el._fullLayout.xaxis;
     startRange = ax && ax.range ? ax.range.map(toMs) : null;
-  }, {passive:true});
+  }, {passive: true, capture: true});
 
   el.addEventListener('touchmove', e => {
     if (e.touches.length !== 2 || !startDist || !startRange) return;
-    e.preventDefault();
-    const scale = startDist / dist(e);  // pinch-in → dist grows → scale < 1 → zoom in
-    const [t0, t1] = startRange;
-    const mid = (t0 + t1) / 2;
-    const half = (t1 - t0) / 2 * scale;
-    Plotly.relayout(divId, {
-      'xaxis.range[0]': toStr(mid - half),
-      'xaxis.range[1]': toStr(mid + half),
+    e.preventDefault();     // stop page scroll
+    e.stopPropagation();    // stop Plotly's pan/zoom handler
+    const currentDist = dist(e);  // capture before rAF
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      const scale = startDist / currentDist;
+      const [t0, t1] = startRange;
+      const mid  = (t0 + t1) / 2;
+      const half = (t1 - t0) / 2 * scale;
+      Plotly.relayout(divId, {
+        'xaxis.range[0]': toStr(mid - half),
+        'xaxis.range[1]': toStr(mid + half),
+      });
     });
-  }, {passive:false});
+  }, {passive: false, capture: true});
 
-  el.addEventListener('touchend', () => { startDist = null; startRange = null; }, {passive:true});
+  el.addEventListener('touchend', e => {
+    if (e.touches.length < 2) {
+      startDist = null; startRange = null;
+      if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    }
+  }, {passive: true, capture: true});
 }
 
 function switchDetailTab(tab, btn) {

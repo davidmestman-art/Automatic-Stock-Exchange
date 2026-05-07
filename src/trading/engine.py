@@ -312,7 +312,7 @@ class TradingEngine:
                     pos = self.portfolio.positions[sym]
                     price = eod_prices.get(sym, pos.entry_price)
                     self.executor.execute_sell(sym, price, "EOD close 3:45 PM", self.portfolio)
-                    self._rebuy_cooldowns[sym] = datetime.now()
+                    self._rebuy_cooldowns[sym] = self._get_et_time()
             self._orb_session.phase = "DONE"
             logger.info(f"  [CYCLE] #{self._cycle} — session DONE")
             return {}
@@ -420,32 +420,13 @@ class TradingEngine:
 
             if orb_active:
                 orb_st = self._orb_session.get(symbol)
-                orb_sig = self._compute_orb_signal(symbol, ind, current_price, orb_st, vol_1min)
-                # Fall back to momentum signal when ORB range is not yet formed
-                if orb_sig.action == "HOLD" and (orb_st is None or not (orb_st.formed if orb_st else False)):
-                    signal = self._compute_signal(symbol, ind)
-                else:
-                    signal = orb_sig
+                signal = self._compute_orb_signal(symbol, ind, current_price, orb_st, vol_1min)
             else:
-                signal = self._compute_signal(symbol, ind)
+                # Outside ORB hours — no trades; scores still computed for display
+                signal = SignalResult(action="HOLD", score=0.0, confidence=0.0,
+                                      reasons=["ORB not active"])
 
-            # ── FIX 1: Confluence gate for BUY signals (non-ORB only) ─────────
             confluence_ok = True
-            if signal.action == "BUY" and not orb_active:
-                if ind.vwap is not None and current_price < ind.vwap:
-                    logger.info(
-                        f"  {symbol}: confluence FAIL — price ${current_price:.2f} < VWAP ${ind.vwap:.2f}, downgrading to HOLD"
-                    )
-                    signal = SignalResult(action="HOLD", score=signal.score,
-                                         confidence=signal.confidence, reasons=signal.reasons)
-                    confluence_ok = False
-                elif ind.adx is not None and ind.adx < 20:
-                    logger.info(
-                        f"  {symbol}: confluence FAIL — ADX {ind.adx:.1f} < 20, downgrading to HOLD"
-                    )
-                    signal = SignalResult(action="HOLD", score=signal.score,
-                                         confidence=signal.confidence, reasons=signal.reasons)
-                    confluence_ok = False
 
             results[symbol] = signal
 
@@ -476,7 +457,7 @@ class TradingEngine:
 
                 # ── FIX 2: 3-day rebuy cooldown check ────────────────────────
                 if symbol in self._rebuy_cooldowns:
-                    days_since = (datetime.now() - self._rebuy_cooldowns[symbol]).days
+                    days_since = (self._get_et_time() - self._rebuy_cooldowns[symbol]).days
                     if days_since < 3:
                         logger.info(f"  {symbol}: rebuy cooldown active ({days_since}d < 3d), skipping")
                         continue
@@ -529,7 +510,7 @@ class TradingEngine:
                     elif not orb_active and self.config.use_confirmation and symbol not in _confirmed_buys:
                         self._pending_signals[symbol] = {
                             "signal_price": current_price,
-                            "queued_at": datetime.now().isoformat(),
+                            "queued_at": self._get_et_time().isoformat(),
                         }
                         logger.info(
                             f"  {symbol}: BUY queued for confirmation @ ${current_price:.2f}"
@@ -603,7 +584,7 @@ class TradingEngine:
                             portfolio=self.portfolio,
                         )
                         # ── FIX 2: Set rebuy cooldown after sell ──────────────
-                        self._rebuy_cooldowns[symbol] = datetime.now()
+                        self._rebuy_cooldowns[symbol] = self._get_et_time()
                         if pos:
                             pnl     = (current_price - pos.entry_price) * pos.shares
                             pnl_pct = (current_price - pos.entry_price) / pos.entry_price
@@ -1208,7 +1189,7 @@ class TradingEngine:
             pos = self.portfolio.positions.get(symbol)
             self.executor.execute_sell(symbol, price, reason, self.portfolio)
             # ── FIX 2: Set rebuy cooldown after exit ──────────────────────────
-            self._rebuy_cooldowns[symbol] = datetime.now()
+            self._rebuy_cooldowns[symbol] = self._get_et_time()
             if pos:
                 pnl     = (price - pos.entry_price) * pos.shares if not pos.is_short else (pos.entry_price - price) * pos.shares
                 pnl_pct = (price - pos.entry_price) / pos.entry_price if not pos.is_short else (pos.entry_price - price) / pos.entry_price
