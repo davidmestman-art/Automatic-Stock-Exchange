@@ -15,7 +15,7 @@ class SignalResult:
     score: float                        # -1.0 (strong sell) to +1.0 (strong buy)
     confidence: float                   # 0.0 to 1.0 — abs(score)
     reasons: List[str]
-    indicator_scores: Dict[str, float]
+    indicator_scores: Dict[str, float] = field(default_factory=dict)
 
 
 class SignalAnalyzer:
