@@ -45,9 +45,6 @@ class ORBState:
     avg_daily_volume: float = 0.0
     # Gap filter — (today_open - prev_close) / prev_close; populated at 10:00
     gap_pct: Optional[float] = None
-    # Retest entry — set on first high-vol breakout above OR high
-    retest_eligible: bool = False
-    breakout_volume: Optional[float] = None
 
     @property
     def or_midpoint(self) -> Optional[float]:

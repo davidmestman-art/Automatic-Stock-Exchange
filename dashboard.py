@@ -1185,41 +1185,33 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
             if sig.action == "BUY" and ind and ind.atr_pct:
                 raw = eng.risk.compute_position_pct(sig.confidence, ind.atr_pct)
                 est_size_pct = round(raw * 100, 1)
+            or_high  = iscores.get("orb_or_high")
+            or_low   = iscores.get("orb_or_low")
+            gap_pct  = iscores.get("orb_gap_pct")
+            orb_phase = iscores.get("orb_phase", eng._orb_session.phase)
+            price_now = price_lookup.get(sym, 0)
+            # How far above OR high as a percentage
+            orb_pct_above = None
+            if or_high and price_now and price_now > or_high:
+                orb_pct_above = round((price_now - or_high) / or_high * 100, 2)
             sig_list.append({
-                "symbol": sym,
-                "price": round(price_lookup.get(sym, 0), 2),
-                "action": sig.action,
-                "score": round(sig.score, 3),
-                "confidence": round(sig.confidence, 3),
-                "rsi": round(ind.rsi, 1) if ind and ind.rsi else None,
-                "z_score": round(ind.z_score, 2) if ind and ind.z_score is not None else None,
-                "atr_pct": round(ind.atr_pct * 100, 2) if ind and ind.atr_pct else None,
+                "symbol":       sym,
+                "price":        round(price_now, 2),
+                "action":       sig.action,
+                "score":        round(sig.score, 3),
+                "confidence":   round(sig.confidence, 3),
+                "atr_pct":      round(ind.atr_pct * 100, 2) if ind and ind.atr_pct else None,
                 "volume_ratio": vol_ratio,
                 "est_size_pct": est_size_pct,
                 "corr_blocked": corr_blocked.get(sym),
-                "reasons": sig.reasons,
-                "macd_hist":      round(ind.macd_hist, 4)      if ind and ind.macd_hist      is not None else None,
-                "macd_hist_prev": round(ind.macd_hist_prev, 4) if ind and ind.macd_hist_prev is not None else None,
-                "ema_fast":       round(ind.ema_fast, 2)       if ind and ind.ema_fast       else None,
-                "ema_slow":       round(ind.ema_slow, 2)       if ind and ind.ema_slow       else None,
-                "bb_upper":       round(ind.bb_upper, 2)       if ind and ind.bb_upper       else None,
-                "bb_lower":       round(ind.bb_lower, 2)       if ind and ind.bb_lower       else None,
-                "roc_10":         round(ind.roc_10, 4)         if ind and getattr(ind, "roc_10",    None) is not None else None,
-                "stoch_rsi":      round(ind.stoch_rsi, 1)      if ind and getattr(ind, "stoch_rsi", None) is not None else None,
-                "vwap":           round(ind.vwap, 2)            if ind and getattr(ind, "vwap",       None) is not None else None,
-                "vwap_dev":       round((ind.close - ind.vwap) / ind.vwap * 100, 2)
-                                  if ind and getattr(ind, "vwap", None) and ind.close else None,
-                "adx":            round(ind.adx, 1)             if ind and getattr(ind, "adx",        None) is not None else None,
-                "adx_plus_di":    round(ind.adx_plus_di, 1)     if ind and getattr(ind, "adx_plus_di",  None) is not None else None,
-                "adx_minus_di":   round(ind.adx_minus_di, 1)    if ind and getattr(ind, "adx_minus_di", None) is not None else None,
-                "sector_mom":     round(ind.sector_mom * 100, 2) if ind and getattr(ind, "sector_mom", None) is not None else None,
-                "tf_1d":  round(iscores["1d"],  3) if "1d"  in iscores else None,
-                "tf_1h":  round(iscores["1h"],  3) if "1h"  in iscores else None,
-                "tf_15m": round(iscores["15m"], 3) if "15m" in iscores else None,
-                "mtf_agreement": int(iscores["mtf_agreement"]) if "mtf_agreement" in iscores else None,
-                "ml_mult": round(iscores["ml_mult"], 3) if "ml_mult" in iscores else None,
-                "sector":   get_sector(sym) or "—",
-                "category": eng.dynamic_universe.last_result.get("categories", {}).get(sym, "Other"),
+                "reasons":      sig.reasons,
+                "or_high":      round(or_high, 2)   if or_high   is not None else None,
+                "or_low":       round(or_low, 2)    if or_low    is not None else None,
+                "gap_pct":      round(gap_pct * 100, 2) if gap_pct is not None else None,
+                "orb_pct_above": orb_pct_above,
+                "orb_phase":    orb_phase,
+                "sector":       get_sector(sym) or "—",
+                "category":     eng.dynamic_universe.last_result.get("categories", {}).get(sym, "Other"),
             })
         sig_list.sort(key=lambda x: -abs(x["score"]))
 
@@ -1241,22 +1233,25 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                         price = float(df["Close"].iloc[-1])
                 except Exception:
                     pass
+            orb_st_uni = eng._orb_session.get(sym)
             sig_list.append({
-                "symbol":       sym,
-                "price":        round(price, 2) if price else None,
-                "action":       scan_result.actions.get(sym, "HOLD") if scan_result else "HOLD",
-                "score":        round(scan_result.scores[sym], 3) if scan_result and sym in scan_result.scores else None,
-                "confidence":   None,
-                "rsi":          None,
-                "z_score":      None,
-                "atr_pct":      None,
-                "volume_ratio": None,
-                "est_size_pct": None,
-                "corr_blocked": None,
-                "reasons":      [],
-                "adx":          None,
-                "sector":       get_sector(sym) or "—",
-                "category":     eng.dynamic_universe.last_result.get("categories", {}).get(sym, "Other"),
+                "symbol":        sym,
+                "price":         round(price, 2) if price else None,
+                "action":        "HOLD",
+                "score":         None,
+                "confidence":    None,
+                "atr_pct":       None,
+                "volume_ratio":  None,
+                "est_size_pct":  None,
+                "corr_blocked":  None,
+                "reasons":       [],
+                "or_high":       round(orb_st_uni.or_high, 2)  if orb_st_uni and orb_st_uni.or_high  is not None else None,
+                "or_low":        round(orb_st_uni.or_low, 2)   if orb_st_uni and orb_st_uni.or_low   is not None else None,
+                "gap_pct":       round(orb_st_uni.gap_pct * 100, 2) if orb_st_uni and orb_st_uni.gap_pct is not None else None,
+                "orb_pct_above": None,
+                "orb_phase":     eng._orb_session.phase,
+                "sector":        get_sector(sym) or "—",
+                "category":      eng.dynamic_universe.last_result.get("categories", {}).get(sym, "Other"),
             })
 
     # ── Earnings warnings ─────────────────────────────────────────────────────
@@ -4726,57 +4721,56 @@ function closeChart() {
 
 function _buildDetailExplain(r) {
   if (!r) return {simple: '<p style="color:var(--text2)">No signal data</p>', technical: ''};
-  const fmtN = (v, d=1) => v == null ? null : Number(v).toFixed(d);
+  const fmtP = (v, d=2) => v == null ? '—' : '$' + Number(v).toFixed(d);
+  const fmtN = (v, d=1) => v == null ? '—' : Number(v).toFixed(d);
   const items = [];
 
-  if (r.rsi != null) {
-    const v = r.rsi;
-    let tone, label, detail;
-    if (v < 30)      { tone='bull'; label='Oversold (RSI)'; detail=`RSI ${fmtN(v)} — below 30, potential bounce`; }
-    else if (v < 45) { tone='bull'; label='Mildly Oversold'; detail=`RSI ${fmtN(v)} — below 45, selling easing`; }
-    else if (v < 55) { tone='neu';  label='RSI Neutral';     detail=`RSI ${fmtN(v)} — no directional bias`; }
-    else if (v < 70) { tone='bear'; label='Mildly Overbought'; detail=`RSI ${fmtN(v)} — buying strong, watch pullback`; }
-    else             { tone='bear'; label='Overbought (RSI)'; detail=`RSI ${fmtN(v)} — above 70, correction risk`; }
-    items.push({tone, label, detail});
+  // ORB Phase
+  const phase = r.orb_phase || 'UNKNOWN';
+  const phaseColor = phase === 'ACTIVE' ? '#22c55e' : phase === 'FORMING' ? '#f59e0b' : '#94a3b8';
+  items.push({tone: phase === 'ACTIVE' ? 'bull' : 'neu',
+    label: `ORB Phase: ${phase}`,
+    detail: phase === 'ACTIVE' ? 'Opening range formed — signals are live'
+          : phase === 'FORMING' ? 'Building opening range (9:30–10:00 ET)'
+          : phase === 'SCANNING' ? 'Pre-market scanning universe'
+          : phase === 'CLOSING' ? 'End-of-day close in progress'
+          : 'Outside trading hours'});
+
+  // OR High / Low
+  if (r.or_high != null && r.or_low != null) {
+    const range = (r.or_high - r.or_low).toFixed(2);
+    const tone = r.action === 'BUY' ? 'bull' : r.action === 'SELL' ? 'bear' : 'neu';
+    items.push({tone, label: `OR: ${fmtP(r.or_low)} – ${fmtP(r.or_high)}`,
+      detail: `Opening range ${fmtP(r.or_low)} – ${fmtP(r.or_high)} (width $${range}). BUY above ${fmtP(r.or_high)}, SELL below ${fmtP(r.or_low)}.`});
   }
-  if (r.macd_hist != null) {
-    const h = r.macd_hist, hp = r.macd_hist_prev;
-    const crossed = hp != null && ((h>0&&hp<=0)||(h<0&&hp>=0));
-    let tone, label, detail;
-    if      (h>0&&crossed)            { tone='bull'; label='MACD Bullish Cross'; detail='Histogram crossed above zero — fresh bullish momentum'; }
-    else if (h>0&&hp!=null&&h>hp)     { tone='bull'; label='MACD Bullish & Rising'; detail='Positive and rising — momentum building'; }
-    else if (h>0)                     { tone='bull'; label='MACD Bullish (Fading)'; detail='Positive but declining — momentum slowing'; }
-    else if (h<0&&crossed)            { tone='bear'; label='MACD Bearish Cross'; detail='Histogram crossed below zero — fresh bearish signal'; }
-    else if (h<0&&hp!=null&&h<hp)     { tone='bear'; label='MACD Bearish & Falling'; detail='Negative and falling — momentum weakening'; }
-    else                              { tone='bear'; label='MACD Bearish (Recovering)'; detail='Negative but improving'; }
-    items.push({tone, label, detail});
+
+  // Gap filter
+  if (r.gap_pct != null) {
+    const g = r.gap_pct;
+    const filtered = Math.abs(g) > 5;
+    const tone = filtered ? 'bear' : 'neu';
+    items.push({tone, label: `Gap: ${g >= 0 ? '+' : ''}${fmtN(g)}%`,
+      detail: filtered
+        ? `Gap of ${fmtN(g)}% exceeds 5% — stock is filtered out (too much pre-market move)`
+        : `Gap of ${g >= 0 ? '+' : ''}${fmtN(g)}% is within the 5% filter — stock qualifies for ORB`});
   }
-  if (r.ema_gap != null) {
-    const g = r.ema_gap;
-    const tone = g>0.02?'bull':g<-0.02?'bear':'neu';
-    const label = g>0.02?'Above EMA — Uptrend':g<-0.02?'Below EMA — Downtrend':'Near EMA';
-    items.push({tone, label, detail:`Price is ${(g*100).toFixed(1)}% ${g>=0?'above':'below'} the slow EMA`});
+
+  // Breakout distance
+  if (r.orb_pct_above != null && r.or_high != null) {
+    const pct = r.orb_pct_above;
+    const tone = pct > 0 ? 'bull' : 'neu';
+    items.push({tone, label: `+${fmtN(pct)}% above OR high`,
+      detail: `Price is ${fmtN(pct)}% above the OR high (${fmtP(r.or_high)}) — the further above, the stronger the ORB score`});
   }
-  if (r.bb_pct != null) {
-    const b = r.bb_pct;
-    const tone = b<0.2?'bull':b>0.8?'bear':'neu';
-    const label = b<0.2?'Near Lower Band':'Near Upper Band';
-    if (b<0.2||b>0.8) items.push({tone, label, detail:`Bollinger %B = ${(b*100).toFixed(0)}% — ${b<0.2?'potential support':'potential resistance'}`});
-  }
-  if (r.vwap_dev != null) {
-    const v = r.vwap_dev;
-    const tone = v<0?'bull':'bear';
-    items.push({tone, label:`${v<0?'Below':'Above'} VWAP`, detail:`Price ${Math.abs(v).toFixed(1)}% ${v<0?'below':'above'} VWAP — ${v<0?'potential buy zone':'selling pressure'}`});
-  }
-  if (r.adx != null) {
-    const a = r.adx;
-    const tone = a>=25?'bull':'neu';
-    items.push({tone, label:`ADX ${fmtN(a,0)} — ${a>=25?'Trending':'Choppy'}`, detail:`ADX ${a>=30?'strong':'moderate'} trend; ${a<20?'avoid trading in choppy market':'clear trend present'}`});
-  }
-  if (r.sector_mom != null) {
-    const s = r.sector_mom;
-    const tone = s>0?'bull':s<0?'bear':'neu';
-    items.push({tone, label:`Sector Momentum ${s>=0?'+':''}${s.toFixed(1)}%`, detail:`Stock ${s>=0?'outperforming':'underperforming'} sector by ${Math.abs(s).toFixed(1)}% over 5 days`});
+
+  // Volume confirmation
+  if (r.volume_ratio != null) {
+    const vr = r.volume_ratio;
+    const tone = vr >= 1 ? 'bull' : 'neu';
+    items.push({tone, label: `Volume ${fmtN(vr)}× avg`,
+      detail: vr >= 1
+        ? `Volume ${fmtN(vr)}× the per-minute average — confirms breakout strength`
+        : `Volume ${fmtN(vr)}× average — below 1× threshold, waiting for volume confirmation`});
   }
 
   const toneIcon = t => t==='bull'?'▲':t==='bear'?'▼':'●';
@@ -4786,13 +4780,13 @@ function _buildDetailExplain(r) {
     `<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
       <span style="color:${toneCol(it.tone)};font-size:11px;margin-top:2px">${toneIcon(it.tone)}</span>
       <span style="color:var(--text0);font-size:12px">${it.detail}</span>
-    </div>`).join('') : '<p style="color:var(--text2);font-size:12px">No indicators available</p>'}</div>`;
+    </div>`).join('') : '<p style="color:var(--text2);font-size:12px">No ORB data yet</p>'}</div>`;
 
   const techHtml = `<div style="padding:4px 0">${items.length ? items.map(it =>
     `<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
-      <span style="color:${toneCol(it.tone)};font-size:11px;font-weight:700;min-width:60px">${it.label.split('—')[0].trim()}</span>
+      <span style="color:${toneCol(it.tone)};font-size:11px;font-weight:700;min-width:80px">${it.label.split(':')[0].trim()}</span>
       <span style="color:var(--text1);font-size:12px">${it.detail}</span>
-    </div>`).join('') : '<p style="color:var(--text2);font-size:12px">No indicators available</p>'}</div>`;
+    </div>`).join('') : '<p style="color:var(--text2);font-size:12px">No ORB data yet</p>'}</div>`;
 
   return {simple: simpleHtml, technical: techHtml};
 }
@@ -4804,320 +4798,148 @@ function explainSignal(sym) {
   const r = (s.signals || []).find(x => x.symbol === sym);
   if (!r) return;
 
-  // helpers
-  const fmtN = (v, d=1) => v == null ? null : Number(v).toFixed(d);
-  const pct   = v => v == null ? null : (v * 100).toFixed(1) + '%';
+  const fmtP = (v, d=2) => v == null ? '—' : '$' + Number(v).toFixed(d);
+  const fmtN = (v, d=1) => v == null ? '—' : Number(v).toFixed(d);
+  const confPct = Math.round((r.confidence || 0) * 100);
 
   const items = [];
 
-  // ── RSI ──────────────────────────────────────────────────────────────────
-  if (r.rsi != null) {
-    const v = r.rsi;
-    let tone, label, detail;
-    if (v < 30) {
-      tone = 'bull'; label = 'Oversold (Bullish)';
-      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — below 30 signals oversold territory. The stock may be undervalued and due for a bounce.`;
-    } else if (v < 45) {
-      tone = 'bull'; label = 'Mildly Oversold';
-      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — below 45, leaning oversold. Selling pressure is easing.`;
-    } else if (v < 55) {
-      tone = 'neu'; label = 'Neutral';
-      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — in the neutral zone, no strong directional bias.`;
-    } else if (v < 70) {
-      tone = 'bear'; label = 'Mildly Overbought';
-      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — above 55, leaning overbought. Buying momentum is strong but watch for a pullback.`;
+  // ── ORB Phase ──────────────────────────────────────────────────────────────
+  const phase = r.orb_phase || 'UNKNOWN';
+  {
+    let tone, detail;
+    if (phase === 'ACTIVE') {
+      tone = 'bull';
+      detail = `Opening range is locked in — breakout signals are live. Any price above ${fmtP(r.or_high)} triggers a BUY; below ${fmtP(r.or_low)} triggers a SELL.`;
+    } else if (phase === 'FORMING') {
+      tone = 'neu';
+      detail = `Still in the 9:30–10:00 ET range-formation window. Watching the high/low — no trades yet.`;
+    } else if (phase === 'SCANNING') {
+      tone = 'neu';
+      detail = `Pre-market scan in progress (9:15–9:30 ET). Universe is being filtered for today's ORB candidates.`;
+    } else if (phase === 'CLOSING') {
+      tone = 'bear';
+      detail = `End-of-day close phase (after 3:45 PM ET). All positions are being exited.`;
     } else {
-      tone = 'bear'; label = 'Overbought (Bearish)';
-      detail = `RSI is <span class="explain-val">${fmtN(v)}</span> — above 70 signals overbought territory. The stock may be due for a correction.`;
+      tone = 'neu';
+      detail = `Outside trading hours. ORB signals are inactive.`;
     }
-    items.push({icon: tone === 'bull' ? '📊' : tone === 'bear' ? '📊' : '📊', tone, label, detail});
+    items.push({icon: '🕐', tone, label: `Phase: ${phase}`, detail});
   }
 
-  // ── MACD ──────────────────────────────────────────────────────────────────
-  if (r.macd_hist != null) {
-    const h = r.macd_hist, hp = r.macd_hist_prev;
-    let tone, label, detail;
-    const crossed = hp != null && ((h > 0 && hp <= 0) || (h < 0 && hp >= 0));
-    if (h > 0 && crossed) {
-      tone = 'bull'; label = 'MACD Bullish Crossover';
-      detail = `MACD histogram just crossed above zero — a fresh bullish signal indicating momentum is turning upward.`;
-    } else if (h > 0 && hp != null && h > hp) {
-      tone = 'bull'; label = 'MACD Bullish & Strengthening';
-      detail = `MACD histogram is <span class="explain-val">positive and rising</span> — bullish momentum is building.`;
-    } else if (h > 0) {
-      tone = 'bull'; label = 'MACD Bullish (Fading)';
-      detail = `MACD histogram is positive but <span class="explain-val">declining</span> — bullish momentum exists but may be weakening.`;
-    } else if (h < 0 && crossed) {
-      tone = 'bear'; label = 'MACD Bearish Crossover';
-      detail = `MACD histogram just crossed below zero — a fresh bearish signal indicating momentum is turning downward.`;
-    } else if (h < 0 && hp != null && h < hp) {
-      tone = 'bear'; label = 'MACD Bearish & Strengthening';
-      detail = `MACD histogram is <span class="explain-val">negative and falling</span> — bearish momentum is building.`;
+  // ── Opening Range ──────────────────────────────────────────────────────────
+  if (r.or_high != null && r.or_low != null) {
+    const width = (r.or_high - r.or_low).toFixed(2);
+    const price = r.price || 0;
+    let tone, detail;
+    if (price > r.or_high) {
+      tone = 'bull';
+      detail = `Price ${fmtP(price)} has broken ABOVE the opening range high of ${fmtP(r.or_high)}. The OR width was $${width}.`;
+    } else if (price < r.or_low) {
+      tone = 'bear';
+      detail = `Price ${fmtP(price)} has broken BELOW the opening range low of ${fmtP(r.or_low)}. The OR width was $${width}.`;
     } else {
-      tone = 'bear'; label = 'MACD Bearish (Recovering)';
-      detail = `MACD histogram is negative but <span class="explain-val">recovering</span> — bearish momentum may be easing.`;
+      tone = 'neu';
+      detail = `Price ${fmtP(price)} is inside the opening range ${fmtP(r.or_low)}–${fmtP(r.or_high)} (width $${width}). Waiting for a breakout.`;
     }
-    items.push({icon: '📈', tone, label, detail});
+    items.push({icon: '📏', tone, label: `Opening Range: ${fmtP(r.or_low)} – ${fmtP(r.or_high)}`, detail});
   }
 
-  // ── EMA Trend ──────────────────────────────────────────────────────────────
-  if (r.ema_fast != null && r.ema_slow != null) {
-    const ef = r.ema_fast, es = r.ema_slow;
-    const spread = ((ef - es) / es * 100).toFixed(2);
-    const tone = ef > es ? 'bull' : 'bear';
-    const label = ef > es ? 'EMA Uptrend' : 'EMA Downtrend';
-    const detail = ef > es
-      ? `Fast EMA (<span class="explain-val">$${fmtN(ef,2)}</span>) is above slow EMA (<span class="explain-val">$${fmtN(es,2)}</span>) — the stock is in a short-term <strong>uptrend</strong> (spread ${spread}%).`
-      : `Fast EMA (<span class="explain-val">$${fmtN(ef,2)}</span>) is below slow EMA (<span class="explain-val">$${fmtN(es,2)}</span>) — the stock is in a short-term <strong>downtrend</strong> (spread ${spread}%).`;
-    items.push({icon: '📉', tone, label, detail});
+  // ── Gap Filter ─────────────────────────────────────────────────────────────
+  if (r.gap_pct != null) {
+    const g = r.gap_pct;
+    const filtered = Math.abs(g) > 5;
+    const tone = filtered ? 'bear' : 'neu';
+    const detail = filtered
+      ? `Today's open gapped ${g >= 0 ? '+' : ''}${fmtN(g)}% from yesterday's close — this exceeds the 5% limit, so the stock is skipped to avoid chasing pre-market moves.`
+      : `Today's gap of ${g >= 0 ? '+' : ''}${fmtN(g)}% is within the ±5% filter. The stock qualifies for ORB trading today.`;
+    items.push({icon: '🔍', tone, label: `Gap: ${g >= 0 ? '+' : ''}${fmtN(g)}%`, detail});
   }
 
-  // ── Bollinger Bands ────────────────────────────────────────────────────────
-  if (r.bb_upper != null && r.bb_lower != null && r.price) {
-    const p = r.price, bu = r.bb_upper, bl = r.bb_lower;
-    let tone, label, detail;
-    if (p < bl) {
-      tone = 'bull'; label = 'Below Lower Bollinger Band';
-      detail = `Price <span class="explain-val">$${fmtN(p,2)}</span> is below the lower band (<span class="explain-val">$${fmtN(bl,2)}</span>) — statistically oversold. Mean-reversion setups often appear here.`;
-    } else if (p > bu) {
-      tone = 'bear'; label = 'Above Upper Bollinger Band';
-      detail = `Price <span class="explain-val">$${fmtN(p,2)}</span> is above the upper band (<span class="explain-val">$${fmtN(bu,2)}</span>) — statistically overbought. The stock is extended above its normal range.`;
-    } else {
-      const pos = Math.round((p - bl) / (bu - bl) * 100);
-      tone = 'neu'; label = 'Within Bollinger Bands';
-      detail = `Price is within the bands at <span class="explain-val">${pos}%</span> of the range (lower <span class="explain-val">$${fmtN(bl,2)}</span> → upper <span class="explain-val">$${fmtN(bu,2)}</span>). Normal trading range.`;
-    }
-    items.push({icon: '〰️', tone, label, detail});
+  // ── Breakout Distance ──────────────────────────────────────────────────────
+  if (r.orb_pct_above != null) {
+    const pct = r.orb_pct_above;
+    const score = r.score || 0;
+    const tone = 'bull';
+    detail = `Price is ${fmtN(pct)}% above the OR high — translating to an ORB score of <strong>${score.toFixed(3)}</strong> (range 0.6–0.9). Higher = further breakout.`;
+    items.push({icon: '🚀', tone, label: `${fmtN(pct)}% above OR high`, detail});
   }
 
-  // ── Z-score ────────────────────────────────────────────────────────────────
-  if (r.z_score != null) {
-    const z = r.z_score;
-    let tone, label, detail;
-    if (z <= -2) {
-      tone = 'bull'; label = 'Deeply Oversold (Z-Score)';
-      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is more than 2 standard deviations below its 20-day mean. Strong mean-reversion candidate.`;
-    } else if (z <= -1) {
-      tone = 'bull'; label = 'Below Average (Z-Score)';
-      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is below its recent average, a mild mean-reversion opportunity.`;
-    } else if (z < 1) {
-      tone = 'neu'; label = 'Near Average (Z-Score)';
-      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is close to its 20-day average. No strong mean-reversion signal.`;
-    } else if (z < 2) {
-      tone = 'bear'; label = 'Above Average (Z-Score)';
-      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is above its recent average. Mild overextension.`;
-    } else {
-      tone = 'bear'; label = 'Significantly Extended (Z-Score)';
-      detail = `Z-score is <span class="explain-val">${fmtN(z,2)}</span> — price is more than 2 standard deviations above its 20-day mean. May be overextended.`;
-    }
-    items.push({icon: '📐', tone, label, detail});
-  }
-
-  // ── Momentum (ROC) ─────────────────────────────────────────────────────────
-  if (r.roc_10 != null) {
-    const roc = r.roc_10;
-    let tone, label, detail;
-    if (roc > 0.08) {
-      tone = 'bull'; label = 'Strong Upward Momentum';
-      detail = `Price is up <span class="explain-val">${pct(roc)}</span> over the last 10 days — strong bullish momentum.`;
-    } else if (roc > 0.02) {
-      tone = 'bull'; label = 'Mild Upward Momentum';
-      detail = `Price is up <span class="explain-val">${pct(roc)}</span> over the last 10 days — positive but modest momentum.`;
-    } else if (roc > -0.02) {
-      tone = 'neu'; label = 'Flat Momentum';
-      detail = `Price has moved <span class="explain-val">${pct(roc)}</span> over the last 10 days — essentially flat, no directional momentum.`;
-    } else if (roc > -0.08) {
-      tone = 'bear'; label = 'Mild Downward Momentum';
-      detail = `Price is down <span class="explain-val">${pct(roc)}</span> over the last 10 days — moderate selling pressure.`;
-    } else {
-      tone = 'bear'; label = 'Strong Downward Momentum';
-      detail = `Price is down <span class="explain-val">${pct(roc)}</span> over the last 10 days — heavy selling pressure.`;
-    }
-    items.push({icon: '🚀', tone, label, detail});
-  }
-
-  // ── StochRSI ───────────────────────────────────────────────────────────────
-  if (r.stoch_rsi != null) {
-    const sr = r.stoch_rsi;
-    let tone, label, detail;
-    if (sr < 20) {
-      tone = 'bull'; label = 'StochRSI Oversold';
-      detail = `StochRSI is <span class="explain-val">${fmtN(sr)}</span> — deeply oversold momentum reading. Historically a precursor to short-term bounces.`;
-    } else if (sr > 80) {
-      tone = 'bear'; label = 'StochRSI Overbought';
-      detail = `StochRSI is <span class="explain-val">${fmtN(sr)}</span> — deeply overbought momentum reading. Pullbacks are more common at these levels.`;
-    } else {
-      tone = 'neu'; label = 'StochRSI Neutral';
-      detail = `StochRSI is <span class="explain-val">${fmtN(sr)}</span> — in the neutral 20–80 range, no extreme momentum signal.`;
-    }
-    items.push({icon: '⚡', tone, label, detail});
-  }
-
-  // ── Volume ─────────────────────────────────────────────────────────────────
+  // ── Volume Confirmation ────────────────────────────────────────────────────
   if (r.volume_ratio != null) {
     const vr = r.volume_ratio;
-    let tone, label, detail;
-    if (vr >= 3) {
-      tone = 'bull'; label = 'Exceptional Volume';
-      detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> its average volume — unusually high activity often signals institutional interest or a major catalyst.`;
-    } else if (vr >= 2) {
-      tone = 'bull'; label = 'High Volume';
-      detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> its average volume — elevated participation lends conviction to the current move.`;
-    } else if (vr >= 1.2) {
-      tone = 'neu'; label = 'Above-Average Volume';
-      detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> its average volume — slightly elevated, adds modest confirmation.`;
-    } else {
-      tone = 'neu'; label = 'Normal Volume';
-      detail = `Trading at <span class="explain-val">${vr.toFixed(1)}×</span> average — normal volume. The signal lacks volume confirmation.`;
-    }
-    items.push({icon: '📦', tone, label, detail});
+    const tone = vr >= 1 ? 'bull' : 'neu';
+    const detail = vr >= 1
+      ? `Volume is ${fmtN(vr)}× the per-minute average — confirms institutional participation in the breakout.`
+      : `Volume is only ${fmtN(vr)}× average (need ≥1×). The breakout lacks volume confirmation — signal is on hold.`;
+    items.push({icon: '📦', tone, label: `Volume: ${fmtN(vr)}× avg`, detail});
   }
 
-  // ── VWAP ───────────────────────────────────────────────────────────────────
-  if (r.vwap != null && r.price != null) {
-    const dev = (r.price - r.vwap) / r.vwap;
-    const devPct = (dev * 100).toFixed(1);
-    let tone, label, detail;
-    if (dev <= -0.03) {
-      tone = 'bull'; label = 'Well Below VWAP (Bullish)';
-      detail = `Price <span class="explain-val">$${fmtN(r.price,2)}</span> is <span class="explain-val">${Math.abs(devPct)}%</span> below VWAP (<span class="explain-val">$${fmtN(r.vwap,2)}</span>) — trading at a significant discount to fair value. Institutions often accumulate here.`;
-    } else if (dev < 0) {
-      tone = 'bull'; label = 'Below VWAP';
-      detail = `Price is <span class="explain-val">${Math.abs(devPct)}%</span> below VWAP (<span class="explain-val">$${fmtN(r.vwap,2)}</span>) — slight discount to the volume-weighted average. Mild bullish lean.`;
-    } else if (dev >= 0.03) {
-      tone = 'bear'; label = 'Well Above VWAP (Bearish)';
-      detail = `Price <span class="explain-val">$${fmtN(r.price,2)}</span> is <span class="explain-val">${devPct}%</span> above VWAP (<span class="explain-val">$${fmtN(r.vwap,2)}</span>) — trading at a premium to fair value. Extended moves above VWAP often revert.`;
+  // ── Score explanation ──────────────────────────────────────────────────────
+  {
+    const sc = r.score;
+    let tone, detail;
+    if (sc >= 0.6) {
+      tone = 'bull';
+      detail = `ORB score ${sc} signals an active breakout BUY. Scores 0.6–0.9 represent confirmed breakouts above the OR high.`;
+    } else if (sc === 0.1) {
+      tone = 'neu';
+      detail = `Score 0.1: price is above the OR high but volume hasn't confirmed yet. Holding until 1× avg/min volume is reached.`;
+    } else if (sc <= -0.8) {
+      tone = 'bear';
+      detail = `Score −0.8: price broke below the OR low — a bearish breakdown. Any open position should be exited immediately.`;
     } else {
-      tone = 'neu'; label = 'Near VWAP';
-      detail = `Price is <span class="explain-val">${devPct >= 0 ? '+' : ''}${devPct}%</span> relative to VWAP (<span class="explain-val">$${fmtN(r.vwap,2)}</span>) — essentially at fair value. No VWAP edge.`;
+      tone = 'neu';
+      detail = `Score 0: price is inside the opening range. No directional signal yet.`;
     }
-    items.push({icon: '⚖️', tone, label, detail});
+    items.push({icon: '🎯', tone, label: `ORB Score: ${sc}`, detail});
   }
 
-  // ── ADX ────────────────────────────────────────────────────────────────────
-  if (r.adx != null) {
-    const adx = r.adx, pdi = r.adx_plus_di, mdi = r.adx_minus_di;
-    let tone, label, detail;
-    if (adx < 20) {
-      tone = 'neu'; label = 'No Clear Trend (ADX)';
-      detail = `ADX is <span class="explain-val">${fmtN(adx)}</span> — below 20, indicating a ranging, trendless market. Signals in this environment have lower reliability.`;
-    } else if (adx < 25) {
-      const dir = pdi != null && mdi != null ? (pdi > mdi ? 'emerging uptrend' : 'emerging downtrend') : 'weak trend';
-      tone = pdi != null && pdi > (mdi||0) ? 'bull' : 'bear';
-      label = 'Weak Trend (ADX)';
-      detail = `ADX is <span class="explain-val">${fmtN(adx)}</span> — a ${dir} is forming but not yet strong.${pdi != null && mdi != null ? ` +DI <span class="explain-val">${fmtN(pdi)}</span> vs -DI <span class="explain-val">${fmtN(mdi)}</span>.` : ''}`;
-    } else if (adx < 40) {
-      tone = pdi != null && pdi > (mdi||0) ? 'bull' : 'bear';
-      const dir = pdi != null && pdi > (mdi||0) ? 'uptrend' : 'downtrend';
-      label = `Strong ${dir.charAt(0).toUpperCase() + dir.slice(1)} (ADX)`;
-      detail = `ADX is <span class="explain-val">${fmtN(adx)}</span> — a strong ${dir} is in force.${pdi != null && mdi != null ? ` +DI <span class="explain-val">${fmtN(pdi)}</span> vs -DI <span class="explain-val">${fmtN(mdi)}</span>.` : ''} Trending signals are more reliable here.`;
-    } else {
-      tone = pdi != null && pdi > (mdi||0) ? 'bull' : 'bear';
-      const dir = pdi != null && pdi > (mdi||0) ? 'uptrend' : 'downtrend';
-      label = `Very Strong Trend (ADX)`;
-      detail = `ADX is <span class="explain-val">${fmtN(adx)}</span> — an extremely strong ${dir}. Momentum is dominant; mean-reversion strategies may be risky.`;
-    }
-    items.push({icon: '📡', tone, label, detail});
-  }
-
-  // ── Sector Momentum ─────────────────────────────────────────────────────────
-  // Note: r.sector_mom is already in percentage units (e.g. 3.5 = 3.5%)
-  if (r.sector_mom != null) {
-    const sm = r.sector_mom;
-    const smPct = Math.abs(sm).toFixed(1);
-    let tone, label, detail;
-    if (sm >= 3) {
-      tone = 'bull'; label = 'Strong Sector Outperformance';
-      detail = `This stock is outperforming its sector by <span class="explain-val">+${smPct}%</span> over the last 5 days — strong relative strength signals leadership. Institutions favor sector leaders.`;
-    } else if (sm >= 1) {
-      tone = 'bull'; label = 'Mild Sector Outperformance';
-      detail = `This stock is outperforming its sector by <span class="explain-val">+${smPct}%</span> over 5 days — slight relative strength advantage.`;
-    } else if (sm > -1) {
-      tone = 'neu'; label = 'In Line With Sector';
-      detail = `This stock is moving in line with its sector (relative performance: <span class="explain-val">${sm.toFixed(1)}%</span> over 5 days). No standout relative strength.`;
-    } else if (sm > -3) {
-      tone = 'bear'; label = 'Mild Sector Underperformance';
-      detail = `This stock is underperforming its sector by <span class="explain-val">${smPct}%</span> over 5 days — slight relative weakness.`;
-    } else {
-      tone = 'bear'; label = 'Strong Sector Underperformance';
-      detail = `This stock is underperforming its sector by <span class="explain-val">${smPct}%</span> over the last 5 days — a laggard within its sector. Consider why it's being left behind.`;
-    }
-    items.push({icon: '🏭', tone, label, detail});
-  }
-
-  // ── Build Simple Section ───────────────────────────────────────────────────
-  const bullItems = items.filter(i => i.tone === 'bull');
-  const bearItems = items.filter(i => i.tone === 'bear');
-  const confPct = Math.round(r.confidence * 100);
-
+  // ── Verdict ────────────────────────────────────────────────────────────────
   let verdictText;
   if (r.action === 'BUY') {
-    verdictText = `The algorithm thinks <strong>${sym}</strong> looks like a <strong>buying opportunity</strong> right now (${confPct}% confidence).`;
+    verdictText = `<strong>${sym}</strong> is showing an ORB breakout — price has cleared the opening range high with volume. The algorithm rates this a <strong>BUY</strong> (${confPct}% confidence).`;
   } else if (r.action === 'SELL') {
-    verdictText = `The algorithm is flagging <strong>${sym}</strong> as a potential <strong>sell</strong> — conditions are turning unfavorable (${confPct}% confidence).`;
+    verdictText = `<strong>${sym}</strong> has broken below the opening range low — a bearish breakdown. The algorithm signals a <strong>SELL</strong>.`;
   } else {
-    verdictText = `The algorithm says <strong>wait</strong> on <strong>${sym}</strong> — the signals aren't clear enough to act on yet.`;
+    verdictText = `<strong>${sym}</strong> is in <strong>HOLD</strong> mode — either the range hasn't formed yet, the gap was too large, or volume hasn't confirmed a breakout.`;
   }
 
   const simpleReasons = [];
-  if (r.rsi != null) {
-    if (r.rsi < 30) simpleReasons.push("The stock has dropped heavily and looks oversold — like a sale where the price fell more than usual. Oversold stocks often bounce back.");
-    else if (r.rsi < 45) simpleReasons.push("Selling pressure has been easing off lately, suggesting the recent dip may be running out of steam.");
-    else if (r.rsi > 70) simpleReasons.push("The stock has been on a strong run and is looking stretched — lots of buyers have already piled in, making further gains harder to sustain.");
-    else if (r.rsi > 55) simpleReasons.push("Recent buying momentum has been healthy, but the stock isn't overextended yet.");
+  if (r.or_high != null && r.or_low != null && r.price != null) {
+    if (r.price > r.or_high) simpleReasons.push(`The price has pushed above the first 30 minutes of trading's highest point ($${r.or_high.toFixed(2)}) — like breaking out above an early ceiling. This is the ORB buy signal.`);
+    else if (r.price < r.or_low) simpleReasons.push(`The price has dropped below the first 30 minutes of trading's lowest point ($${r.or_low.toFixed(2)}) — the market rejected the stock early. Exiting to protect capital.`);
+    else simpleReasons.push(`Price is still between the opening range high ($${r.or_high.toFixed(2)}) and low ($${r.or_low.toFixed(2)}). Waiting for a clear break in either direction.`);
   }
-  if (r.macd_hist != null) {
-    const h = r.macd_hist, hp = r.macd_hist_prev;
-    const crossed = hp != null && ((h > 0 && hp <= 0) || (h < 0 && hp >= 0));
-    if (h > 0 && crossed) simpleReasons.push("Momentum just shifted from negative to positive — like a car switching from reverse into drive. This is often an early buy signal.");
-    else if (h > 0 && hp != null && h > hp) simpleReasons.push("Buying momentum is building and growing stronger each day — the move looks like it has room to continue.");
-    else if (h < 0 && crossed) simpleReasons.push("Momentum just shifted from positive to negative — the upward drive is gone and sellers are taking over.");
-    else if (h < 0 && hp != null && h < hp) simpleReasons.push("Selling pressure is intensifying — the stock has been going down and the pace is accelerating.");
+  if (r.gap_pct != null && Math.abs(r.gap_pct) > 5) {
+    simpleReasons.push(`The stock already moved ${r.gap_pct.toFixed(1)}% before the open — that's too much pre-market excitement. The ORB strategy skips stocks that gapped too far to avoid chasing moves.`);
   }
-  if (r.bb_upper != null && r.bb_lower != null && r.price) {
-    if (r.price < r.bb_lower) simpleReasons.push("The price has dropped outside its normal range — like a rubber band stretched to its limit. It doesn't always snap back instantly, but this level has historically attracted buyers.");
-    else if (r.price > r.bb_upper) simpleReasons.push("The price has risen outside its normal range — like a rubber band stretched upward. Extended runs like this tend to slow down or pull back.");
+  if (r.volume_ratio != null && r.volume_ratio < 1 && r.price > (r.or_high || Infinity)) {
+    simpleReasons.push(`The breakout above the OR high hasn't attracted enough volume yet (${r.volume_ratio.toFixed(1)}× vs 1× required). Low-volume breakouts fail more often, so the algorithm waits.`);
   }
-  if (r.ema_fast != null && r.ema_slow != null) {
-    if (r.ema_fast > r.ema_slow) simpleReasons.push("The short-term price trend is above the longer-term average — the stock is in an uptrend and buyers have been in control recently.");
-    else simpleReasons.push("The short-term price trend has fallen below the longer-term average — the stock is in a downtrend and sellers have been in control.");
-  }
-  if (r.vwap != null && r.price != null) {
-    const dev = (r.price - r.vwap) / r.vwap;
-    if (dev <= -0.03) simpleReasons.push(`The stock is trading ${(Math.abs(dev)*100).toFixed(1)}% below what most people paid for it today — you'd be buying at a discount to the day's fair value.`);
-    else if (dev >= 0.03) simpleReasons.push(`The stock is trading ${(dev*100).toFixed(1)}% above what most people paid for it today — it's already at a premium, making a profitable entry harder.`);
-  }
-  if (r.volume_ratio != null && r.volume_ratio >= 2) {
-    simpleReasons.push(`There's ${r.volume_ratio.toFixed(1)}× the usual trading activity today — heavy volume often means big investors are making moves, which can amplify a signal's reliability.`);
-  }
-  if (r.sector_mom != null) {
-    if (r.sector_mom >= 3) simpleReasons.push(`It's outperforming other stocks in its industry by ${r.sector_mom.toFixed(1)}% this week — sector leaders often continue to lead.`);
-    else if (r.sector_mom <= -3) simpleReasons.push(`It's lagging other stocks in its industry by ${Math.abs(r.sector_mom).toFixed(1)}% this week — a stock falling behind its peers is a warning sign.`);
-  }
-  if (r.adx != null && r.adx < 20) simpleReasons.push("The stock is in a choppy, sideways phase right now — there's no strong trend in either direction, which makes signals less reliable.");
 
-  const topReasons = simpleReasons.slice(0, 3);
+  const bullItems = items.filter(i => i.tone === 'bull');
+  const bearItems = items.filter(i => i.tone === 'bear');
   let closingLine;
   if (r.action === 'BUY') {
-    closingLine = `In short: ${bullItems.length} of ${items.length} indicators are pointing bullish. The algorithm sees more reasons to buy than not — but no trade is guaranteed.`;
+    closingLine = `In short: price broke out, volume confirmed. The ORB strategy is active with a score of ${r.score}.`;
   } else if (r.action === 'SELL') {
-    closingLine = `In short: ${bearItems.length} of ${items.length} indicators are pointing bearish. The algorithm sees more reasons to reduce than hold.`;
+    closingLine = `In short: the opening range failed. Exiting to limit downside.`;
   } else {
-    closingLine = `In short: the signals are mixed. Waiting for a clearer setup is often the right call.`;
+    closingLine = `In short: waiting for the opening range to form or for a confirmed breakout with volume.`;
   }
 
   const simpleHtml = `<div class="simple-explain">
     <div class="simple-verdict">${verdictText}</div>
-    ${topReasons.map(txt => `<p>• ${txt}</p>`).join('')}
-    ${topReasons.length === 0 ? '<p>Not enough indicator data to generate a full explanation.</p>' : ''}
+    ${simpleReasons.map(txt => `<p>• ${txt}</p>`).join('')}
+    ${simpleReasons.length === 0 ? '<p>Waiting for opening range data.</p>' : ''}
     <p class="simple-closing">${closingLine}</p>
   </div>`;
 
-  // ── Build Technical Section ────────────────────────────────────────────────
   const scoreHtml = `<div class="explain-score">
-    Composite score: <strong>${r.score >= 0 ? '+' : ''}${r.score} / ±1.0</strong>
+    ORB score: <strong>${r.score >= 0 ? '+' : ''}${r.score} / ±1.0</strong>
     &nbsp;·&nbsp; Confidence: <strong>${confPct}%</strong>
-    ${r.ml_mult != null ? `&nbsp;·&nbsp; ML multiplier: <strong>${r.ml_mult.toFixed(2)}×</strong>` : ''}
+    &nbsp;·&nbsp; Phase: <strong>${phase}</strong>
   </div>`;
 
   const itemsHtml = items.map(it => `
@@ -5138,7 +4960,6 @@ function explainSignal(sym) {
 
   const techHtml = scoreHtml + itemsHtml + reasonsHtml;
 
-  // ── Assemble tabbed modal ──────────────────────────────────────────────────
   const modalHtml = `
     <div class="explain-tabs">
       <button class="explain-tab-btn active" onclick="switchExplainTab('simple',this)">Simple</button>
@@ -5147,7 +4968,6 @@ function explainSignal(sym) {
     <div class="explain-section active" id="explain-sec-simple">${simpleHtml}</div>
     <div class="explain-section" id="explain-sec-technical">${techHtml}</div>`;
 
-  // Update modal
   document.getElementById('explain-sym').textContent = sym;
   const pill = document.getElementById('explain-pill');
   pill.className = `pill pill-${r.action}`;
@@ -5155,6 +4975,7 @@ function explainSignal(sym) {
   document.getElementById('explain-body').innerHTML = modalHtml;
   document.getElementById('explain-modal').classList.add('active');
 }
+
 
 function switchExplainTab(tab, btn) {
   ['simple', 'technical'].forEach(id => {
