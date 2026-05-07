@@ -3430,8 +3430,9 @@ body.light .simple-verdict strong{color:#0f172a}
           <th class="sort-hdr" data-col="change_pct" onclick="sortWl('change_pct')" id="wlh-change_pct">Day %</th>
           <th class="sort-hdr" data-col="volume_ratio" onclick="sortWl('volume_ratio')" id="wlh-volume_ratio">Volume</th>
           <th class="sort-hdr sort-desc" data-col="score" onclick="sortWl('score')" id="wlh-score">Score</th>
+          <th class="sort-hdr" data-col="action" onclick="sortWl('action')" id="wlh-action">Signal</th>
         </tr></thead>
-        <tbody id="wl-body"><tr><td colspan="6" class="empty">No watchlist data yet — run a cycle</td></tr></tbody>
+        <tbody id="wl-body"><tr><td colspan="7" class="empty">No watchlist data yet — run a cycle</td></tr></tbody>
       </table></div>
     </div>
     <!-- stock search & favorites -->
@@ -4045,7 +4046,7 @@ function renderWatchlistTable() {
   });
 
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="7" class="empty">No watchlist data yet — run a cycle</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="empty">No watchlist data yet — run a cycle</td></tr>';
     return;
   }
 
@@ -4057,6 +4058,9 @@ function renderWatchlistTable() {
     const vrStr  = vr == null ? '—' : vr.toFixed(1) + '×';
     const scCol  = r.score == null ? '#475569' : r.action === 'BUY' ? '#22c55e' : r.action === 'SELL' ? '#ef4444' : '#94a3b8';
     const scStr  = r.score == null ? '—' : (r.score >= 0 ? '+' : '') + fmt(r.score, 3);
+    const sigBg  = r.action === 'BUY' ? 'rgba(34,197,94,.15)' : r.action === 'SELL' ? 'rgba(239,68,68,.15)' : 'transparent';
+    const sigCol = r.action === 'BUY' ? '#22c55e' : r.action === 'SELL' ? '#ef4444' : '#475569';
+    const sigStr = r.action === 'BUY' ? 'BUY' : r.action === 'SELL' ? 'SELL' : 'HOLD';
     const isSel  = r.symbol === _wlSelected;
     return `<tr data-sym="${r.symbol}" class="${isSel ? 'wl-row-sel' : ''}" onclick="highlightWlTicker('${r.symbol}')">
       <td class="sym-link" style="font-weight:700" onclick="event.stopPropagation();openChart('${r.symbol}')" title="Click for detail">${r.symbol}</td>
@@ -4065,6 +4069,7 @@ function renderWatchlistTable() {
       <td style="color:${pctCol};font-weight:600">${pctStr}</td>
       <td style="color:${vrCol}">${vrStr}</td>
       <td style="color:${scCol};font-weight:600">${scStr}</td>
+      <td><span style="color:${sigCol};background:${sigBg};padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700">${sigStr}</span></td>
     </tr>`;
   }).join('');
 }
