@@ -17,6 +17,7 @@ from .executor import PaperExecutor
 from .orb import (
     ORBSession,
     fetch_gap_pcts,
+    fetch_historical_highs,
     fetch_opening_range_bars,
     fetch_prev_day_levels,
     fetch_latest_1min_volume,
@@ -298,6 +299,18 @@ class TradingEngine:
                 )
             except Exception as e:
                 logger.warning(f"  [ORB] Gap data fetch failed: {e}")
+            try:
+                logger.info("  [ORB] Fetching 20-day and 52-week highs for confluence…")
+                hist_highs = fetch_historical_highs(
+                    self._orb_session.watchlist(),
+                    api_key=self.config.alpaca_api_key,
+                    secret_key=self.config.alpaca_secret_key,
+                )
+                for sym, (h20, h52) in hist_highs.items():
+                    self._orb_session.set_historical_highs(sym, h20, h52)
+                logger.info(f"  [ORB] Historical highs loaded for {len(hist_highs)} symbols")
+            except Exception as e:
+                logger.warning(f"  [ORB] Historical highs fetch failed: {e}")
 
         # ── Phase 4: 3:45 PM — close everything and stop trading ─────────────
         if et_mins >= 15 * 60 + 45:
@@ -752,9 +765,12 @@ class TradingEngine:
             sig = self._compute_orb_signal(symbol, ind, current_price, orb_st, vol_1min)
             # Embed ORB metadata into indicator_scores for dashboard consumption
             if orb_st is not None:
-                sig.indicator_scores["orb_or_high"]  = orb_st.or_high
-                sig.indicator_scores["orb_or_low"]   = orb_st.or_low
-                sig.indicator_scores["orb_gap_pct"]  = orb_st.gap_pct
+                sig.indicator_scores["orb_or_high"]   = orb_st.or_high
+                sig.indicator_scores["orb_or_low"]    = orb_st.or_low
+                sig.indicator_scores["orb_gap_pct"]   = orb_st.gap_pct
+                sig.indicator_scores["orb_high_20d"]  = orb_st.high_20d
+                sig.indicator_scores["orb_high_52w"]  = orb_st.high_52w
+                sig.indicator_scores["orb_prev_high"] = orb_st.prev_day_high
             sig.indicator_scores["orb_phase"] = self._orb_session.phase
             signals[symbol] = sig
             ind_map[symbol] = ind
@@ -1332,14 +1348,28 @@ class TradingEngine:
             return SignalResult(action="HOLD", score=0.1, confidence=0.1,
                                 reasons=[f"ORB above ${or_high:.2f} — vol {bar_vol:.0f} < 1x avg {avg_per_min:.0f}"])
 
-        score = round(min(0.9, 0.6 + (current_price - or_high) / or_high * 10), 4)
-        logger.info(f"  [ORB] {symbol}: breakout BUY @ ${current_price:.2f} vol={bar_vol:.0f}")
+        # Multi-timeframe confluence score
+        score = 0.60   # base: OR high confirmed breakout
+        confluence_reasons = [f"ORB breakout @ ${current_price:.2f} above OR ${or_high:.2f}"]
+
+        if orb_st.prev_day_high is not None and current_price > orb_st.prev_day_high:
+            score += 0.10
+            confluence_reasons.append(f"Above prev-day high ${orb_st.prev_day_high:.2f} (+0.10)")
+
+        if orb_st.high_20d is not None and current_price > orb_st.high_20d:
+            score += 0.10
+            confluence_reasons.append(f"Above 20-day high ${orb_st.high_20d:.2f} (+0.10)")
+
+        if orb_st.high_52w is not None and current_price > orb_st.high_52w:
+            score += 0.15
+            confluence_reasons.append(f"Above 52-week high ${orb_st.high_52w:.2f} (+0.15)")
+
+        score = round(min(0.95, score), 4)
+        confluence_reasons.append(f"Vol {bar_vol:.0f} >= 1x avg {avg_per_min:.0f}")
+        logger.info(f"  [ORB] {symbol}: breakout BUY @ ${current_price:.2f} score={score:+.3f} vol={bar_vol:.0f}")
         return SignalResult(action="BUY", score=score,
-                            confidence=round(min(0.95, score + 0.05), 4),
-                            reasons=[
-                                f"ORB breakout @ ${current_price:.2f} above ${or_high:.2f}",
-                                f"Vol {bar_vol:.0f} >= 1x avg {avg_per_min:.0f}",
-                            ])
+                            confidence=round(min(0.99, score + 0.04), 4),
+                            reasons=confluence_reasons)
 
     def _log_summary(self, prices: Dict[str, float]) -> None:
         s = self.portfolio.get_summary(prices)

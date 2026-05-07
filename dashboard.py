@@ -1185,9 +1185,12 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
             if sig.action == "BUY" and ind and ind.atr_pct:
                 raw = eng.risk.compute_position_pct(sig.confidence, ind.atr_pct)
                 est_size_pct = round(raw * 100, 1)
-            or_high  = iscores.get("orb_or_high")
-            or_low   = iscores.get("orb_or_low")
-            gap_pct  = iscores.get("orb_gap_pct")
+            or_high   = iscores.get("orb_or_high")
+            or_low    = iscores.get("orb_or_low")
+            gap_pct   = iscores.get("orb_gap_pct")
+            high_20d  = iscores.get("orb_high_20d")
+            high_52w  = iscores.get("orb_high_52w")
+            prev_high = iscores.get("orb_prev_high")
             orb_phase = iscores.get("orb_phase", eng._orb_session.phase)
             price_now = price_lookup.get(sym, 0)
             # How far above OR high as a percentage
@@ -1205,9 +1208,12 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "est_size_pct": est_size_pct,
                 "corr_blocked": corr_blocked.get(sym),
                 "reasons":      sig.reasons,
-                "or_high":      round(or_high, 2)   if or_high   is not None else None,
-                "or_low":       round(or_low, 2)    if or_low    is not None else None,
+                "or_high":      round(or_high, 2)    if or_high   is not None else None,
+                "or_low":       round(or_low, 2)     if or_low    is not None else None,
                 "gap_pct":      round(gap_pct * 100, 2) if gap_pct is not None else None,
+                "high_20d":     round(high_20d, 2)   if high_20d  is not None else None,
+                "high_52w":     round(high_52w, 2)   if high_52w  is not None else None,
+                "prev_day_high": round(prev_high, 2) if prev_high is not None else None,
                 "orb_pct_above": orb_pct_above,
                 "orb_phase":    orb_phase,
                 "sector":       get_sector(sym) or "—",
@@ -1248,6 +1254,9 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
                 "or_high":       round(orb_st_uni.or_high, 2)  if orb_st_uni and orb_st_uni.or_high  is not None else None,
                 "or_low":        round(orb_st_uni.or_low, 2)   if orb_st_uni and orb_st_uni.or_low   is not None else None,
                 "gap_pct":       round(orb_st_uni.gap_pct * 100, 2) if orb_st_uni and orb_st_uni.gap_pct is not None else None,
+                "high_20d":      round(orb_st_uni.high_20d, 2) if orb_st_uni and orb_st_uni.high_20d is not None else None,
+                "high_52w":      round(orb_st_uni.high_52w, 2) if orb_st_uni and orb_st_uni.high_52w is not None else None,
+                "prev_day_high": round(orb_st_uni.prev_day_high, 2) if orb_st_uni and orb_st_uni.prev_day_high is not None else None,
                 "orb_pct_above": None,
                 "orb_phase":     eng._orb_session.phase,
                 "sector":        get_sector(sym) or "—",
@@ -2015,6 +2024,7 @@ def api_detail(symbol):
             signal_data = {k: sig_row.get(k) for k in (
                 "action", "score", "confidence", "reasons",
                 "or_high", "or_low", "gap_pct", "orb_pct_above", "orb_phase",
+                "high_20d", "high_52w", "prev_day_high",
                 "volume_ratio", "atr_pct", "est_size_pct",
             )}
 
@@ -4763,6 +4773,33 @@ function _buildDetailExplain(r) {
       detail: `Price is ${fmtN(pct)}% above the OR high (${fmtP(r.or_high)}) — the further above, the stronger the ORB score`});
   }
 
+  // Multi-timeframe confluence levels
+  const price = r.price;
+  if (r.prev_day_high != null) {
+    const above = price != null && price > r.prev_day_high;
+    items.push({tone: above ? 'bull' : 'neu',
+      label: `Prev-day high: ${fmtP(r.prev_day_high)}`,
+      detail: above
+        ? `Price ${fmtP(price)} is above yesterday's high ${fmtP(r.prev_day_high)} — adds +0.10 to ORB score`
+        : `Price ${fmtP(price)} has not yet cleared yesterday's high ${fmtP(r.prev_day_high)} — potential resistance`});
+  }
+  if (r.high_20d != null) {
+    const above = price != null && price > r.high_20d;
+    items.push({tone: above ? 'bull' : 'neu',
+      label: `20-day high: ${fmtP(r.high_20d)}`,
+      detail: above
+        ? `Price ${fmtP(price)} is breaking the 20-day high ${fmtP(r.high_20d)} — adds +0.10 to ORB score`
+        : `Price ${fmtP(price)} is below the 20-day high ${fmtP(r.high_20d)} — resistance overhead`});
+  }
+  if (r.high_52w != null) {
+    const above = price != null && price > r.high_52w;
+    items.push({tone: above ? 'bull' : 'neu',
+      label: `52-week high: ${fmtP(r.high_52w)}`,
+      detail: above
+        ? `Price ${fmtP(price)} is breaking the 52-week high ${fmtP(r.high_52w)} — strongest confluence, adds +0.15 to ORB score`
+        : `Price ${fmtP(price)} is below the 52-week high ${fmtP(r.high_52w)} — significant resistance level`});
+  }
+
   // Volume confirmation
   if (r.volume_ratio != null) {
     const vr = r.volume_ratio;
@@ -4859,10 +4896,38 @@ function explainSignal(sym) {
   // ── Breakout Distance ──────────────────────────────────────────────────────
   if (r.orb_pct_above != null) {
     const pct = r.orb_pct_above;
-    const score = r.score || 0;
     const tone = 'bull';
-    detail = `Price is ${fmtN(pct)}% above the OR high — translating to an ORB score of <strong>${score.toFixed(3)}</strong> (range 0.6–0.9). Higher = further breakout.`;
+    const detail = `Price is ${fmtN(pct)}% above the OR high — breakout is confirmed.`;
     items.push({icon: '🚀', tone, label: `${fmtN(pct)}% above OR high`, detail});
+  }
+
+  // ── Multi-timeframe Confluence ─────────────────────────────────────────────
+  {
+    const px = r.price;
+    if (r.prev_day_high != null) {
+      const above = px != null && px > r.prev_day_high;
+      items.push({icon: above ? '✅' : '⬜', tone: above ? 'bull' : 'neu',
+        label: `Prev-day high: ${fmtP(r.prev_day_high)}`,
+        detail: above
+          ? `Price ${fmtP(px)} cleared yesterday's high ${fmtP(r.prev_day_high)} — adds +0.10 to score`
+          : `Price ${fmtP(px)} is still below yesterday's high ${fmtP(r.prev_day_high)} — resistance level not cleared`});
+    }
+    if (r.high_20d != null) {
+      const above = px != null && px > r.high_20d;
+      items.push({icon: above ? '✅' : '⬜', tone: above ? 'bull' : 'neu',
+        label: `20-day high: ${fmtP(r.high_20d)}`,
+        detail: above
+          ? `Price ${fmtP(px)} is breaking above the 20-day high ${fmtP(r.high_20d)} — strong momentum, adds +0.10 to score`
+          : `Price ${fmtP(px)} hasn't cleared the 20-day high ${fmtP(r.high_20d)} yet`});
+    }
+    if (r.high_52w != null) {
+      const above = px != null && px > r.high_52w;
+      items.push({icon: above ? '🔥' : '⬜', tone: above ? 'bull' : 'neu',
+        label: `52-week high: ${fmtP(r.high_52w)}`,
+        detail: above
+          ? `Price ${fmtP(px)} is breaking out to a NEW 52-WEEK HIGH above ${fmtP(r.high_52w)} — maximum confluence, adds +0.15 to score`
+          : `Price ${fmtP(px)} is below the 52-week high ${fmtP(r.high_52w)} — major resistance overhead`});
+    }
   }
 
   // ── Volume Confirmation ────────────────────────────────────────────────────
@@ -4880,9 +4945,12 @@ function explainSignal(sym) {
     const sc = r.score;
     const scFmt = sc != null ? (sc >= 0 ? '+' : '') + Number(sc).toFixed(3) : '—';
     let tone, detail;
-    if (sc != null && sc >= 0.6) {
+    if (sc != null && sc >= 0.85) {
       tone = 'bull';
-      detail = `ORB score ${scFmt} signals an active breakout BUY. Scores 0.600–0.900 represent confirmed breakouts above the OR high.`;
+      detail = `ORB score ${scFmt} — maximum confluence: OR breakout + multiple timeframe highs cleared. Very strong signal.`;
+    } else if (sc != null && sc >= 0.6) {
+      tone = 'bull';
+      detail = `ORB score ${scFmt} — confirmed breakout above OR high. Base score 0.60, boosted by cleared confluence levels (prev-day +0.10, 20d +0.10, 52w +0.15).`;
     } else if (sc != null && sc === 0.1) {
       tone = 'neu';
       detail = `Score ${scFmt}: price is above the OR high but volume hasn't confirmed yet. Holding until 1× avg/min volume is reached.`;
@@ -4918,12 +4986,22 @@ function explainSignal(sym) {
   if (r.volume_ratio != null && r.volume_ratio < 1 && r.price > (r.or_high || Infinity)) {
     simpleReasons.push(`The breakout above the OR high hasn't attracted enough volume yet (${r.volume_ratio.toFixed(1)}× vs 1× required). Low-volume breakouts fail more often, so the algorithm waits.`);
   }
+  if (r.price != null && r.or_high != null && r.price > r.or_high) {
+    const levels = [];
+    if (r.prev_day_high != null && r.price > r.prev_day_high) levels.push(`yesterday's high ($${r.prev_day_high.toFixed(2)})`);
+    if (r.high_20d != null && r.price > r.high_20d) levels.push(`the 20-day high ($${r.high_20d.toFixed(2)})`);
+    if (r.high_52w != null && r.price > r.high_52w) levels.push(`the 52-week high ($${r.high_52w.toFixed(2)}) — a very strong signal`);
+    if (levels.length > 0) {
+      simpleReasons.push(`On top of the opening range breakout, the price has also cleared ${levels.join(' and ')}. Each extra level confirms the trend is real and adds to the score.`);
+    }
+  }
 
   const bullItems = items.filter(i => i.tone === 'bull');
   const bearItems = items.filter(i => i.tone === 'bear');
   let closingLine;
   if (r.action === 'BUY') {
-    closingLine = `In short: price broke out, volume confirmed. The ORB strategy is active with a score of ${_scFmt(r.score)}.`;
+    const levelsHit = [r.prev_day_high != null && r.price > r.prev_day_high, r.high_20d != null && r.price > r.high_20d, r.high_52w != null && r.price > r.high_52w].filter(Boolean).length;
+    closingLine = `In short: price broke out and volume confirmed. ${levelsHit > 0 ? levelsHit + ' additional confluence level' + (levelsHit > 1 ? 's' : '') + ' cleared. ' : ''}ORB score: ${_scFmt(r.score)}.`;
   } else if (r.action === 'SELL') {
     closingLine = `In short: the opening range failed. Exiting to limit downside.`;
   } else {

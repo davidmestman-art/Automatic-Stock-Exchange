@@ -45,6 +45,9 @@ class ORBState:
     avg_daily_volume: float = 0.0
     # Gap filter — (today_open - prev_close) / prev_close; populated at 10:00
     gap_pct: Optional[float] = None
+    # Multi-timeframe confluence levels
+    high_20d: Optional[float] = None      # 20-day high (excluding today)
+    high_52w: Optional[float] = None      # 52-week high (excluding today)
 
     @property
     def or_midpoint(self) -> Optional[float]:
@@ -118,6 +121,11 @@ class ORBSession:
     def set_gap_pct(self, symbol: str, gap: float) -> None:
         if symbol in self.states:
             self.states[symbol].gap_pct = gap
+
+    def set_historical_highs(self, symbol: str, high_20d: float, high_52w: float) -> None:
+        if symbol in self.states:
+            self.states[symbol].high_20d = high_20d
+            self.states[symbol].high_52w = high_52w
 
     def finalize_range(self) -> None:
         for s in self.states.values():
@@ -321,4 +329,27 @@ def fetch_gap_pcts(
                 result[sym] = (today_open - prev_close) / prev_close
         except Exception as e:
             logger.debug(f"  [ORB] gap {sym}: {e}")
+    return result
+
+
+def fetch_historical_highs(
+    symbols: List[str],
+    api_key: str = "",
+    secret_key: str = "",
+) -> Dict[str, Tuple[float, float]]:
+    """Return {symbol: (high_20d, high_52w)} — highs of last 20 and 260 trading days, excluding today."""
+    df_all = _alpaca_bars(symbols, "1d", 280, api_key, secret_key)
+    result: Dict[str, Tuple[float, float]] = {}
+    for sym in symbols:
+        try:
+            sl = _sym_df(df_all, sym)
+            if sl is None or len(sl) < 3:
+                continue
+            # Exclude the last row (today's partial bar)
+            hist = sl.iloc[:-1]
+            high_20d = float(hist["high"].tail(20).max()) if len(hist) >= 20 else float(hist["high"].max())
+            high_52w = float(hist["high"].tail(260).max()) if len(hist) >= 260 else float(hist["high"].max())
+            result[sym] = (high_20d, high_52w)
+        except Exception as e:
+            logger.debug(f"  [ORB] hist_highs {sym}: {e}")
     return result
