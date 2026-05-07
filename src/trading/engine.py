@@ -1284,7 +1284,10 @@ class TradingEngine:
             bars = fetch_opening_range_bars(symbols)
             for sym, (hi, lo) in bars.items():
                 self._orb_session.update_range(sym, hi, lo)
-            logger.debug(f"  [ORB] OR bars updated for {len(bars)} symbols")
+            logger.info(f"  [ORB] OR bars updated for {len(bars)} symbols")
+            valid = sum(1 for s in self._orb_session.states.values() if s.or_high is not None)
+            total = len(self._orb_session.states)
+            logger.info(f"  [ORB] OR ranges set: {valid}/{total} symbols have or_high")
         except Exception as e:
             logger.warning(f"  [ORB] Range update failed: {e}")
 

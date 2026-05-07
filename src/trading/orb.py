@@ -269,7 +269,8 @@ def fetch_opening_range_bars(
                 continue
             result[sym] = (float(bars["high"].max()), float(bars["low"].min()))
         except Exception as e:
-            logger.debug(f"  [ORB] or_bars {sym}: {e}")
+            logger.warning(f"  [ORB] or_bars {sym}: {e}")
+    logger.info(f"  [ORB] fetch_opening_range_bars: {len(result)}/{len(symbols)} symbols returned OR data")
     return result
 
 
