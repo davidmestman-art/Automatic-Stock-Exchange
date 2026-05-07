@@ -2772,7 +2772,7 @@ tr:hover td{background:var(--bg2)}
 .chart-chg{font-size:13px;font-weight:600;margin-top:3px}
 .chart-close{margin-left:auto;background:var(--bg3);color:var(--text1);border:1px solid var(--border);padding:5px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;align-self:center}
 .chart-close:hover{color:var(--text0)}
-.chart-period-bar{display:flex;gap:5px;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--bg0)}
+.chart-period-bar{display:flex;gap:5px;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--bg0);overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}.chart-period-bar::-webkit-scrollbar{display:none}
 .chart-period-btn{padding:3px 12px;border-radius:99px;border:1px solid var(--border);background:none;color:var(--text2);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit}
 .chart-period-btn.active{background:var(--bg3);color:var(--text0);border-color:var(--border-strong)}
 .chart-body{padding:8px;background:var(--bg0)}
@@ -3399,9 +3399,8 @@ body.light .simple-verdict strong{color:#0f172a}
           <th class="sort-hdr" data-col="change_pct" onclick="sortWl('change_pct')" id="wlh-change_pct">Day %</th>
           <th class="sort-hdr" data-col="volume_ratio" onclick="sortWl('volume_ratio')" id="wlh-volume_ratio">Volume</th>
           <th class="sort-hdr sort-desc" data-col="score" onclick="sortWl('score')" id="wlh-score">Score</th>
-          <th>Signal</th>
         </tr></thead>
-        <tbody id="wl-body"><tr><td colspan="7" class="empty">No watchlist data yet — run a cycle</td></tr></tbody>
+        <tbody id="wl-body"><tr><td colspan="6" class="empty">No watchlist data yet — run a cycle</td></tr></tbody>
       </table></div>
     </div>
     <!-- stock search & favorites -->
@@ -4035,7 +4034,6 @@ function renderWatchlistTable() {
       <td style="color:${pctCol};font-weight:600">${pctStr}</td>
       <td style="color:${vrCol}">${vrStr}</td>
       <td style="color:${scCol};font-weight:600">${scStr}</td>
-      <td><span class="pill pill-${r.action}">${r.action}</span></td>
     </tr>`;
   }).join('');
 }
