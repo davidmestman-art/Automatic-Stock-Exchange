@@ -1354,10 +1354,11 @@ class TradingEngine:
             return SignalResult(action="HOLD", score=0.0, confidence=0.0,
                                 reasons=["Price inside OR"])
 
-        # Breakout BUY — enter immediately when volume >= 1x avg per minute
+        # Breakout BUY — volume confirmation (skip gate if no 1-min data available)
         avg_per_min = orb_st.avg_daily_volume / 390.0 if orb_st.avg_daily_volume > 0 else 0
         bar_vol     = vol_1min.get(symbol, 0)
-        if avg_per_min > 0 and bar_vol < avg_per_min * 0.5:
+        # Only block on low volume if we actually have fresh 1-min data
+        if avg_per_min > 0 and bar_vol > 0 and bar_vol < avg_per_min * 0.5:
             return SignalResult(action="HOLD", score=0.1, confidence=0.1,
                                 reasons=[f"ORB above ${or_high:.2f} — vol {bar_vol:.0f} < 0.5x avg {avg_per_min:.0f}"])
 
