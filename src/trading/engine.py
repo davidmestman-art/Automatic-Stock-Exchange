@@ -270,6 +270,7 @@ class TradingEngine:
                     api_key=self.config.alpaca_api_key,
                     secret_key=self.config.alpaca_secret_key,
                 )
+
                 for sym, (oh, ol) in or_bars.items():
                     self._orb_session.update_range(sym, oh, ol)
                 logger.info(f"  [ORB] Catch-up: {len(or_bars)} OR ranges loaded")
@@ -282,7 +283,11 @@ class TradingEngine:
             self._orb_session.finalize_range()
             try:
                 logger.info("  [ORB] Fetching prev-day high/low (take-profit targets)…")
-                pd_levels = fetch_prev_day_levels(self._orb_session.watchlist())
+                pd_levels = fetch_prev_day_levels(
+                    self._orb_session.watchlist(),
+                    api_key=self.config.alpaca_api_key,
+                    secret_key=self.config.alpaca_secret_key,
+                )
                 for sym, (ph, pl) in pd_levels.items():
                     self._orb_session.set_prev_day(sym, ph, pl)
                 logger.info(f"  [ORB] Prev-day levels loaded for {len(pd_levels)} symbols")
@@ -290,7 +295,11 @@ class TradingEngine:
                 logger.warning(f"  [ORB] Prev-day fetch failed: {e}")
             try:
                 logger.info("  [ORB] Fetching gap data (open vs prev close)…")
-                gap_data = fetch_gap_pcts(self._orb_session.watchlist())
+                gap_data = fetch_gap_pcts(
+                    self._orb_session.watchlist(),
+                    api_key=self.config.alpaca_api_key,
+                    secret_key=self.config.alpaca_secret_key,
+                )
                 for sym, gap in gap_data.items():
                     self._orb_session.set_gap_pct(sym, gap)
                 n_gapped = sum(1 for g in gap_data.values() if abs(g) > 0.03)
@@ -409,7 +418,11 @@ class TradingEngine:
             ]
             if candidates:
                 try:
-                    vol_1min = fetch_latest_1min_volume(candidates)
+                    vol_1min = fetch_latest_1min_volume(
+                        candidates,
+                        api_key=self.config.alpaca_api_key,
+                        secret_key=self.config.alpaca_secret_key,
+                    )
                 except Exception as e:
                     logger.debug(f"  [ORB] vol fetch failed: {e}")
 
@@ -763,7 +776,11 @@ class TradingEngine:
             ]
             if candidates:
                 try:
-                    vol_1min = fetch_latest_1min_volume(candidates)
+                    vol_1min = fetch_latest_1min_volume(
+                        candidates,
+                        api_key=self.config.alpaca_api_key,
+                        secret_key=self.config.alpaca_secret_key,
+                    )
                 except Exception as e:
                     logger.debug(f"  get_signals vol_1min: {e}")
 
@@ -1265,7 +1282,10 @@ class TradingEngine:
         """9:15–9:29 ET: screen universe and lock ORB watchlist."""
         logger.info("  [ORB] Starting pre-market universe scan…")
         try:
-            symbols, pm_vols, avg_vols = screen_orb_universe()
+            symbols, pm_vols, avg_vols = screen_orb_universe(
+                api_key=self.config.alpaca_api_key,
+                secret_key=self.config.alpaca_secret_key,
+            )
             self._orb_session.set_universe(symbols, pm_vols, avg_vols)
             self.watchlist = self._orb_session.watchlist()
             logger.info(
@@ -1281,7 +1301,11 @@ class TradingEngine:
         if not symbols:
             return
         try:
-            bars = fetch_opening_range_bars(symbols)
+            bars = fetch_opening_range_bars(
+                symbols,
+                api_key=self.config.alpaca_api_key,
+                secret_key=self.config.alpaca_secret_key,
+            )
             for sym, (hi, lo) in bars.items():
                 self._orb_session.update_range(sym, hi, lo)
             logger.info(f"  [ORB] OR bars updated for {len(bars)} symbols")
