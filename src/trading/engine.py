@@ -725,7 +725,11 @@ class TradingEngine:
     def get_signals(self):
         """Fetch data and compute ORB signals without placing any orders."""
         symbols = self.watchlist or self.config.symbols
-        market_data = self.fetcher.fetch_many(symbols, force_refresh=True)
+        # Use cached bar data — run_cycle() keeps it fresh every 90s.
+        # Fall back to a fresh fetch only if the cache is empty.
+        market_data = self.fetcher.fetch_many(symbols, force_refresh=False)
+        if not market_data:
+            market_data = self.fetcher.fetch_many(symbols, force_refresh=True)
 
         # Fetch position data needed for correlation filter (may not be on watchlist)
         if self.config.use_correlation_filter and self.portfolio.positions:
@@ -749,10 +753,17 @@ class TradingEngine:
         orb_active = self._orb_session.range_formed
         vol_1min: Dict[str, float] = {}
         if orb_active and symbols:
-            try:
-                vol_1min = fetch_latest_1min_volume(symbols)
-            except Exception as e:
-                logger.debug(f"  get_signals vol_1min: {e}")
+            # Only fetch 1-min volume for stocks actually above OR high (breakout candidates)
+            candidates = [
+                s for s in symbols
+                if s in prices and (st := self._orb_session.get(s))
+                and st.or_high and prices[s] > st.or_high
+            ]
+            if candidates:
+                try:
+                    vol_1min = fetch_latest_1min_volume(candidates)
+                except Exception as e:
+                    logger.debug(f"  get_signals vol_1min: {e}")
 
         signals, ind_map = {}, {}
         for symbol in symbols:
