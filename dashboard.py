@@ -2011,10 +2011,9 @@ def api_detail(symbol):
         signal_data = None
         if sig_row:
             signal_data = {k: sig_row.get(k) for k in (
-                "action", "score", "rsi", "adx", "vwap_dev", "sector_mom",
-                "macd_hist", "macd_hist_prev", "bb_pct", "ema_gap",
-                "tf_1d", "tf_1h", "tf_15m", "mtf_agreement",
-                "volume_ratio", "atr_pct", "est_size_pct", "ml_mult",
+                "action", "score", "confidence", "reasons",
+                "or_high", "or_low", "gap_pct", "orb_pct_above", "orb_phase",
+                "volume_ratio", "atr_pct", "est_size_pct",
             )}
 
         pos_row = next((p for p in pos_list if p.get("symbol") == symbol), None)
@@ -4347,11 +4346,12 @@ function _applyDetailInfo(d) {
     const sig = d.signal;
     const row = document.getElementById('detail-signal-row');
     const scCol = sig.action === 'BUY' ? '#22c55e' : sig.action === 'SELL' ? '#ef4444' : '#94a3b8';
+    const _sc = sig.score != null ? (sig.score >= 0 ? '+' : '') + Number(sig.score).toFixed(3) : '—';
     row.innerHTML =
       `<span class="pill pill-${sig.action||'HOLD'}">${sig.action||'HOLD'}</span>` +
-      (sig.score != null ? `<span style="color:${scCol};font-weight:700;font-size:16px">${sig.score>=0?'+':''}${fmt(sig.score,3)}</span>` : '') +
-      (sig.rsi   != null ? `<span style="color:var(--text2);font-size:12px">RSI ${fmt(sig.rsi,1)}</span>` : '') +
-      (sig.adx   != null ? `<span style="color:var(--text2);font-size:12px">ADX ${fmt(sig.adx,0)}</span>` : '');
+      `<span style="color:${scCol};font-weight:700;font-size:16px">${_sc}</span>` +
+      (sig.orb_phase ? `<span style="color:var(--text2);font-size:12px">${sig.orb_phase}</span>` : '') +
+      (sig.or_high != null ? `<span style="color:var(--text2);font-size:12px">OR $${sig.or_low?.toFixed(2)}–$${sig.or_high?.toFixed(2)}</span>` : '');
     // Build explain content using the signal row
     const explainContent = _buildDetailExplain(sig);
     document.getElementById('detail-explain-simple').innerHTML    = explainContent.simple;
@@ -4878,21 +4878,22 @@ function explainSignal(sym) {
   // ── Score explanation ──────────────────────────────────────────────────────
   {
     const sc = r.score;
+    const scFmt = sc != null ? (sc >= 0 ? '+' : '') + Number(sc).toFixed(3) : '—';
     let tone, detail;
-    if (sc >= 0.6) {
+    if (sc != null && sc >= 0.6) {
       tone = 'bull';
-      detail = `ORB score ${sc} signals an active breakout BUY. Scores 0.6–0.9 represent confirmed breakouts above the OR high.`;
-    } else if (sc === 0.1) {
+      detail = `ORB score ${scFmt} signals an active breakout BUY. Scores 0.600–0.900 represent confirmed breakouts above the OR high.`;
+    } else if (sc != null && sc === 0.1) {
       tone = 'neu';
-      detail = `Score 0.1: price is above the OR high but volume hasn't confirmed yet. Holding until 1× avg/min volume is reached.`;
-    } else if (sc <= -0.8) {
+      detail = `Score ${scFmt}: price is above the OR high but volume hasn't confirmed yet. Holding until 1× avg/min volume is reached.`;
+    } else if (sc != null && sc <= -0.8) {
       tone = 'bear';
-      detail = `Score −0.8: price broke below the OR low — a bearish breakdown. Any open position should be exited immediately.`;
+      detail = `Score ${scFmt}: price broke below the OR low — a bearish breakdown. Any open position should be exited immediately.`;
     } else {
       tone = 'neu';
-      detail = `Score 0: price is inside the opening range. No directional signal yet.`;
+      detail = `Score ${scFmt}: price is inside the opening range. No directional signal yet.`;
     }
-    items.push({icon: '🎯', tone, label: `ORB Score: ${sc}`, detail});
+    items.push({icon: '🎯', tone, label: `ORB Score: ${scFmt}`, detail});
   }
 
   // ── Verdict ────────────────────────────────────────────────────────────────
@@ -4922,7 +4923,7 @@ function explainSignal(sym) {
   const bearItems = items.filter(i => i.tone === 'bear');
   let closingLine;
   if (r.action === 'BUY') {
-    closingLine = `In short: price broke out, volume confirmed. The ORB strategy is active with a score of ${r.score}.`;
+    closingLine = `In short: price broke out, volume confirmed. The ORB strategy is active with a score of ${_scFmt(r.score)}.`;
   } else if (r.action === 'SELL') {
     closingLine = `In short: the opening range failed. Exiting to limit downside.`;
   } else {
@@ -4936,8 +4937,9 @@ function explainSignal(sym) {
     <p class="simple-closing">${closingLine}</p>
   </div>`;
 
+  const _scFmt = v => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(3);
   const scoreHtml = `<div class="explain-score">
-    ORB score: <strong>${r.score >= 0 ? '+' : ''}${r.score} / ±1.0</strong>
+    ORB score: <strong>${_scFmt(r.score)} / ±1.0</strong>
     &nbsp;·&nbsp; Confidence: <strong>${confPct}%</strong>
     &nbsp;·&nbsp; Phase: <strong>${phase}</strong>
   </div>`;
@@ -5017,30 +5019,34 @@ function _fmtCap(n) {
 
 function showSearchResult(d) {
   const el = document.getElementById('search-result');
-  const scoreStr  = d.score != null ? (d.score >= 0 ? '+' : '') + d.score.toFixed(3) : '—';
-  const scoreCol  = d.score > 0 ? '#4ade80' : d.score < 0 ? '#f87171' : '#94a3b8';
-  const rocStr    = d.roc_10 != null ? (d.roc_10 >= 0 ? '+' : '') + d.roc_10.toFixed(2) + '%' : '—';
-  const rocCol    = d.roc_10 == null ? '#94a3b8' : d.roc_10 >= 2 ? '#4ade80' : d.roc_10 <= -2 ? '#f87171' : '#e2e8f0';
-  const srsiStr   = d.stoch_rsi != null ? d.stoch_rsi.toFixed(0) : '—';
-  const srsiCol   = d.stoch_rsi == null ? '#94a3b8' : d.stoch_rsi < 20 ? '#4ade80' : d.stoch_rsi > 80 ? '#f87171' : '#e2e8f0';
-  const pinBtn    = d.pinned
+  const sig        = d.signal || {};
+  const score      = sig.score != null ? sig.score : null;
+  const scoreStr   = score != null ? (score >= 0 ? '+' : '') + score.toFixed(3) : '—';
+  const scoreCol   = score == null ? '#94a3b8' : score >= 0.6 ? '#4ade80' : score <= -0.8 ? '#f87171' : '#94a3b8';
+  const orHigh     = sig.or_high  != null ? '$' + sig.or_high.toFixed(2)  : '—';
+  const orLow      = sig.or_low   != null ? '$' + sig.or_low.toFixed(2)   : '—';
+  const gapStr     = sig.gap_pct  != null ? (sig.gap_pct >= 0 ? '+' : '') + sig.gap_pct.toFixed(2) + '%' : '—';
+  const gapCol     = sig.gap_pct  == null ? '#94a3b8' : Math.abs(sig.gap_pct) > 5 ? '#f87171' : '#94a3b8';
+  const phase      = sig.orb_phase || '—';
+  const phaseCol   = phase === 'ACTIVE' ? '#22c55e' : phase === 'FORMING' ? '#f59e0b' : '#94a3b8';
+  const pinBtn     = d.pinned
     ? `<button class="btn-pin btn-pin-rem" onclick="unpinStock('${d.symbol}')">✕ Unpin</button>`
     : `<button class="btn-pin btn-pin-add" onclick="pinStock('${d.symbol}')">⭐ Pin</button>`;
   el.innerHTML = `<div class="search-result">
     <div class="sr-header">
       <span class="sr-name">${d.symbol}</span>
       <span class="sr-company">${d.name || ''}</span>
-      <span class="pill pill-${d.action||'HOLD'}">${d.action||'HOLD'}</span>
+      <span class="pill pill-${sig.action||'HOLD'}">${sig.action||'HOLD'}</span>
       ${pinBtn}
     </div>
     <div class="sr-stats">
       <div class="sr-stat"><div class="sr-stat-label">Price</div><div class="sr-stat-value">${d.price != null ? '$'+fmt(d.price) : '—'}</div></div>
-      <div class="sr-stat"><div class="sr-stat-label">RSI</div><div class="sr-stat-value">${d.rsi != null ? d.rsi : '—'}</div></div>
-      <div class="sr-stat"><div class="sr-stat-label">Momentum (10d)</div><div class="sr-stat-value" style="color:${rocCol}">${rocStr}</div></div>
-      <div class="sr-stat"><div class="sr-stat-label">StochRSI</div><div class="sr-stat-value" style="color:${srsiCol}">${srsiStr}</div></div>
-      <div class="sr-stat"><div class="sr-stat-label">Score</div><div class="sr-stat-value" style="color:${scoreCol}">${scoreStr}</div></div>
+      <div class="sr-stat"><div class="sr-stat-label">ORB Score</div><div class="sr-stat-value" style="color:${scoreCol};font-weight:700">${scoreStr}</div></div>
+      <div class="sr-stat"><div class="sr-stat-label">OR High</div><div class="sr-stat-value">${orHigh}</div></div>
+      <div class="sr-stat"><div class="sr-stat-label">OR Low</div><div class="sr-stat-value">${orLow}</div></div>
+      <div class="sr-stat"><div class="sr-stat-label">Gap</div><div class="sr-stat-value" style="color:${gapCol}">${gapStr}</div></div>
+      <div class="sr-stat"><div class="sr-stat-label">Phase</div><div class="sr-stat-value" style="color:${phaseCol}">${phase}</div></div>
       <div class="sr-stat"><div class="sr-stat-label">Sector</div><div class="sr-stat-value" style="font-size:13px">${d.sector||'—'}</div></div>
-      <div class="sr-stat"><div class="sr-stat-label">P/E</div><div class="sr-stat-value">${d.pe_ratio != null ? d.pe_ratio : '—'}</div></div>
       <div class="sr-stat"><div class="sr-stat-label">Mkt Cap</div><div class="sr-stat-value" style="font-size:13px">${_fmtCap(d.market_cap)}</div></div>
     </div>
   </div>`;
