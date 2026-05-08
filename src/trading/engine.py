@@ -1408,9 +1408,44 @@ class TradingEngine:
             return SignalResult(action="HOLD", score=0.1, confidence=0.1,
                                 reasons=[f"ORB above ${or_high:.2f} — vol {bar_vol:.0f} < 0.5x avg {avg_per_min:.0f}"])
 
+        # ── Tier-1 quality filters ────────────────────────────────────────────
+
+        # 1. VWAP gate — price must be above VWAP (selling pressure check)
+        if ind.vwap is not None and current_price < ind.vwap:
+            return SignalResult(action="HOLD", score=0.2, confidence=0.2,
+                                reasons=[f"Below VWAP ${ind.vwap:.2f} — selling pressure"])
+
+        # 2. ADX trend filter — require trending market (ADX >= 20)
+        if ind.adx is not None and ind.adx < 20:
+            return SignalResult(action="HOLD", score=0.2, confidence=0.2,
+                                reasons=[f"ADX {ind.adx:.1f} < 20 — choppy/ranging market"])
+
+        # 3. ATR extension check — skip if price is >1.5×ATR above OR high (late/extended entry)
+        if ind.atr is not None and ind.atr > 0:
+            max_chase = or_high + 1.5 * ind.atr
+            if current_price > max_chase:
+                return SignalResult(action="HOLD", score=0.2, confidence=0.2,
+                                    reasons=[f"Extended entry: ${current_price:.2f} > OR ${or_high:.2f} + 1.5×ATR ${ind.atr:.2f}"])
+
         # Multi-timeframe confluence score
         score = 0.60   # base: OR high confirmed breakout
         confluence_reasons = [f"ORB breakout @ ${current_price:.2f} above OR ${or_high:.2f}"]
+
+        # VWAP and ADX passed the gate — reward stronger readings
+        if ind.vwap is not None:
+            vwap_gap = (current_price - ind.vwap) / ind.vwap
+            if vwap_gap >= 0.01:   # >1% above VWAP = strong momentum
+                score += 0.05
+                confluence_reasons.append(f"Strong VWAP gap +{vwap_gap*100:.1f}% (+0.05)")
+
+        if ind.adx is not None and ind.adx >= 25:
+            score += 0.05
+            confluence_reasons.append(f"ADX {ind.adx:.1f} ≥ 25 strong trend (+0.05)")
+
+        if ind.adx_plus_di is not None and ind.adx_minus_di is not None:
+            if ind.adx_plus_di > ind.adx_minus_di:
+                score += 0.05
+                confluence_reasons.append(f"+DI {ind.adx_plus_di:.1f} > -DI {ind.adx_minus_di:.1f} bullish (+0.05)")
 
         if orb_st.prev_day_high is not None and current_price > orb_st.prev_day_high:
             score += 0.10
