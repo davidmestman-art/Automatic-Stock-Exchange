@@ -201,6 +201,8 @@ class TradingEngine:
         self._rebuy_cooldowns: Dict[str, datetime] = {}
         # Symbols with an in-flight order (duplicate guard)
         self._order_in_flight: Set[str] = set()
+        # Symbols bought in the current ORB session (cleared on new trading day)
+        self._session_bought: Set[str] = set()
         # ── ORB strategy session state ─────────────────────────────────────────
         self._orb_session = ORBSession()
 
@@ -222,6 +224,7 @@ class TradingEngine:
         # Reset ORB session at the start of each new calendar day
         if self._orb_session.session_date != today:
             self._orb_session.reset(today)
+            self._session_bought.clear()
 
         # ── Phase 1: Pre-market universe scan (9:15–9:29 ET) ─────────────────
         if 9 * 60 + 15 <= et_mins < 9 * 60 + 30:
@@ -475,9 +478,14 @@ class TradingEngine:
             ind_snap        = self._indicator_snapshot(ind, signal)
 
             if signal.action == "BUY" and not self.portfolio.has_position(symbol):
-                # ── FIX 4: Skip if order already in-flight ────────────────────
+                # Skip if order already in-flight (within-cycle duplicate guard)
                 if symbol in self._order_in_flight:
                     logger.info(f"  {symbol}: order already in-flight, skipping duplicate BUY")
+                    continue
+
+                # Skip if already bought in this ORB session (cross-cycle dedup)
+                if symbol in self._session_bought:
+                    logger.info(f"  {symbol}: already bought this session, skipping")
                     continue
 
                 # ── FIX 2: 3-day rebuy cooldown check ────────────────────────
@@ -531,7 +539,12 @@ class TradingEngine:
                     orb_st = self._orb_session.get(symbol) if orb_active else None
                     if orb_st and orb_st.or_midpoint:
                         sl = orb_st.or_midpoint
-                        tp = orb_st.prev_day_high or self.risk.take_profit_price(current_price)
+                        # Ensure stop is below entry (could be above if price near OR midpoint)
+                        if sl >= current_price:
+                            sl = self.risk.stop_loss_price(current_price)
+                        raw_tp = orb_st.prev_day_high
+                        # Ensure take-profit is above entry; prev_day_high may be stale/below
+                        tp = raw_tp if (raw_tp and raw_tp > current_price) else self.risk.take_profit_price(current_price)
                     elif not orb_active and self.config.use_confirmation and symbol not in _confirmed_buys:
                         self._pending_signals[symbol] = {
                             "signal_price": current_price,
@@ -553,8 +566,9 @@ class TradingEngine:
 
                     # ── FIX 4: Mark order as in-flight ────────────────────────
                     self._order_in_flight.add(symbol)
+                    buy_ok = False
                     try:
-                        self.executor.execute_buy(
+                        buy_ok = self.executor.execute_buy(
                             symbol=symbol,
                             shares=rc.max_shares,
                             price=current_price,
@@ -566,7 +580,14 @@ class TradingEngine:
                     finally:
                         self._order_in_flight.discard(symbol)
 
-                    # ── FIX 7: Confirm fill before updating dashboard ──────────
+                    if buy_ok:
+                        # Mark bought this session so we don't re-buy if sync_portfolio
+                        # temporarily clears the local position before Alpaca confirms fill
+                        self._session_bought.add(symbol)
+                    else:
+                        logger.warning(f"  {symbol}: execute_buy returned False — order rejected by Alpaca")
+                        continue
+
                     if not self.portfolio.has_position(symbol):
                         logger.warning(
                             f"  {symbol}: BUY submitted but position not confirmed in portfolio"
@@ -1213,7 +1234,6 @@ class TradingEngine:
                 else "Stop loss triggered"
             )
             if self.risk.check_stop_loss(pos.entry_price, price, pos):
-                # ── FIX 10: Log stop-loss hit explicitly ──────────────────────
                 logger.info(
                     f"  {symbol}: STOP-LOSS HIT @ ${price:.2f}"
                     f" (stop=${pos.stop_loss:.2f})"
@@ -1250,7 +1270,6 @@ class TradingEngine:
         for symbol, price, reason in exits:
             pos = self.portfolio.positions.get(symbol)
             self.executor.execute_sell(symbol, price, reason, self.portfolio)
-            # ── FIX 2: Set rebuy cooldown after exit ──────────────────────────
             self._rebuy_cooldowns[symbol] = self._get_et_time()
             if pos:
                 pnl     = (price - pos.entry_price) * pos.shares if not pos.is_short else (pos.entry_price - price) * pos.shares
