@@ -384,6 +384,9 @@ class AlpacaExecutor:
                 return False
         # Mirror in local portfolio at the intended price
         portfolio.buy(symbol, qty, price, stop_loss, take_profit, reason)
+        # Invalidate positions and orders caches so dashboard reflects the new position immediately
+        self._cache.pop(f"{self._tag}:positions", None)
+        self._cache.pop(f"{self._tag}:orders:30", None)
         logger.info(
             f"[{self._tag} BUY]  {qty} {symbol:6s} @ ~${price:.2f}"
             f" | SL ${stop_loss:.2f}  TP ${take_profit:.2f}"
@@ -424,6 +427,9 @@ class AlpacaExecutor:
                 logger.error(f"[{self._tag} SELL FAILED] {symbol}: retry also failed: {e2}")
                 return None
         trade = portfolio.sell(symbol, price, reason)
+        # Invalidate caches so dashboard reflects the closed position immediately
+        self._cache.pop(f"{self._tag}:positions", None)
+        self._cache.pop(f"{self._tag}:orders:30", None)
         if trade and trade.pnl is not None:
             sign = "+" if trade.pnl >= 0 else ""
             logger.info(
