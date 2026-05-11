@@ -6,6 +6,7 @@ Then open http://localhost:8080
 """
 
 import base64
+import collections
 import hashlib
 import json
 import logging
@@ -42,6 +43,28 @@ logging.basicConfig(
     stream=__import__("sys").stdout,
     force=True,
 )
+
+# ── In-memory log ring buffer — captured by the Logs dashboard tab ────────────
+_LOG_BUFFER: collections.deque = collections.deque(maxlen=500)
+_LOG_LOCK = threading.Lock()
+
+class _LogBufferHandler(logging.Handler):
+    """Appends formatted log records to the ring buffer for the live Logs tab."""
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            entry = {
+                "ts":  self.formatTime(record, "%H:%M:%S"),
+                "lvl": record.levelname,
+                "msg": self.format(record),
+            }
+            with _LOG_LOCK:
+                _LOG_BUFFER.append(entry)
+        except Exception:
+            pass
+
+_buf_handler = _LogBufferHandler()
+_buf_handler.setFormatter(logging.Formatter("%(message)s"))
+logging.getLogger().addHandler(_buf_handler)
 
 app = Flask(__name__)
 # Tell Flask it's behind Railway's HTTPS reverse proxy so it reads
@@ -2176,6 +2199,15 @@ def api_universe():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/logs")
+@login_required
+def api_logs():
+    n = min(int(request.args.get("n", 200)), 500)
+    with _LOG_LOCK:
+        entries = list(_LOG_BUFFER)[-n:]
+    return jsonify({"entries": entries})
+
+
 @app.route("/api/universe/log")
 def api_universe_log():
     try:
@@ -3246,6 +3278,7 @@ body.light .simple-verdict strong{color:#0f172a}
   <button class="nav-tab" id="ntab-positions" onclick="switchTab('positions')">Positions</button>
   <button class="nav-tab" id="ntab-watchlist" onclick="switchTab('watchlist')">Watchlist</button>
   <button class="nav-tab" id="ntab-trades" onclick="switchTab('trades')">Trades</button>
+  <button class="nav-tab" id="ntab-logs" onclick="switchTab('logs')">Logs</button>
   <button class="nav-tab" onclick="window.location='/settings'">Settings</button>
   {% if auth %}<button class="nav-tab nav-tab-logout" onclick="window.location='/logout'">Logout</button>{% endif %}
 </nav>
@@ -3493,7 +3526,35 @@ body.light .simple-verdict strong{color:#0f172a}
     </div>
   </div>
 
+  <!-- ── Logs tab ──────────────────────────────────────────────────────────── -->
+  <div id="tab-logs" class="tab-section">
+    <div class="card" style="background:#0d1117;border-color:#30363d;padding:16px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="card-title" style="color:#58a6ff;font-family:monospace;letter-spacing:0.5px">&#9646; LIVE ENGINE LOG</span>
+          <span id="log-live-dot" style="width:8px;height:8px;border-radius:50%;background:#3fb950;display:inline-block;animation:logpulse 1.5s infinite"></span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <label style="font-size:11px;color:#8b949e;display:flex;gap:5px;align-items:center;cursor:pointer;user-select:none">
+            <input type="checkbox" id="log-autoscroll" checked style="accent-color:#58a6ff"> Auto-scroll
+          </label>
+          <select id="log-filter" style="font-size:11px;padding:3px 7px;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;cursor:pointer">
+            <option value="ALL">All levels</option>
+            <option value="INFO">INFO+</option>
+            <option value="WARNING">WARNING+</option>
+          </select>
+          <button onclick="clearLogView()" style="font-size:11px;padding:3px 10px;background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:4px;cursor:pointer">Clear</button>
+        </div>
+      </div>
+      <div id="log-feed" style="font-family:'Courier New',Courier,monospace;font-size:11.5px;line-height:1.8;height:62vh;overflow-y:auto;background:#010409;border:1px solid #21262d;border-radius:6px;padding:12px 14px;color:#c9d1d9;white-space:pre-wrap;word-break:break-word"></div>
+    </div>
+  </div>
+
 </main>
+
+<style>
+@keyframes logpulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+</style>
 
 <script>
 const fmt = (n, dec=2) => n == null ? '—' : n.toLocaleString('en-US',{minimumFractionDigits:dec,maximumFractionDigits:dec});
@@ -4256,6 +4317,56 @@ function renderTrades() {
   }
 }
 
+// ── Live Logs tab ─────────────────────────────────────────────────────────────
+const _LVL_COLOR = {INFO:'#3fb950',WARNING:'#d29922',ERROR:'#f85149',DEBUG:'#6e7681',CRITICAL:'#ff7b72'};
+const _ORB_RE    = /\[ORB\]/;
+const _BUY_RE    = /\bBUY\b/;
+const _SELL_RE   = /\bSELL\b/;
+const _HOLD_RE   = /\bHOLD\b/;
+const _SKIP_RE   = /skipping|blocked|cooldown|Below VWAP|ADX.*choppy|Extended entry|Lagging SPY|Resistance wall|Below SMA50/i;
+
+function _logMsgColor(msg) {
+  if (_ORB_RE.test(msg))  return '#58a6ff';
+  if (_BUY_RE.test(msg))  return '#3fb950';
+  if (_SELL_RE.test(msg)) return '#f85149';
+  if (_SKIP_RE.test(msg)) return '#d29922';
+  if (_HOLD_RE.test(msg)) return '#8b949e';
+  return '#c9d1d9';
+}
+
+function formatLogEntry(e) {
+  const lvlCol = _LVL_COLOR[e.lvl] || '#c9d1d9';
+  const msgCol = _logMsgColor(e.msg);
+  const lvl    = e.lvl.padEnd(8,' ');
+  return `<div style="margin:0;padding:1px 0"><span style="color:#484f58">${e.ts}</span> <span style="color:${lvlCol};font-weight:600">${lvl}</span> <span style="color:${msgCol}">${e.msg.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span></div>`;
+}
+
+function _logLevelOk(lvl, filter) {
+  const rank = {DEBUG:0,INFO:1,WARNING:2,ERROR:3,CRITICAL:4};
+  return (rank[lvl]||0) >= (rank[filter]||0);
+}
+
+async function loadLogs() {
+  try {
+    const filter = (document.getElementById('log-filter')||{}).value || 'ALL';
+    const res  = await fetch('/api/logs?n=300');
+    if (!res.ok) return;
+    const data = await res.json();
+    const feed = document.getElementById('log-feed');
+    if (!feed) return;
+    const entries = (data.entries || []).filter(e => filter==='ALL' || _logLevelOk(e.lvl, filter));
+    feed.innerHTML = entries.map(formatLogEntry).join('');
+    const cb = document.getElementById('log-autoscroll');
+    if (cb && cb.checked) feed.scrollTop = feed.scrollHeight;
+  } catch(e) {}
+}
+
+function clearLogView() {
+  const feed = document.getElementById('log-feed');
+  if (feed) feed.innerHTML = '';
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function loadJournalTrades() {
   try {
     const res = await fetch('/api/journal');
@@ -4267,8 +4378,9 @@ async function loadJournalTrades() {
   } catch(e) {}
 }
 
-const _TAB_IDS = ['dashboard','positions','watchlist','trades'];
+const _TAB_IDS = ['dashboard','positions','watchlist','trades','logs'];
 const _tabLoaded = {};  // tracks which tabs have loaded their data at least once
+let _logPollInterval = null;
 
 function switchTab(name) {
   if (!_TAB_IDS.includes(name)) return;
@@ -4282,6 +4394,12 @@ function switchTab(name) {
   // Lazy-load tab data on first visit (or on each switch for live tabs)
   if (name === 'trades' && !_tabLoaded.trades) { loadJournalTrades(); _tabLoaded.trades = true; }
   if (name === 'watchlist') loadHeatmap();
+  if (name === 'logs') {
+    loadLogs();
+    if (!_logPollInterval) _logPollInterval = setInterval(loadLogs, 2000);
+  } else {
+    if (_logPollInterval) { clearInterval(_logPollInterval); _logPollInterval = null; }
+  }
 }
 (function restoreTab() {
   const saved = localStorage.getItem('activeTab');
