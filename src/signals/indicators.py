@@ -47,6 +47,9 @@ class IndicatorValues:
     adx_plus_di: Optional[float] = None    # +DI line (directional component)
     adx_minus_di: Optional[float] = None   # -DI line (directional component)
 
+    # Higher-timeframe trend
+    sma50: Optional[float] = None          # 50-day simple moving average
+
     # Sector momentum — set externally by the engine
     # stock 5d return minus sector ETF 5d return (decimal, e.g. 0.03 = +3%)
     sector_mom: Optional[float] = None
@@ -154,6 +157,10 @@ class TechnicalIndicators:
             vals.roc_10 = float(close.iloc[-1] / close.iloc[-11] - 1)
         if len(close) > 21:
             vals.roc_20 = float(close.iloc[-1] / close.iloc[-21] - 1)
+
+        if len(close) >= 50:
+            sma50_val = close.rolling(50).mean().iloc[-1]
+            vals.sma50 = float(sma50_val) if not pd.isna(sma50_val) else None
 
         return vals
 
