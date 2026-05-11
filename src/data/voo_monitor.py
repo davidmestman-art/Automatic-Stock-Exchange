@@ -61,6 +61,7 @@ class VOOMonitor:
             from alpaca.data.historical import StockHistoricalDataClient
             from alpaca.data.requests import StockBarsRequest
             from alpaca.data.timeframe import TimeFrame
+            from alpaca.data.enums import DataFeed
 
             if not self._api_key or not self._secret_key:
                 logger.warning("VOOMonitor: no Alpaca credentials")
@@ -75,6 +76,7 @@ class VOOMonitor:
                 timeframe=TimeFrame.Week,
                 start=start,
                 end=end,
+                feed=DataFeed.IEX,
             )
             df_all = client.get_stock_bars(req).df
 
