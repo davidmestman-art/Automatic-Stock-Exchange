@@ -53,7 +53,7 @@ class _LogBufferHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             entry = {
-                "ts":  datetime.fromtimestamp(record.created).strftime("%H:%M:%S"),
+                "ts":  record.created,   # raw unix ts — browser formats in local tz
                 "lvl": record.levelname,
                 "msg": self.format(record),
             }
@@ -996,7 +996,7 @@ _public_url: str = ""
 def _record_snapshot(total_value: float) -> None:
     """Append an equity snapshot at most once per minute."""
     global _last_snapshot_ts
-    now = datetime.now()
+    now = _now_et()
     if _last_snapshot_ts and (now - _last_snapshot_ts).total_seconds() < 60:
         return
     _equity_snapshots.append({"ts": now.isoformat(), "value": round(total_value, 2)})
@@ -4333,11 +4333,15 @@ function _logMsgColor(msg) {
   return '#c9d1d9';
 }
 
+const _logTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+function _fmtLogTs(unixSec) {
+  return new Date(unixSec * 1000).toLocaleTimeString("en-US", {hour12:false, hour:"2-digit", minute:"2-digit", second:"2-digit", timeZone:_logTz});
+}
 function formatLogEntry(e) {
   const lvlCol = _LVL_COLOR[e.lvl] || '#c9d1d9';
   const msgCol = _logMsgColor(e.msg);
   const lvl    = e.lvl.padEnd(8,' ');
-  return `<div style="margin:0;padding:1px 0"><span style="color:#484f58">${e.ts}</span> <span style="color:${lvlCol};font-weight:600">${lvl}</span> <span style="color:${msgCol}">${e.msg.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span></div>`;
+  return `<div style="margin:0;padding:1px 0"><span style="color:#484f58">${_fmtLogTs(e.ts)}</span> <span style="color:${lvlCol};font-weight:600">${lvl}</span> <span style="color:${msgCol}">${e.msg.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span></div>`;
 }
 
 function _logLevelOk(lvl, filter) {

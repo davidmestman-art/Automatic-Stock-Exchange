@@ -97,7 +97,6 @@ class RegimeDetector:
                 timeframe=TimeFrame.Day,
                 start=start,
                 end=end,
-                feed="iex",
             )
             df_all = client.get_stock_bars(req).df
 

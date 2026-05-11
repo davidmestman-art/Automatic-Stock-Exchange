@@ -179,7 +179,6 @@ def _alpaca_bars(
             timeframe=tf,
             start=start,
             end=end,
-            feed="iex",
             adjustment="split",
         )
         return client.get_stock_bars(req).df
