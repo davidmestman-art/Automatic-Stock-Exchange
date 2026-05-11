@@ -18,6 +18,7 @@ try:
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+    from alpaca.data.enums import DataFeed
     _ALPACA_OK = True
 except ImportError:
     _ALPACA_OK = False
@@ -102,6 +103,7 @@ class MarketDataFetcher:
                 start=start,
                 end=end,
                 adjustment="split",
+                feed=DataFeed.IEX,
             )
             return self._client.get_stock_bars(req).df
         except Exception as e:
