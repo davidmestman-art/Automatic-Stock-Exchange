@@ -2200,7 +2200,6 @@ def api_universe():
 
 
 @app.route("/api/logs")
-@login_required
 def api_logs():
     n = min(int(request.args.get("n", 200)), 500)
     with _LOG_LOCK:
