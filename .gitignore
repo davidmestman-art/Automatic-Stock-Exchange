@@ -11,3 +11,6 @@ journals/
 user_settings.json
 backtest_report.json
 personal_watchlist.json
+.dash_secret_key
+screener_log.json
+universe_cache.json
