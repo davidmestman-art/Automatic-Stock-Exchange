@@ -377,6 +377,7 @@ def _alpaca_bars_wide(
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
+        from alpaca.data.enums import DataFeed
         from datetime import timezone
 
         if not api_key or not secret_key:
@@ -391,6 +392,7 @@ def _alpaca_bars_wide(
             timeframe=TimeFrame.Day,
             start=start.to_pydatetime(),
             end=end.to_pydatetime(),
+            feed=DataFeed.IEX,
         )
         df_all = client.get_stock_bars(req).df
 
@@ -556,5 +558,3 @@ def _exchange_breakdown(tickers: List[str], cats: Dict[str, str]) -> Dict[str, i
         else:
             bkd["NYSE"] += 1
     return bkd
-
-
