@@ -203,6 +203,9 @@ class TradingEngine:
         self._order_in_flight: Set[str] = set()
         # Symbols bought in the current ORB session (cleared on new trading day)
         self._session_bought: Set[str] = set()
+        # SPY intraday return — updated each cycle for relative-strength filter
+        self._spy_prev_close: Optional[float] = None
+        self._spy_intraday_ret: Optional[float] = None
         # ── ORB strategy session state ─────────────────────────────────────────
         self._orb_session = ORBSession()
 
@@ -390,6 +393,15 @@ class TradingEngine:
         if self._cycle == 1:
             self.portfolio.update_day_start(prices)
 
+        # Update SPY intraday return for relative-strength filter
+        if self._use_alpaca and self._spy_prev_close:
+            try:
+                spy_live = self._get_prices(["SPY"]).get("SPY")
+                if spy_live:
+                    self._spy_intraday_ret = (spy_live - self._spy_prev_close) / self._spy_prev_close
+            except Exception:
+                pass
+
         self._check_exit_conditions(prices)
 
         # Confirmations (only used outside ORB ACTIVE phase)
@@ -439,6 +451,8 @@ class TradingEngine:
             current_price = prices[symbol]
 
             ind = self.indicators.compute(df)
+            prev_close = float(df["Close"].iloc[-1]) if len(df) >= 1 else None
+            stock_intraday_ret = (current_price - prev_close) / prev_close if prev_close else None
             if len(df) >= 6:
                 stock_5d = float(df["Close"].iloc[-1]) / float(df["Close"].iloc[-6]) - 1
                 sec_name = get_sector(symbol)
@@ -448,7 +462,11 @@ class TradingEngine:
 
             if orb_active:
                 orb_st = self._orb_session.get(symbol)
-                signal = self._compute_orb_signal(symbol, ind, current_price, orb_st, vol_1min)
+                signal = self._compute_orb_signal(
+                    symbol, ind, current_price, orb_st, vol_1min,
+                    stock_intraday_ret=stock_intraday_ret,
+                    spy_intraday_ret=self._spy_intraday_ret,
+                )
             else:
                 # Outside ORB hours — no trades; scores still computed for display
                 signal = SignalResult(action="HOLD", score=0.0, confidence=0.0,
@@ -809,11 +827,18 @@ class TradingEngine:
         for symbol in symbols:
             if symbol not in market_data or symbol not in prices:
                 continue
-            ind = self.indicators.compute(market_data[symbol])
+            df_sym = market_data[symbol]
+            ind = self.indicators.compute(df_sym)
             ind.close = prices.get(symbol, ind.close)
             current_price = prices[symbol]
+            prev_close_sym = float(df_sym["Close"].iloc[-1]) if len(df_sym) >= 1 else None
+            stock_ret_sym = (current_price - prev_close_sym) / prev_close_sym if prev_close_sym else None
             orb_st = self._orb_session.get(symbol) if orb_active else None
-            sig = self._compute_orb_signal(symbol, ind, current_price, orb_st, vol_1min)
+            sig = self._compute_orb_signal(
+                symbol, ind, current_price, orb_st, vol_1min,
+                stock_intraday_ret=stock_ret_sym,
+                spy_intraday_ret=self._spy_intraday_ret,
+            )
             # Embed ORB metadata into indicator_scores for dashboard consumption
             if orb_st is not None:
                 sig.indicator_scores["orb_or_high"]   = orb_st.or_high
@@ -1031,7 +1056,7 @@ class TradingEngine:
         today = self._get_et_time().strftime("%Y-%m-%d")
         if self._sector_returns_date == today and self._sector_returns:
             return
-        etfs = list(set(SECTOR_ETFS.values()))
+        etfs = list(set(SECTOR_ETFS.values())) + ["SPY"]
         try:
             data = self.fetcher.fetch_many(etfs, force_refresh=False)
             returns: Dict[str, float] = {}
@@ -1042,6 +1067,10 @@ class TradingEngine:
                     returns[sector] = ret
             self._sector_returns = returns
             self._sector_returns_date = today
+            # Store SPY prev close for intraday relative-strength filter
+            spy_df = data.get("SPY")
+            if spy_df is not None and len(spy_df) >= 1:
+                self._spy_prev_close = float(spy_df["Close"].iloc[-1])
             logger.info(f"  Sector returns updated: {len(returns)} sectors")
         except Exception as exc:
             logger.warning(f"  Sector returns fetch failed: {exc}")
@@ -1366,6 +1395,8 @@ class TradingEngine:
         current_price: float,
         orb_st,
         vol_1min: Dict[str, float],
+        stock_intraday_ret: Optional[float] = None,
+        spy_intraday_ret: Optional[float] = None,
     ) -> "SignalResult":
         """
         Aggressive ORB signal:
@@ -1427,6 +1458,30 @@ class TradingEngine:
                 return SignalResult(action="HOLD", score=0.2, confidence=0.2,
                                     reasons=[f"Extended entry: ${current_price:.2f} > OR ${or_high:.2f} + 1.5×ATR ${ind.atr:.2f}"])
 
+        # ── Tier-2 filters ────────────────────────────────────────────────────
+
+        # 4. SMA50 higher-timeframe trend — only buy stocks above their 50-day MA
+        if ind.sma50 is not None and current_price < ind.sma50:
+            return SignalResult(action="HOLD", score=0.2, confidence=0.2,
+                                reasons=[f"Below SMA50 ${ind.sma50:.2f} — downtrend on higher timeframe"])
+
+        # 5. SPY relative strength — stock must not be lagging SPY by more than 0.5%
+        if stock_intraday_ret is not None and spy_intraday_ret is not None:
+            if stock_intraday_ret < spy_intraday_ret - 0.005:
+                return SignalResult(action="HOLD", score=0.2, confidence=0.2,
+                                    reasons=[f"Lagging SPY: stock {stock_intraday_ret*100:+.2f}% vs SPY {spy_intraday_ret*100:+.2f}%"])
+
+        # 6. Resistance proximity — don't buy within 1.5% below a key resistance ceiling
+        resistance_levels = [
+            (orb_st.prev_day_high, "prev-day high"),
+            (orb_st.high_20d,      "20-day high"),
+            (orb_st.high_52w,      "52-week high"),
+        ]
+        for level, label in resistance_levels:
+            if level is not None and current_price < level < current_price * 1.015:
+                return SignalResult(action="HOLD", score=0.2, confidence=0.2,
+                                    reasons=[f"Resistance wall: ${level:.2f} {label} within 1.5% above entry"])
+
         # Multi-timeframe confluence score
         score = 0.60   # base: OR high confirmed breakout
         confluence_reasons = [f"ORB breakout @ ${current_price:.2f} above OR ${or_high:.2f}"]
@@ -1458,6 +1513,32 @@ class TradingEngine:
         if orb_st.high_52w is not None and current_price > orb_st.high_52w:
             score += 0.15
             confluence_reasons.append(f"Above 52-week high ${orb_st.high_52w:.2f} (+0.15)")
+
+        # ── Tier-3 score boosts ───────────────────────────────────────────────
+
+        # Pre-market gap quality: intentional gap 1–5% signals conviction
+        if orb_st.gap_pct is not None and 0.01 <= orb_st.gap_pct <= 0.05:
+            score += 0.05
+            confluence_reasons.append(f"Quality gap up {orb_st.gap_pct*100:.1f}% (+0.05)")
+
+        # Sector ETF momentum: stock outperforming its sector (5-day basis)
+        if ind.sector_mom is not None and ind.sector_mom > 0:
+            score += 0.05
+            confluence_reasons.append(f"Outperforming sector +{ind.sector_mom*100:.1f}% (+0.05)")
+
+        # SPY RS boost: stock meaningfully outperforming SPY intraday
+        if stock_intraday_ret is not None and spy_intraday_ret is not None:
+            rs_vs_spy = stock_intraday_ret - spy_intraday_ret
+            if rs_vs_spy >= 0.01:
+                score += 0.05
+                confluence_reasons.append(f"Strong SPY RS +{rs_vs_spy*100:.1f}% vs market (+0.05)")
+
+        # SMA50 distance boost: trading well above SMA50 shows trend strength
+        if ind.sma50 is not None and ind.sma50 > 0:
+            sma50_gap = (current_price - ind.sma50) / ind.sma50
+            if sma50_gap >= 0.03:
+                score += 0.05
+                confluence_reasons.append(f"Strong SMA50 gap +{sma50_gap*100:.1f}% (+0.05)")
 
         score = round(min(0.95, score), 4)
         confluence_reasons.append(f"Vol {bar_vol:.0f} >= 1x avg {avg_per_min:.0f}")
