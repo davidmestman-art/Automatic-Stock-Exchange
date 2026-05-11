@@ -158,6 +158,7 @@ def _alpaca_bars(
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+        from alpaca.data.enums import DataFeed
 
         key = api_key or os.getenv("ALPACA_API_KEY", "")
         sec = secret_key or os.getenv("ALPACA_SECRET_KEY", "")
@@ -180,6 +181,7 @@ def _alpaca_bars(
             start=start,
             end=end,
             adjustment="split",
+            feed=DataFeed.IEX,
         )
         return client.get_stock_bars(req).df
     except Exception as e:
