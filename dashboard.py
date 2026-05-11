@@ -53,7 +53,7 @@ class _LogBufferHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             entry = {
-                "ts":  self.formatTime(record, "%H:%M:%S"),
+                "ts":  datetime.fromtimestamp(record.created).strftime("%H:%M:%S"),
                 "lvl": record.levelname,
                 "msg": self.format(record),
             }
