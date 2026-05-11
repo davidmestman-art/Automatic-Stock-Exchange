@@ -3278,7 +3278,7 @@ body.light .simple-verdict strong{color:#0f172a}
   <button class="nav-tab" id="ntab-watchlist" onclick="switchTab('watchlist')">Watchlist</button>
   <button class="nav-tab" id="ntab-trades" onclick="switchTab('trades')">Trades</button>
   <button class="nav-tab" id="ntab-logs" onclick="switchTab('logs')">Logs</button>
-  <button class="nav-tab" onclick="window.location='/settings'">Settings</button>
+  <button class="nav-tab" id="ntab-settings" onclick="switchTab('settings')">Settings</button>
   {% if auth %}<button class="nav-tab nav-tab-logout" onclick="window.location='/logout'">Logout</button>{% endif %}
 </nav>
 
@@ -3546,6 +3546,49 @@ body.light .simple-verdict strong{color:#0f172a}
         </div>
       </div>
       <div id="log-feed" style="font-family:'Courier New',Courier,monospace;font-size:11.5px;line-height:1.8;height:62vh;overflow-y:auto;background:#010409;border:1px solid #21262d;border-radius:6px;padding:12px 14px;color:#c9d1d9;white-space:pre-wrap;word-break:break-word"></div>
+    </div>
+  </div>
+
+  <div id="tab-settings" class="tab-section">
+    <div class="card" style="padding:24px;max-width:860px;margin:0 auto">
+      <div class="card-title" style="margin-bottom:18px">Risk Profile</div>
+      <div id="st-profiles" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:18px"></div>
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:24px">
+        <button id="st-save-btn" onclick="stSaveProfile()" style="padding:8px 22px;background:#238636;color:#fff;border:none;border-radius:6px;font-size:13px;cursor:pointer;font-weight:600">Save Profile</button>
+        <span id="st-save-msg" style="color:#10b981;font-size:12px;display:none">&#10003; Saved</span>
+      </div>
+      <div class="card-title" style="margin-bottom:12px">Alpaca API Connection</div>
+      <div style="font-size:12px;color:#8b949e;margin-bottom:12px">Enter your Alpaca credentials to enable paper or live trading.</div>
+      <div style="display:flex;flex-direction:column;gap:10px;max-width:480px;margin-bottom:18px">
+        <input id="st-api-key" type="password" placeholder="API Key (PK…)" autocomplete="off" spellcheck="false"
+               style="padding:8px 12px;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
+        <input id="st-secret-key" type="password" placeholder="Secret Key" autocomplete="off" spellcheck="false"
+               style="padding:8px 12px;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
+        <div style="display:flex;gap:18px;font-size:13px;color:#c9d1d9;align-items:center">
+          <label style="cursor:pointer"><input type="radio" name="st-mode" value="paper" checked style="accent-color:#58a6ff"/> Paper Trading</label>
+          <label style="cursor:pointer"><input type="radio" name="st-mode" value="live" style="accent-color:#58a6ff"/> Live Trading</label>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <button onclick="stSaveKeys()" style="padding:8px 18px;background:#238636;color:#fff;border:none;border-radius:6px;font-size:13px;cursor:pointer;font-weight:600">Save Keys</button>
+          <span id="st-alpaca-status" style="font-size:12px"></span>
+        </div>
+      </div>
+      <div class="card-title" style="margin-bottom:12px">Email Notifications</div>
+      <div style="display:flex;flex-direction:column;gap:10px;max-width:480px">
+        <div style="display:flex;align-items:center;gap:12px">
+          <span style="font-size:13px;color:#c9d1d9">Trade alerts</span>
+          <label style="cursor:pointer;display:flex;align-items:center;gap:6px;font-size:12px;color:#8b949e">
+            <input type="checkbox" id="st-email-toggle" onchange="stToggleEmail(this.checked)" style="accent-color:#58a6ff"/>
+            <span id="st-email-label">OFF</span>
+          </label>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center">
+          <input id="st-email-input" type="email" placeholder="your@email.com" autocomplete="email"
+                 style="flex:1;padding:8px 12px;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
+          <button onclick="stSaveEmail()" style="padding:8px 14px;background:#1f6feb;color:#fff;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
+        </div>
+        <span id="st-email-status" style="font-size:12px;display:none"></span>
+      </div>
     </div>
   </div>
 
@@ -4368,6 +4411,103 @@ function clearLogView() {
   const feed = document.getElementById('log-feed');
   if (feed) feed.innerHTML = '';
 }
+
+// ── Settings tab ─────────────────────────────────────────────────────────────
+let _stSelected = '';
+const _stIcons = { conservative: '🛡️', moderate: '⚖️', aggressive: '🚀' };
+function _stPct(v) { return typeof v === 'number' && Math.abs(v) < 10 ? (v*100).toFixed(0)+'%' : v; }
+
+async function stLoadSettings() {
+  try {
+    const res = await fetch('/api/settings');
+    if (!res.ok) return;
+    const data = await res.json();
+    _stSelected = data.risk_profile || 'moderate';
+    stRenderCards(data.profiles || {});
+    const tog = document.getElementById('st-email-toggle');
+    const lbl = document.getElementById('st-email-label');
+    if (tog) tog.checked = !!data.email_notifications;
+    if (lbl) lbl.textContent = data.email_notifications ? 'ON' : 'OFF';
+  } catch(e) {}
+}
+
+function stRenderCards(profiles) {
+  const c = document.getElementById('st-profiles');
+  if (!c) return;
+  c.innerHTML = '';
+  for (const [key, prof] of Object.entries(profiles)) {
+    const active = key === _stSelected;
+    const o = prof.overrides || {};
+    const card = document.createElement('div');
+    card.style.cssText = `flex:1;min-width:200px;background:${active?'#1a2332':'#161b22'};border:2px solid ${active?'#58a6ff':'#30363d'};border-radius:10px;padding:16px;cursor:pointer;position:relative`;
+    if (active) card.innerHTML = '<span style="position:absolute;top:8px;right:8px;font-size:10px;font-weight:700;color:#58a6ff;background:#0d2136;padding:2px 7px;border-radius:4px">ACTIVE</span>';
+    card.innerHTML += `<div style="font-size:22px;margin-bottom:6px">${_stIcons[key]||'📊'}</div>
+      <div style="font-weight:700;font-size:15px;color:#e6edf3;margin-bottom:4px">${prof.label}</div>
+      <div style="font-size:11px;color:#8b949e;margin-bottom:10px">${prof.tagline}</div>
+      <div style="font-size:12px;color:#c9d1d9;display:flex;flex-direction:column;gap:3px">
+        <div style="display:flex;justify-content:space-between"><span>Position size</span><span>${_stPct(o.max_position_pct)}</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Stop-loss</span><span>${_stPct(o.stop_loss_pct)}</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Take-profit</span><span>${_stPct(o.take_profit_pct)}</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Min score</span><span>${prof.score_label||o.buy_threshold}</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Max positions</span><span>${o.max_open_positions}</span></div>
+      </div>`;
+    card.onclick = () => { _stSelected = key; stRenderCards(profiles); };
+    c.appendChild(card);
+  }
+}
+
+async function stSaveProfile() {
+  const btn = document.getElementById('st-save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({risk_profile: _stSelected}) });
+    const data = await res.json();
+    const msg = document.getElementById('st-save-msg');
+    if (data.ok) { msg.style.display='inline'; setTimeout(()=>msg.style.display='none',3000); }
+    else alert('Save failed: ' + (data.error||'unknown'));
+  } catch(e) { alert('Network error: '+e); }
+  finally { btn.disabled=false; btn.textContent='Save Profile'; }
+}
+
+async function stSaveKeys() {
+  const apiKey = document.getElementById('st-api-key').value.trim();
+  const secret = document.getElementById('st-secret-key').value.trim();
+  const paper  = (document.querySelector('input[name="st-mode"]:checked')||{}).value !== 'live';
+  const status = document.getElementById('st-alpaca-status');
+  if (!apiKey || !secret) { status.textContent='Both keys required.'; status.style.color='#f87171'; return; }
+  try {
+    const res = await fetch('/api/alpaca-keys', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({api_key:apiKey, secret_key:secret, paper}) });
+    const data = await res.json();
+    status.style.color = data.ok ? '#10b981' : '#f87171';
+    status.textContent = data.ok ? '✓ Keys saved.' : (data.error||'Failed');
+    if (data.ok) { document.getElementById('st-api-key').value=''; document.getElementById('st-secret-key').value=''; }
+  } catch(e) { status.style.color='#f87171'; status.textContent='Network error: '+e; }
+}
+
+async function stToggleEmail(enabled) {
+  const tog = document.getElementById('st-email-toggle');
+  const lbl = document.getElementById('st-email-label');
+  tog.disabled = true;
+  try {
+    const res = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email_notifications:enabled}) });
+    const data = await res.json();
+    lbl.textContent = data.ok ? (enabled?'ON':'OFF') : (tog.checked=!enabled, !enabled?'ON':'OFF');
+  } catch(e) { tog.checked=!enabled; lbl.textContent=!enabled?'ON':'OFF'; }
+  finally { tog.disabled=false; }
+}
+
+async function stSaveEmail() {
+  const email  = (document.getElementById('st-email-input')||{}).value||'';
+  const status = document.getElementById('st-email-status');
+  status.style.display='none';
+  try {
+    const res = await fetch('/api/user-email', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({notify_email:email.trim()}) });
+    const data = await res.json();
+    status.style.color = data.ok ? '#10b981' : '#f87171';
+    status.textContent = data.ok ? (email?'✓ Email saved.':'✓ Cleared.') : ('Error: '+(data.error||'unknown'));
+  } catch(e) { status.style.color='#f87171'; status.textContent='Network error: '+e; }
+  status.style.display='block';
+}
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function loadJournalTrades() {
@@ -4381,7 +4521,7 @@ async function loadJournalTrades() {
   } catch(e) {}
 }
 
-const _TAB_IDS = ['dashboard','positions','watchlist','trades','logs'];
+const _TAB_IDS = ['dashboard','positions','watchlist','trades','logs','settings'];
 const _tabLoaded = {};  // tracks which tabs have loaded their data at least once
 let _logPollInterval = null;
 
@@ -4403,6 +4543,7 @@ function switchTab(name) {
   } else {
     if (_logPollInterval) { clearInterval(_logPollInterval); _logPollInterval = null; }
   }
+  if (name === 'settings') stLoadSettings();
 }
 (function restoreTab() {
   const saved = localStorage.getItem('activeTab');
