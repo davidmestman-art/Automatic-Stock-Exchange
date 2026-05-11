@@ -75,7 +75,6 @@ class VOOMonitor:
                 timeframe=TimeFrame.Week,
                 start=start,
                 end=end,
-                feed="iex",
             )
             df_all = client.get_stock_bars(req).df
 

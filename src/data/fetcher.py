@@ -101,7 +101,6 @@ class MarketDataFetcher:
                 timeframe=tf,
                 start=start,
                 end=end,
-                feed="iex",
                 adjustment="split",
             )
             return self._client.get_stock_bars(req).df

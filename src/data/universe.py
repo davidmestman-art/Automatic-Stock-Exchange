@@ -391,7 +391,6 @@ def _alpaca_bars_wide(
             timeframe=TimeFrame.Day,
             start=start.to_pydatetime(),
             end=end.to_pydatetime(),
-            feed="iex",
         )
         df_all = client.get_stock_bars(req).df
 
