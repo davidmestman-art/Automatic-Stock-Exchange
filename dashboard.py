@@ -819,7 +819,7 @@ def _create_user_engine(user_id: int) -> TradingEngine:
     if not eng.dynamic_universe._last_result and _engine.dynamic_universe._last_result:
         eng.dynamic_universe._last_result = _engine.dynamic_universe._last_result
     if not eng.scanner.last_result and _engine.scanner.last_result:
-        eng.scanner.last_result = _engine.scanner.last_result
+        eng.scanner._last_result = _engine.scanner.last_result
     return eng
 
 
@@ -2129,7 +2129,7 @@ def api_journal():
             try:
                 extra_trades = eng.executor.get_filled_orders(limit=200)
             except Exception as _e:
-                log.warning("[JOURNAL] Alpaca orders fetch failed: %s", _e)
+                log.debug("[JOURNAL] Alpaca orders fetch skipped: %s", _e)
         if not extra_trades:
             portfolio = eng.portfolio
             extra_trades = [
