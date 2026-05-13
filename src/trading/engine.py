@@ -13,6 +13,7 @@ from ..utils.emailer import TradeEmailer
 from ..utils.journal import TradeJournal
 from ..utils.notifications import Notifier
 from ..utils.sectors import SECTOR_ETFS, get_sector, sector_position_count
+from .etf_rebalancer import ETFRebalancer
 from .executor import PaperExecutor
 from .orb import (
     ORBSession,
@@ -206,6 +207,8 @@ class TradingEngine:
         # SPY intraday return — updated each cycle for relative-strength filter
         self._spy_prev_close: Optional[float] = None
         self._spy_intraday_ret: Optional[float] = None
+        # Passive ETF rebalancer — runs once per trading day
+        self.etf_rebalancer = ETFRebalancer()
         # ── ORB strategy session state ─────────────────────────────────────────
         self._orb_session = ORBSession()
 
@@ -392,6 +395,13 @@ class TradingEngine:
 
         if self._cycle == 1:
             self.portfolio.update_day_start(prices)
+
+        # ── Passive ETF rebalancer — once per trading day, after 10 AM ─────────
+        if et_mins >= 10 * 60 and self.etf_rebalancer.should_run(today):
+            try:
+                self.etf_rebalancer.run(self.portfolio, self.executor, self.fetcher, today)
+            except Exception as exc:
+                logger.warning(f"  [ETF] Rebalancer failed: {exc}")
 
         # Update SPY intraday return for relative-strength filter
         if self._use_alpaca and self._spy_prev_close:
