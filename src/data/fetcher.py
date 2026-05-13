@@ -18,11 +18,16 @@ try:
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-    from alpaca.data.enums import DataFeed
     _ALPACA_OK = True
 except ImportError:
     _ALPACA_OK = False
     logger.warning("alpaca-py not installed — MarketDataFetcher will return empty data")
+
+try:
+    from alpaca.data.enums import DataFeed
+    _IEX_FEED = DataFeed.IEX
+except ImportError:
+    _IEX_FEED = "iex"
 
 if _ALPACA_OK:
     _TF_MAP: dict = {
@@ -103,7 +108,7 @@ class MarketDataFetcher:
                 start=start,
                 end=end,
                 adjustment="split",
-                feed=DataFeed.IEX,
+                feed=_IEX_FEED,
             )
             return self._client.get_stock_bars(req).df
         except Exception as e:

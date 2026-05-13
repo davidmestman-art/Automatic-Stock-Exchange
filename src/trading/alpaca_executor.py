@@ -555,6 +555,17 @@ class AlpacaExecutor:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    def buy_fractional(self, symbol: str, notional: float) -> None:
+        """Submit a notional (dollar-amount) market buy — supports fractional shares."""
+        req = MarketOrderRequest(
+            symbol=symbol,
+            notional=round(notional, 2),
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+        )
+        order = self._call_with_retry(self.trading.submit_order, req)
+        logger.info(f"[{self._tag} ETF BUY] {symbol}  ${notional:.2f}  order={order.id}")
+
     def _cancel_open_orders(self, symbol: str) -> None:
         try:
             open_orders = self._call_with_retry(

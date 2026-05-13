@@ -118,3 +118,6 @@ class PaperExecutor:
 
     def get_filled_orders(self, limit: int = 30) -> list:
         return []
+
+    def buy_fractional(self, symbol: str, notional: float) -> None:
+        pass
