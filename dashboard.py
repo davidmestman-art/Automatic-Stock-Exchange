@@ -957,6 +957,8 @@ if _saved.get("risk_profile") in RISK_PROFILES:
 else:
     _current_profile = "moderate"
 _engine.emailer.active = bool(_saved.get("email_notifications", False))
+if _saved.get("notify_email"):
+    _engine.emailer.notify_email = _saved["notify_email"]
 
 # ── News feed cache ───────────────────────────────────────────────────────────
 _news_cache: dict = {}       # {symbol: {"items": [...], "fetched_at": datetime}}
@@ -2378,13 +2380,20 @@ def api_alpaca_keys():
 @app.route("/api/user-email", methods=["POST"])
 def api_user_email():
     """Save per-user notification email address."""
+    data = request.get_json(silent=True) or {}
+    notify_email = (data.get("notify_email") or "").strip()
+
     if not _AUTH_ENABLED:
-        return jsonify({"ok": False, "error": "Auth not enabled"}), 400
+        # No user DB — save to settings JSON and update live engine
+        _engine.emailer.notify_email = notify_email
+        saved = _load_user_settings()
+        saved["notify_email"] = notify_email
+        _save_user_settings(saved)
+        return jsonify({"ok": True})
+
     user_id = session.get("user_id")
     if not user_id:
         return jsonify({"ok": False, "error": "Not logged in"}), 401
-    data = request.get_json(silent=True) or {}
-    notify_email = (data.get("notify_email") or "").strip()
     user = db.session.get(User, user_id)
     if not user:
         return jsonify({"ok": False, "error": "User not found"}), 404
