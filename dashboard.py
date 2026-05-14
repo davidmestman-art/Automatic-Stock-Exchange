@@ -2409,6 +2409,21 @@ def api_user_email():
     return jsonify({"ok": True})
 
 
+@app.route("/api/test-email", methods=["POST"])
+def api_test_email():
+    """Send a test email immediately and return success/error details."""
+    emailer = _get_engine().emailer
+    if not emailer.host or not emailer.user or not emailer.password:
+        return jsonify({"ok": False, "error": "SMTP not configured — set EMAIL_HOST, EMAIL_USER, EMAIL_PASSWORD in Railway environment variables"})
+    if not emailer.notify_email:
+        return jsonify({"ok": False, "error": "No recipient email saved — enter and save your email address first"})
+    try:
+        emailer.send_confirmation()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @app.route("/api/news")
 def api_news():
     """Return recent headlines for watchlist symbols via Alpaca (15-min cache)."""
@@ -3601,6 +3616,7 @@ body.light .simple-verdict strong{color:#0f172a}
           <input id="st-email-input" type="email" placeholder="your@email.com" autocomplete="email"
                  style="flex:1;padding:8px 12px;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
           <button onclick="stSaveEmail()" style="padding:8px 14px;background:#1f6feb;color:#fff;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
+          <button onclick="stTestEmail()" style="padding:8px 14px;background:#2d333b;color:#c9d1d9;border:1px solid #444c56;border-radius:6px;font-size:13px;cursor:pointer">Test</button>
         </div>
         <span id="st-email-status" style="font-size:12px;display:none"></span>
       </div>
@@ -4544,6 +4560,19 @@ async function stSaveEmail() {
     status.textContent = data.ok ? (email?'✓ Email saved.':'✓ Cleared.') : ('Error: '+(data.error||'unknown'));
   } catch(e) { status.style.color='#f87171'; status.textContent='Network error: '+e; }
   status.style.display='block';
+}
+
+async function stTestEmail() {
+  const status = document.getElementById('st-email-status');
+  status.style.color = '#8b949e';
+  status.textContent = 'Sending test email…';
+  status.style.display = 'block';
+  try {
+    const res = await fetch('/api/test-email', { method:'POST' });
+    const data = await res.json();
+    status.style.color = data.ok ? '#10b981' : '#f87171';
+    status.textContent = data.ok ? '✓ Test email sent — check your inbox.' : ('✗ ' + (data.error||'Unknown error'));
+  } catch(e) { status.style.color='#f87171'; status.textContent='Network error: '+e; }
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
