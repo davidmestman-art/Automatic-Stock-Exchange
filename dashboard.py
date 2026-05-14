@@ -2334,7 +2334,9 @@ def api_settings():
     # Email notifications toggle
     if "email_notifications" in data:
         enabled = bool(data["email_notifications"])
-        _get_engine().emailer.active = enabled
+        emailer = _get_engine().emailer
+        was_active = emailer.active
+        emailer.active = enabled
         saved["email_notifications"] = enabled
         if _AUTH_ENABLED:
             user_id = session.get("user_id")
@@ -2344,6 +2346,10 @@ def api_settings():
                     _u.email_notifications_enabled = enabled
                     db.session.commit()
                     _invalidate_user_engine(user_id)
+        # Send confirmation email the first time notifications are turned on
+        if enabled and not was_active and emailer.notify_email:
+            import threading as _th
+            _th.Thread(target=emailer.send_confirmation, daemon=True).start()
     _save_user_settings(saved)
     return jsonify({
         "ok": True,
@@ -4496,11 +4502,33 @@ async function stSaveKeys() {
 async function stToggleEmail(enabled) {
   const tog = document.getElementById('st-email-toggle');
   const lbl = document.getElementById('st-email-label');
+  const status = document.getElementById('st-email-status');
+  const emailInput = document.getElementById('st-email-input');
+  // Require an email address before enabling
+  if (enabled && emailInput && !emailInput.value.trim()) {
+    tog.checked = false;
+    status.style.color = '#f87171';
+    status.textContent = 'Enter and save your email address first.';
+    status.style.display = 'block';
+    return;
+  }
   tog.disabled = true;
   try {
     const res = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email_notifications:enabled}) });
     const data = await res.json();
-    lbl.textContent = data.ok ? (enabled?'ON':'OFF') : (tog.checked=!enabled, !enabled?'ON':'OFF');
+    if (data.ok) {
+      lbl.textContent = enabled ? 'ON' : 'OFF';
+      if (enabled) {
+        status.style.color = '#10b981';
+        status.textContent = '✓ Notifications enabled — check your inbox for a confirmation email.';
+        status.style.display = 'block';
+      } else {
+        status.style.display = 'none';
+      }
+    } else {
+      tog.checked = !enabled;
+      lbl.textContent = !enabled ? 'ON' : 'OFF';
+    }
   } catch(e) { tog.checked=!enabled; lbl.textContent=!enabled?'ON':'OFF'; }
   finally { tog.disabled=false; }
 }
