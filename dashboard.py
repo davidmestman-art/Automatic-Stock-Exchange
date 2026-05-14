@@ -2413,15 +2413,38 @@ def api_user_email():
 def api_test_email():
     """Send a test email immediately and return success/error details."""
     emailer = _get_engine().emailer
+    debug = {
+        "host": emailer.host or "(empty)",
+        "port": emailer.port,
+        "user": emailer.user or "(empty)",
+        "password_set": bool(emailer.password),
+        "notify_email": emailer.notify_email or "(empty)",
+    }
     if not emailer.host or not emailer.user or not emailer.password:
-        return jsonify({"ok": False, "error": "SMTP not configured — set EMAIL_HOST, EMAIL_USER, EMAIL_PASSWORD in Railway environment variables"})
+        return jsonify({"ok": False, "error": "SMTP not configured", "debug": debug})
     if not emailer.notify_email:
-        return jsonify({"ok": False, "error": "No recipient email saved — enter and save your email address first"})
+        return jsonify({"ok": False, "error": "No recipient email — enter and save your email address first", "debug": debug})
     try:
-        emailer.send_confirmation()
-        return jsonify({"ok": True})
+        import smtplib, ssl as _ssl
+        if emailer.port == 465:
+            ctx = _ssl.create_default_context()
+            with smtplib.SMTP_SSL(emailer.host, emailer.port, timeout=15, context=ctx) as smtp:
+                smtp.login(emailer.user, emailer.password)
+                refused = smtp.sendmail(emailer.user, emailer.notify_email,
+                    f"Subject: Test email — NYSE Trading Engine\r\nFrom: {emailer.user}\r\nTo: {emailer.notify_email}\r\n\r\nThis is a test email from your trading engine.")
+        else:
+            with smtplib.SMTP(emailer.host, emailer.port, timeout=15) as smtp:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+                smtp.login(emailer.user, emailer.password)
+                refused = smtp.sendmail(emailer.user, emailer.notify_email,
+                    f"Subject: Test email — NYSE Trading Engine\r\nFrom: {emailer.user}\r\nTo: {emailer.notify_email}\r\n\r\nThis is a test email from your trading engine.")
+        if refused:
+            return jsonify({"ok": False, "error": f"Recipient refused: {refused}", "debug": debug})
+        return jsonify({"ok": True, "debug": debug})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}", "debug": debug})
 
 
 @app.route("/api/news")
@@ -4570,8 +4593,11 @@ async function stTestEmail() {
   try {
     const res = await fetch('/api/test-email', { method:'POST' });
     const data = await res.json();
+    const dbg = data.debug ? ` [host:${data.debug.host} port:${data.debug.port} user:${data.debug.user} to:${data.debug.notify_email}]` : '';
     status.style.color = data.ok ? '#10b981' : '#f87171';
-    status.textContent = data.ok ? '✓ Test email sent — check your inbox.' : ('✗ ' + (data.error||'Unknown error'));
+    status.textContent = data.ok
+      ? `✓ Sent from ${(data.debug||{}).user||'?'} → ${(data.debug||{}).notify_email||'?'}`
+      : ('✗ ' + (data.error||'Unknown error') + dbg);
   } catch(e) { status.style.color='#f87171'; status.textContent='Network error: '+e; }
 }
 // ─────────────────────────────────────────────────────────────────────────────
