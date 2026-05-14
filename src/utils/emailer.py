@@ -1,6 +1,7 @@
 import logging
 import os
 import smtplib
+import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, Optional
@@ -73,11 +74,18 @@ class TradeEmailer:
             msg["To"] = self.notify_email
             msg.attach(MIMEText(body_text, "plain"))
             msg.attach(MIMEText(body_html, "html"))
-            with smtplib.SMTP(self.host, self.port, timeout=10) as smtp:
-                smtp.ehlo()
-                smtp.starttls()
-                smtp.login(self.user, self.password)
-                smtp.sendmail(self.user, self.notify_email, msg.as_string())
+            if self.port == 465:
+                ctx = ssl.create_default_context()
+                with smtplib.SMTP_SSL(self.host, self.port, timeout=10, context=ctx) as smtp:
+                    smtp.login(self.user, self.password)
+                    smtp.sendmail(self.user, self.notify_email, msg.as_string())
+            else:
+                with smtplib.SMTP(self.host, self.port, timeout=10) as smtp:
+                    smtp.ehlo()
+                    smtp.starttls()
+                    smtp.ehlo()
+                    smtp.login(self.user, self.password)
+                    smtp.sendmail(self.user, self.notify_email, msg.as_string())
             logger.info(f"[EMAIL] Sent {action} alert for {symbol}")
         except Exception as e:
             logger.warning(f"[EMAIL] Failed to send trade email: {e}")
