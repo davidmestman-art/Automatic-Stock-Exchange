@@ -2418,10 +2418,14 @@ def api_test_email():
     if not emailer.notify_email:
         return jsonify({"ok": False, "error": "No recipient email saved — enter and save your email address first"})
     try:
-        emailer.send_confirmation()
+        emailer._smtp_send(
+            "✅ Test email — NYSE Algo Trading Engine",
+            "This is a test email from your trading engine.",
+            "<p>This is a <strong>test email</strong> from your NYSE Algo Trading Engine.</p>",
+        )
         return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"})
 
 
 @app.route("/api/news")
