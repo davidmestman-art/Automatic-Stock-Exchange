@@ -4348,7 +4348,33 @@ async function pollPnl() {
   try {
     const res  = await fetch('/api/pnl');
     const data = await res.json();
-    if (data.ok) updatePnlTicker(data.unrealized_pnl, data.unrealized_pnl_pct, data.open_positions);
+    if (!data.ok) return;
+    updatePnlTicker(data.unrealized_pnl, data.unrealized_pnl_pct, data.open_positions);
+
+    // Live-update dashboard P&L cards
+    const fmt2 = v => Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const sign  = v => v >= 0 ? '+' : '-';
+    const col   = v => v > 0 ? '#22c55e' : v < 0 ? '#ef4444' : '#94a3b8';
+
+    // Total P&L card
+    const pnlEl = document.getElementById('c-pnl');
+    if (pnlEl && data.total_pnl != null) {
+      pnlEl.textContent = sign(data.total_pnl) + '$' + fmt2(data.total_pnl);
+      pnlEl.className = 'card-value ' + (data.total_pnl > 0 ? 'pos' : data.total_pnl < 0 ? 'neg' : 'neu');
+      const pctEl = document.getElementById('c-pnl-pct');
+      if (pctEl && data.total_pnl_pct != null)
+        pctEl.textContent = sign(data.total_pnl_pct) + fmt2(data.total_pnl_pct) + '%';
+    }
+
+    // Today's P&L strip — live unrealized value
+    const dayEl = document.getElementById('td-pnl');
+    if (dayEl && data.unrealized_pnl != null) {
+      dayEl.textContent = sign(data.unrealized_pnl) + '$' + fmt2(data.unrealized_pnl);
+      dayEl.className = 'today-val ' + (data.unrealized_pnl > 0 ? 'pos' : data.unrealized_pnl < 0 ? 'neg' : 'neu');
+      const dayPctEl = document.getElementById('td-pnl-pct');
+      if (dayPctEl && data.unrealized_pnl_pct != null)
+        dayPctEl.textContent = sign(data.unrealized_pnl_pct) + fmt2(data.unrealized_pnl_pct) + '%';
+    }
   } catch(_) {}
 }
 // Poll the lightweight pnl endpoint between full state refreshes
