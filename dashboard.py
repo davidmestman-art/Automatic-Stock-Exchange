@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# build: 2026-05-20
 """Web dashboard for the Automatic Trading Engine.
 
 Run:  python dashboard.py
