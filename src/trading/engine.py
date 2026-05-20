@@ -330,20 +330,14 @@ class TradingEngine:
             except Exception as e:
                 logger.warning(f"  [ORB] Historical highs fetch failed: {e}")
 
-        # ── Phase 4: 3:45 PM — close everything and stop trading ─────────────
+        # ── Phase 4: 3:45 PM — market close, hold positions overnight ────────
         if et_mins >= 15 * 60 + 45:
-            if self.portfolio.positions:
-                logger.info("  [ORB] 3:45 PM — closing all open positions")
-                self._orb_close_all()
-            # ── FIX 9: Also close any non-ORB positions at EOD ───────────────
-            if self.portfolio.positions:
-                logger.info("  [EOD] 3:45 PM — closing remaining non-ORB positions")
-                eod_prices = self._get_prices(list(self.portfolio.positions.keys()))
-                for sym in list(self.portfolio.positions.keys()):
-                    pos = self.portfolio.positions[sym]
-                    price = eod_prices.get(sym, pos.entry_price)
-                    self.executor.execute_sell(sym, price, "EOD close 3:45 PM", self.portfolio)
-                    self._rebuy_cooldowns[sym] = self._get_et_time()
+            # Multi-month strategy: positions are held across sessions, not closed EOD
+            open_count = len(self.portfolio.positions)
+            if open_count:
+                logger.info(
+                    f"  [EOD] 3:45 PM — market closed, holding {open_count} position(s) overnight"
+                )
             self._orb_session.phase = "DONE"
             logger.info(f"  [CYCLE] #{self._cycle} — session DONE")
             return {}
