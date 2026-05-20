@@ -10,6 +10,8 @@ import collections
 import hashlib
 import json
 import logging
+import urllib.request
+import xml.etree.ElementTree as _ET
 import os
 import secrets
 import threading
@@ -964,6 +966,50 @@ if _saved.get("notify_email"):
 _news_cache: dict = {}       # {symbol: {"items": [...], "fetched_at": datetime}}
 _NEWS_CACHE_TTL = 900        # 15-minute TTL
 
+# ── RSS market news cache ─────────────────────────────────────────────────────
+_rss_cache: dict = {"items": [], "fetched_at": None}
+_RSS_CACHE_TTL  = 300        # 5-minute TTL
+
+_RSS_FEEDS = [
+    ("Yahoo Finance",   "https://finance.yahoo.com/rss/topstories"),
+    ("Reuters",         "https://feeds.reuters.com/reuters/businessNews"),
+    ("CNBC",            "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
+    ("MarketWatch",     "https://feeds.marketwatch.com/marketwatch/topstories/"),
+    ("Investopedia",    "https://www.investopedia.com/feedbuilder/feed/getfeed/?feedName=rss_headline"),
+    ("Motley Fool",     "https://www.fool.com/feeds/index.aspx"),
+    ("Benzinga",        "https://www.benzinga.com/feed"),
+]
+
+
+def _fetch_rss_news(limit_per_feed: int = 5) -> list:
+    """Fetch headlines from free RSS feeds. Returns list of {title, url, source, published_at}."""
+    items = []
+    for source, url in _RSS_FEEDS:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                raw = resp.read()
+            root = _ET.fromstring(raw)
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            # RSS 2.0
+            entries = root.findall(".//item")
+            # Atom fallback
+            if not entries:
+                entries = root.findall(".//atom:entry", ns)
+            count = 0
+            for item in entries:
+                if count >= limit_per_feed:
+                    break
+                title = (item.findtext("title") or item.findtext("atom:title", namespaces=ns) or "").strip()
+                link  = (item.findtext("link")  or item.findtext("atom:link", namespaces=ns) or "").strip()
+                pub   = (item.findtext("pubDate") or item.findtext("atom:published", namespaces=ns) or "").strip()
+                if title and link:
+                    items.append({"title": title, "url": link, "source": source, "published_at": pub})
+                    count += 1
+        except Exception:
+            pass
+    return items
+
 # ── Weekend backtest state ────────────────────────────────────────────────────
 _backtest_report: dict = {}
 _backtest_running: bool = False
@@ -1770,6 +1816,12 @@ def api_heatmap():
                 "change_pct": change_pct,
                 "volume_ratio": vol_ratio,
             })
+        # Overlay signal scores from the last engine state
+        sig_map = {s["symbol"]: s for s in (_last_state.get("signals") or [])}
+        for it in items:
+            sig = sig_map.get(it["symbol"], {})
+            it["score"]  = sig.get("score")
+            it["action"] = sig.get("action")
         items.sort(key=lambda x: -abs(x["change_pct"]))
         return jsonify({"ok": True, "items": items})
     except Exception as e:
@@ -2477,6 +2529,23 @@ def api_news():
 
     all_items.sort(key=lambda x: x.get("published_at") or 0, reverse=True)
     return jsonify({"ok": True, "items": all_items[:30]})
+
+
+@app.route("/api/market-news")
+def api_market_news():
+    """Return broad market headlines from free RSS feeds (5-min cache)."""
+    global _rss_cache
+    now = datetime.now()
+    cached_at = _rss_cache.get("fetched_at")
+    if cached_at and (now - cached_at).total_seconds() < _RSS_CACHE_TTL:
+        return jsonify({"ok": True, "items": _rss_cache["items"]})
+    try:
+        items = _fetch_rss_news(limit_per_feed=6)
+        _rss_cache = {"items": items, "fetched_at": now}
+        return jsonify({"ok": True, "items": items})
+    except Exception as e:
+        log.debug(f"RSS news fetch: {e}")
+        return jsonify({"ok": True, "items": _rss_cache.get("items", [])})
 
 
 @app.route("/api/backtest/run", methods=["POST"])
@@ -3345,92 +3414,87 @@ body.light .simple-verdict strong{color:#0f172a}
 
   <!-- ══ Dashboard tab ══ -->
   <div id="tab-dashboard" class="tab-section">
-    <div class="today-strip" id="today-strip">
-      <div class="today-item">
-        <div class="today-label">Today's P&amp;L</div>
-        <div class="today-val" id="td-pnl">—</div>
-        <div class="today-sub" id="td-pnl-pct">—</div>
-      </div>
-      <div class="today-item">
-        <div class="today-label">Today's Trades</div>
-        <div class="today-val neu" id="td-trades">—</div>
-      </div>
-      <div class="today-item">
-        <div class="today-label">Market</div>
-        <div class="today-val" id="td-market">—</div>
-        <div class="today-sub" id="td-market-sub">—</div>
-      </div>
-      <div class="today-spark-wrap">
-        <div class="today-label">Today's Equity</div>
-        <svg id="today-spark" width="100%" height="48" preserveAspectRatio="none"></svg>
-      </div>
+
+    <!-- ── Stat bar ── -->
+    <div class="stat-bar">
+      <div class="stat-item"><span class="stat-label">Portfolio</span><span class="stat-val neu" id="c-total">—</span></div>
+      <div class="stat-item"><span class="stat-label">Total P&amp;L</span><span class="stat-val" id="c-pnl">—</span><span class="stat-sub" id="c-pnl-pct">—</span></div>
+      <div class="stat-item"><span class="stat-label">Today</span><span class="stat-val" id="td-pnl">—</span><span class="stat-sub" id="td-pnl-pct">—</span></div>
+      <div class="stat-item"><span class="stat-label">Cash</span><span class="stat-val neu" id="c-cash">—</span></div>
+      <div class="stat-item"><span class="stat-label">Positions</span><span class="stat-val neu" id="c-open">—</span></div>
+      <div class="stat-item"><span class="stat-label">Trades</span><span class="stat-val neu" id="c-trades">—</span></div>
+      <div class="stat-item"><span class="stat-label">Market</span><span class="stat-val" id="td-market">—</span><span class="stat-sub" id="td-market-sub">—</span></div>
+      <div class="stat-item" id="regime-stat" style="display:none"><span class="stat-label">Regime</span><span class="stat-val" id="c-regime">—</span></div>
     </div>
-    <div class="cards">
-      <div class="card">
-        <div class="card-label">Total Value</div>
-        <div class="card-value neu" id="c-total">—</div>
-        <div class="card-sub" id="c-initial">—</div>
+
+    <!-- ── Terminal grid: watchlist | main | news ── -->
+    <div class="terminal-grid">
+
+      <!-- LEFT: watchlist sidebar -->
+      <aside class="terminal-sidebar">
+        <div class="sidebar-hdr">Watchlist <span class="sidebar-live-dot"></span></div>
+        <div id="wl-sidebar-body" class="sidebar-list">
+          <div class="sidebar-empty">Loading…</div>
+        </div>
+      </aside>
+
+      <!-- CENTER: charts + activity -->
+      <div class="terminal-main">
+
+        <!-- TradingView candlestick chart -->
+        <div class="tv-chart-wrap">
+          <div class="tv-chart-hdr">
+            <span id="tv-chart-symbol" class="tv-symbol">Select a ticker</span>
+            <span class="tv-chart-label">Live Chart</span>
+          </div>
+          <div id="tv-chart-container" class="tv-chart-inner">
+            <div class="tv-placeholder">Click a ticker in the watchlist to load the chart</div>
+          </div>
+        </div>
+
+        <!-- Portfolio equity chart -->
+        <div class="panel equity-panel">
+          <div class="panel-title">Portfolio Equity
+            <span style="font-size:11px;color:#475569;margin-left:6px">total value over time</span>
+          </div>
+          <div class="equity-chart-wrap">
+            <svg id="today-spark" width="100%" height="120" preserveAspectRatio="none"></svg>
+          </div>
+          <!-- compact cards row -->
+          <div class="equity-cards">
+            <div class="eq-card"><div class="eq-label">Total Value</div><div class="eq-val neu" id="c-total-2">—</div><div class="eq-sub" id="c-initial">—</div></div>
+            <div class="eq-card"><div class="eq-label">In Positions</div><div class="eq-val neu" id="c-pos-val">—</div></div>
+            <div class="eq-card"><div class="eq-label">Today's Trades</div><div class="eq-val neu" id="td-trades">—</div></div>
+          </div>
+        </div>
+
+        <!-- Activity log -->
+        <div class="panel activity-panel">
+          <div class="panel-title">Activity Log <span class="sidebar-live-dot"></span></div>
+          <div id="dash-activity-log" class="activity-log-box"></div>
+        </div>
+
       </div>
-      <div class="card">
-        <div class="card-label">Cash</div>
-        <div class="card-value neu" id="c-cash">—</div>
-      </div>
-      <div class="card">
-        <div class="card-label">In Positions</div>
-        <div class="card-value neu" id="c-pos-val">—</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Total P&amp;L</div>
-        <div class="card-value" id="c-pnl">—</div>
-        <div class="card-sub" id="c-pnl-pct">—</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Open Positions</div>
-        <div class="card-value neu" id="c-open">—</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Total Trades</div>
-        <div class="card-value neu" id="c-trades">—</div>
-      </div>
-      <div class="card" id="regime-card" style="display:none">
-        <div class="card-label">Market Regime</div>
-        <div class="card-value" id="c-regime">—</div>
-        <div class="card-sub" id="c-regime-sub">—</div>
-      </div>
+
+      <!-- RIGHT: news feed -->
+      <aside class="terminal-news">
+        <div class="sidebar-hdr">Market News <span class="sidebar-live-dot"></span></div>
+        <div id="news-feed-body" class="news-list">
+          <div class="sidebar-empty">Loading news…</div>
+        </div>
+      </aside>
+
     </div>
-    <div class="panel" style="margin-bottom:12px">
-      <div class="panel-title">Risk Rules</div>
-      <div class="risk-rules-grid" id="risk-rules-grid">
-        <div class="risk-rule">
-          <div class="risk-rule-icon">📐</div>
-          <div class="risk-rule-body">
-            <div class="risk-rule-title">Signal-Strength Sizing <span class="risk-rule-badge rrb-ok" id="rr-sizing-badge">ON</span></div>
-            <div class="risk-rule-detail" id="rr-sizing-detail">Position size scales with signal confidence (0.5× – 1.5×)</div>
-          </div>
-        </div>
-        <div class="risk-rule">
-          <div class="risk-rule-icon">🔗</div>
-          <div class="risk-rule-body">
-            <div class="risk-rule-title">Correlation Filter <span class="risk-rule-badge rrb-ok" id="rr-corr-badge">OK</span></div>
-            <div class="risk-rule-detail" id="rr-corr-detail">ρ ≥ 0.70 with open position → half-size entry</div>
-          </div>
-        </div>
-        <div class="risk-rule">
-          <div class="risk-rule-icon">🏭</div>
-          <div class="risk-rule-body">
-            <div class="risk-rule-title">Sector Exposure <span class="risk-rule-badge rrb-ok" id="rr-sector-badge">OK</span></div>
-            <div class="risk-rule-detail" id="rr-sector-detail">Max 30% of portfolio in one sector</div>
-          </div>
-        </div>
-        <div class="risk-rule">
-          <div class="risk-rule-icon">🛑</div>
-          <div class="risk-rule-body">
-            <div class="risk-rule-title">Daily Loss Limit <span class="risk-rule-badge rrb-ok" id="rr-loss-badge">OK</span></div>
-            <div class="risk-rule-detail" id="rr-loss-detail">No new positions if day P&amp;L ≤ −2%</div>
-          </div>
-        </div>
-      </div>
+
+    <!-- hidden risk-rules ids kept for JS compatibility -->
+    <div style="display:none">
+      <span id="rr-sizing-badge"></span><span id="rr-sizing-detail"></span>
+      <span id="rr-corr-badge"></span><span id="rr-corr-detail"></span>
+      <span id="rr-sector-badge"></span><span id="rr-sector-detail"></span>
+      <span id="rr-loss-badge"></span><span id="rr-loss-detail"></span>
+      <span id="c-initial-hidden"></span><span id="c-regime-sub"></span>
     </div>
+
   </div>
 
   <!-- ══ Positions tab ══ -->
@@ -3650,6 +3714,87 @@ body.light .simple-verdict strong{color:#0f172a}
 
 <style>
 @keyframes logpulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+@keyframes livepulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.8)} }
+
+/* ── Stat bar ── */
+.stat-bar{display:flex;flex-wrap:wrap;gap:0;background:#0b0f1a;border:1px solid #1a2540;border-radius:10px;margin-bottom:12px;overflow:hidden}
+.stat-item{display:flex;flex-direction:column;padding:10px 16px;border-right:1px solid #1a2540;flex:1;min-width:90px}
+.stat-item:last-child{border-right:none}
+.stat-label{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
+.stat-val{font-size:15px;font-weight:700;line-height:1.2}
+.stat-sub{font-size:11px;color:#64748b;margin-top:1px}
+
+/* ── Terminal 3-column grid ── */
+.terminal-grid{display:grid;grid-template-columns:200px 1fr 260px;gap:10px;align-items:start}
+
+/* ── Sidebar shared ── */
+.terminal-sidebar,.terminal-news{background:#0b0f1a;border:1px solid #1a2540;border-radius:10px;overflow:hidden;position:sticky;top:12px;max-height:calc(100vh - 100px);display:flex;flex-direction:column}
+.sidebar-hdr{font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.6px;padding:10px 12px;border-bottom:1px solid #1a2540;display:flex;align-items:center;gap:6px;flex-shrink:0}
+.sidebar-live-dot{width:6px;height:6px;border-radius:50%;background:#22c55e;display:inline-block;animation:livepulse 2s infinite}
+.sidebar-empty{padding:16px 12px;color:#475569;font-size:12px}
+.sidebar-list{overflow-y:auto;flex:1}
+.sidebar-list::-webkit-scrollbar{width:3px}
+.sidebar-list::-webkit-scrollbar-thumb{background:#1a2540;border-radius:2px}
+
+/* ── Watchlist sidebar items ── */
+.wl-sb-item{display:grid;grid-template-columns:1fr auto;gap:4px;padding:8px 12px;border-bottom:1px solid #0f1729;cursor:pointer;transition:background .15s}
+.wl-sb-item:hover{background:#111827}
+.wl-sb-item.active{background:#0f2544;border-left:2px solid #3b82f6}
+.wl-sb-ticker{font-size:12px;font-weight:700;color:#e2e8f0}
+.wl-sb-price{font-size:12px;font-weight:600;text-align:right}
+.wl-sb-change{font-size:11px;text-align:right}
+.wl-sb-score{font-size:10px;color:#64748b;grid-column:1/-1;margin-top:2px}
+.wl-sb-score-bar{display:inline-block;height:3px;border-radius:2px;margin-right:4px;vertical-align:middle}
+
+/* ── TradingView chart ── */
+.tv-chart-wrap{background:#0b0f1a;border:1px solid #1a2540;border-radius:10px;overflow:hidden;margin-bottom:10px}
+.tv-chart-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #1a2540}
+.tv-symbol{font-size:15px;font-weight:800;color:#e2e8f0;letter-spacing:-.3px}
+.tv-chart-label{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:.5px}
+.tv-chart-inner{height:420px;position:relative}
+.tv-placeholder{display:flex;align-items:center;justify-content:center;height:100%;color:#334155;font-size:13px}
+
+/* ── Equity panel ── */
+.equity-panel{margin-bottom:10px}
+.equity-chart-wrap{padding:8px 0 4px}
+.equity-cards{display:flex;gap:0;border-top:1px solid #1a2540;margin-top:4px}
+.eq-card{flex:1;padding:10px 14px;border-right:1px solid #1a2540}
+.eq-card:last-child{border-right:none}
+.eq-label{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
+.eq-val{font-size:14px;font-weight:700}
+.eq-sub{font-size:11px;color:#64748b}
+
+/* ── Activity log ── */
+.activity-panel{max-height:260px;display:flex;flex-direction:column}
+.activity-log-box{overflow-y:auto;flex:1;font-size:11px;font-family:'JetBrains Mono','Fira Code',monospace;padding:8px 12px;line-height:1.7;color:#64748b}
+.activity-log-box::-webkit-scrollbar{width:3px}
+.activity-log-box::-webkit-scrollbar-thumb{background:#1a2540;border-radius:2px}
+.al-info{color:#64748b}.al-buy{color:#22c55e;font-weight:600}.al-sell{color:#ef4444;font-weight:600}.al-warn{color:#f59e0b}.al-err{color:#f87171}
+
+/* ── News feed ── */
+.news-list{overflow-y:auto;flex:1;padding:6px 0}
+.news-list::-webkit-scrollbar{width:3px}
+.news-list::-webkit-scrollbar-thumb{background:#1a2540;border-radius:2px}
+.news-item{padding:10px 12px;border-bottom:1px solid #0f1729}
+.news-item:last-child{border-bottom:none}
+.news-source{font-size:9px;font-weight:700;color:#3b82f6;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}
+.news-title{font-size:11px;color:#cbd5e1;line-height:1.4;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.news-title a{color:inherit;text-decoration:none}
+.news-title a:hover{color:#93c5fd}
+.news-time{font-size:10px;color:#334155;margin-top:3px}
+
+/* ── Responsive ── */
+@media(max-width:900px){
+  .terminal-grid{grid-template-columns:1fr}
+  .terminal-sidebar,.terminal-news{position:static;max-height:300px}
+  .stat-item{min-width:80px;padding:8px 10px}
+  .tv-chart-inner{height:280px}
+}
+@media(max-width:480px){
+  .stat-bar{gap:0}
+  .stat-item{min-width:calc(50% - 1px);border-bottom:1px solid #1a2540}
+  .terminal-grid{gap:8px}
+}
 </style>
 
 <script>
@@ -3695,19 +3840,22 @@ function applyState(s) {
     dot.className = 'market-dot market-unknown'; lbl.textContent = 'Market —';
   }
 
-  // cards
-  document.getElementById('c-total').textContent = '$' + fmt(p.total_value);
-  document.getElementById('c-initial').textContent = 'Initial $' + fmt(p.initial_capital);
-  document.getElementById('c-cash').textContent = '$' + fmt(p.cash);
-  document.getElementById('c-pos-val').textContent = '$' + fmt(p.position_value);
+  // stat-bar + legacy cards (both sets of IDs kept in sync)
+  const _setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  _setText('c-total',   '$' + fmt(p.total_value));
+  _setText('c-total-2', '$' + fmt(p.total_value));
+  _setText('c-initial', 'Initial $' + fmt(p.initial_capital));
+  _setText('c-cash',    '$' + fmt(p.cash));
+  _setText('c-pos-val', '$' + fmt(p.position_value));
+  _setText('c-open',    p.open_positions);
+  _setText('c-trades',  p.total_trades);
 
   const pnlEl = document.getElementById('c-pnl');
-  pnlEl.textContent = fmtD(p.total_pnl) && ('$' + (p.total_pnl >= 0 ? '+' : '') + fmt(Math.abs(p.total_pnl)));
-  pnlEl.className = 'card-value ' + cls(p.total_pnl);
-  document.getElementById('c-pnl-pct').textContent = p.total_pnl_pct != null ? ((p.total_pnl_pct >= 0 ? '+' : '') + fmt(p.total_pnl_pct) + '%') : '—';
-
-  document.getElementById('c-open').textContent = p.open_positions;
-  document.getElementById('c-trades').textContent = p.total_trades;
+  if (pnlEl) {
+    pnlEl.textContent = fmtD(p.total_pnl) && ('$' + (p.total_pnl >= 0 ? '+' : '') + fmt(Math.abs(p.total_pnl)));
+    pnlEl.className = 'stat-val ' + cls(p.total_pnl);
+  }
+  _setText('c-pnl-pct', p.total_pnl_pct != null ? ((p.total_pnl_pct >= 0 ? '+' : '') + fmt(p.total_pnl_pct) + '%') : '—');
 
   // header key stats
   {
@@ -3751,19 +3899,16 @@ function applyState(s) {
     }
   }
 
-  // regime card
-  const regimeCard = document.getElementById('regime-card');
+  // regime stat
+  const regimeStat = document.getElementById('regime-stat');
   const regimeEl   = document.getElementById('c-regime');
   const regimeSubEl= document.getElementById('c-regime-sub');
-  if (s.regime) {
-    regimeCard.style.display = '';
+  if (s.regime && regimeStat) {
+    regimeStat.style.display = '';
     const r = s.regime;
-    regimeEl.textContent  = r.regime;
-    regimeEl.className    = 'card-value regime-' + r.regime.toLowerCase();
-    const vixStr = r.vix != null ? `  VIX ${r.vix.toFixed(1)}` : '';
-    regimeSubEl.textContent = `SPY $${fmt(r.spy_price)} · SMA200 $${fmt(r.sma200)}${vixStr}`;
-  } else {
-    regimeCard.style.display = 'none';
+    if (regimeEl) { regimeEl.textContent = r.regime; regimeEl.className = 'stat-val regime-' + r.regime.toLowerCase(); }
+  } else if (regimeStat) {
+    regimeStat.style.display = 'none';
   }
 
   // risk rules panel
@@ -4262,23 +4407,20 @@ function renderToday(today, marketOpen, nextClose, nextOpen) {
   // P&L
   if (today.pnl != null) {
     const sign = today.pnl >= 0 ? '+' : '';
-    pnlEl.textContent = sign + '$' + fmt(Math.abs(today.pnl));
-    pnlEl.className   = 'today-val ' + cls(today.pnl);
+    if (pnlEl) { pnlEl.textContent = sign + '$' + fmt(Math.abs(today.pnl)); pnlEl.className = 'stat-val ' + cls(today.pnl); }
   } else {
-    pnlEl.textContent = '—';
-    pnlEl.className   = 'today-val neu';
+    if (pnlEl) { pnlEl.textContent = '—'; pnlEl.className = 'stat-val neu'; }
   }
-  pnlPctEl.textContent = today.pnl_pct != null
+  if (pnlPctEl) pnlPctEl.textContent = today.pnl_pct != null
     ? (today.pnl_pct >= 0 ? '+' : '') + fmt(today.pnl_pct) + '%'
     : '—';
 
   // Trades
-  tradesEl.textContent = today.trades != null ? today.trades : '—';
+  if (tradesEl) tradesEl.textContent = today.trades != null ? today.trades : '—';
 
   // Market status + countdown
   if (marketOpen === true) {
-    mktEl.textContent = 'OPEN';
-    mktEl.className   = 'today-val pos';
+    if (mktEl) { mktEl.textContent = 'OPEN'; mktEl.className = 'stat-val pos'; }
     if (nextClose) {
       const secsLeft = Math.max(0, Math.round((new Date(nextClose) - Date.now()) / 1000));
       const h = Math.floor(secsLeft / 3600), m = Math.floor((secsLeft % 3600) / 60);
@@ -4287,13 +4429,11 @@ function renderToday(today, marketOpen, nextClose, nextOpen) {
       mktSubEl.textContent = '';
     }
   } else if (marketOpen === false) {
-    mktEl.textContent = 'CLOSED';
-    mktEl.className   = 'today-val neu';
-    mktSubEl.textContent = nextOpen ? 'Opens ' + new Date(nextOpen).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',timeZone:'America/New_York'}) + ' ET' : '';
+    if (mktEl) { mktEl.textContent = 'CLOSED'; mktEl.className = 'stat-val neu'; }
+    if (mktSubEl) mktSubEl.textContent = nextOpen ? 'Opens ' + new Date(nextOpen).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',timeZone:'America/New_York'}) + ' ET' : '';
   } else {
-    mktEl.textContent = '—';
-    mktEl.className   = 'today-val neu';
-    mktSubEl.textContent = '';
+    if (mktEl) { mktEl.textContent = '—'; mktEl.className = 'stat-val neu'; }
+    if (mktSubEl) mktSubEl.textContent = '';
   }
 
   // Sparkline
@@ -4380,6 +4520,143 @@ async function pollPnl() {
 // Poll the lightweight pnl endpoint between full state refreshes
 setInterval(pollPnl, 5000);
 pollPnl();
+
+// ── Terminal: watchlist sidebar ───────────────────────────────────────────────
+let _tvSymbol = null;
+
+function loadTvChart(symbol) {
+  const container = document.getElementById('tv-chart-container');
+  const label     = document.getElementById('tv-chart-symbol');
+  if (!container || !symbol) return;
+  _tvSymbol = symbol;
+  if (label) label.textContent = symbol;
+  // Highlight active item
+  document.querySelectorAll('.wl-sb-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.symbol === symbol);
+  });
+  container.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'tradingview-widget-container';
+  wrap.style.height = '100%';
+  const inner = document.createElement('div');
+  inner.id = 'tv_widget_' + Date.now();
+  inner.style.height = '100%';
+  wrap.appendChild(inner);
+  const script = document.createElement('script');
+  script.src = 'https://s3.tradingview.com/tv.js';
+  script.onload = () => {
+    if (window.TradingView) {
+      new TradingView.widget({
+        container_id: inner.id,
+        width:  '100%',
+        height: '100%',
+        symbol: 'NASDAQ:' + symbol,
+        interval: 'D',
+        timezone: 'America/New_York',
+        theme: document.body.classList.contains('light') ? 'light' : 'dark',
+        style: '1',
+        locale: 'en',
+        toolbar_bg: '#0b0f1a',
+        enable_publishing: false,
+        hide_side_toolbar: false,
+        allow_symbol_change: true,
+        save_image: false,
+        studies: ['RSI@tv-basicstudies', 'MAExp@tv-basicstudies'],
+      });
+    }
+  };
+  wrap.appendChild(script);
+  container.appendChild(wrap);
+}
+
+async function refreshWlSidebar() {
+  try {
+    const res  = await fetch('/api/heatmap');
+    const data = await res.json();
+    if (!data.ok) return;
+    const body = document.getElementById('wl-sidebar-body');
+    if (!body) return;
+    const items = (data.items || []).slice(0, 30);
+    if (!items.length) { body.innerHTML = '<div class="sidebar-empty">No watchlist data</div>'; return; }
+    const col = v => v > 0 ? '#22c55e' : v < 0 ? '#ef4444' : '#94a3b8';
+    const fmtScore = s => s == null ? '' : (s >= 0 ? '+' : '') + Number(s).toFixed(3);
+    const fmtChg   = v => (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%';
+    body.innerHTML = items.map(it => {
+      const sc    = it.score;
+      const scCol = sc == null ? '#475569' : sc > 0 ? '#22c55e' : sc < 0 ? '#ef4444' : '#94a3b8';
+      const barW  = sc == null ? 0 : Math.min(100, Math.abs(sc) * 100);
+      const active = it.symbol === _tvSymbol ? ' active' : '';
+      return `<div class="wl-sb-item${active}" data-symbol="${it.symbol}" onclick="loadTvChart('${it.symbol}')">
+        <span class="wl-sb-ticker">${it.symbol}</span>
+        <span class="wl-sb-price" style="color:${col(it.change_pct)}">$${Number(it.price).toFixed(2)}</span>
+        <span class="wl-sb-change" style="color:${col(it.change_pct)}">${fmtChg(it.change_pct)}</span>
+        <div class="wl-sb-score" style="color:${scCol}">
+          <span class="wl-sb-score-bar" style="width:${barW}%;background:${scCol}"></span>
+          ${sc != null ? fmtScore(sc) + (it.action ? ' ' + it.action : '') : '—'}
+        </div>
+      </div>`;
+    }).join('');
+  } catch(_) {}
+}
+
+// ── Terminal: news feed ───────────────────────────────────────────────────────
+async function refreshNewsFeed() {
+  try {
+    const res  = await fetch('/api/market-news');
+    const data = await res.json();
+    const body = document.getElementById('news-feed-body');
+    if (!body) return;
+    const items = (data.items || []);
+    if (!items.length) { body.innerHTML = '<div class="sidebar-empty">No news available</div>'; return; }
+    body.innerHTML = items.map(it => {
+      const ts = it.published_at ? new Date(it.published_at).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '';
+      return `<div class="news-item">
+        <div class="news-source">${it.source || 'News'}</div>
+        <div class="news-title"><a href="${it.url}" target="_blank" rel="noopener">${it.title}</a></div>
+        ${ts ? `<div class="news-time">${ts}</div>` : ''}
+      </div>`;
+    }).join('');
+  } catch(_) {}
+}
+
+// ── Terminal: activity log ────────────────────────────────────────────────────
+async function refreshActivityLog() {
+  try {
+    const res  = await fetch('/api/logs?n=80');
+    const data = await res.json();
+    const box  = document.getElementById('dash-activity-log');
+    if (!box) return;
+    const entries = (data.entries || []).slice(-60).reverse();
+    const levelClass = l => {
+      if (!l) return 'al-info';
+      const u = l.toUpperCase();
+      if (u === 'WARNING' || u === 'WARN') return 'al-warn';
+      if (u === 'ERROR' || u === 'CRITICAL') return 'al-err';
+      if (u === 'BUY')  return 'al-buy';
+      if (u === 'SELL') return 'al-sell';
+      return 'al-info';
+    };
+    box.innerHTML = entries.map(e => {
+      const msg   = (typeof e === 'string' ? e : (e.message || e.msg || JSON.stringify(e)));
+      const cls   = msg.includes('[BUY]') || msg.includes('PAPER BUY') ? 'al-buy'
+                  : msg.includes('[SELL]') || msg.includes('PAPER SELL') ? 'al-sell'
+                  : msg.includes('WARNING') || msg.includes('WARN') ? 'al-warn'
+                  : msg.includes('ERROR') ? 'al-err' : 'al-info';
+      return `<div class="${cls}">${msg.replace(/</g,'&lt;')}</div>`;
+    }).join('');
+  } catch(_) {}
+}
+
+// ── Wire up terminal polls ────────────────────────────────────────────────────
+function _initTerminal() {
+  if (!document.getElementById('wl-sidebar-body')) return;
+  refreshWlSidebar();
+  refreshNewsFeed();
+  refreshActivityLog();
+}
+setInterval(refreshWlSidebar,  8000);
+setInterval(refreshNewsFeed,  120000);
+setInterval(refreshActivityLog, 6000);
 
 // Tab switching — persists active tab in localStorage
 // ── Trades tab filters ────────────────────────────────────────────────────────
@@ -4674,6 +4951,8 @@ refresh();
 setInterval(refresh, 90000);
 // Heat map refreshes lazily with the state cycle — initial load on startup
 loadHeatmap();
+// Terminal panels
+_initTerminal();
 
 // ── Stock detail modal ────────────────────────────────────────────────────────
 let _detailSym = null;
