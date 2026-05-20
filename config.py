@@ -30,13 +30,13 @@ class TradingConfig:
     max_open_positions: int = 8
 
     # ── Risk management ───────────────────────────────────────────────────────
-    stop_loss_pct: float = 0.05
-    take_profit_pct: float = 0.15
-    daily_loss_limit_pct: float = 0.02
+    stop_loss_pct: float = 0.20
+    take_profit_pct: float = 0.40
+    daily_loss_limit_pct: float = 0.10     # 10% daily limit — wide enough for multi-month holds
 
     # ── Trailing stop-loss ────────────────────────────────────────────────────
     use_trailing_stop: bool = True
-    trailing_stop_pct: float = 0.05        # stop ratchets to -5% below new highs
+    trailing_stop_pct: float = 0.25        # stop ratchets to -25% below new highs
 
     # ── Entry confirmation ────────────────────────────────────────────────────
     use_confirmation: bool = True
@@ -85,7 +85,7 @@ class TradingConfig:
     universe_min_avg_volume: int   = 500_000          # shares / day
     universe_min_price:      float = 10.0
     universe_max_price:      float = 1_000.0
-    universe_min_market_cap: float = 200_000_000_000.0  # $200 B
+    universe_min_market_cap: float = 1_000_000_000.0    # $1 B
     universe_top_n:          int   = 150
     universe_include_etfs:   bool  = True
     universe_use_alpaca:     bool  = True             # attempt Alpaca assets API
