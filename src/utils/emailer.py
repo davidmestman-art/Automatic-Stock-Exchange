@@ -1,6 +1,7 @@
 import logging
 import os
 import smtplib
+import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, Optional
@@ -67,22 +68,67 @@ class TradeEmailer:
                 action, symbol, shares, price, score, reasons,
                 indicators or {}, pnl, pnl_pct,
             )
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = subject
-            msg["From"] = self.user
-            msg["To"] = self.notify_email
-            msg.attach(MIMEText(body_text, "plain"))
-            msg.attach(MIMEText(body_html, "html"))
-            with smtplib.SMTP(self.host, self.port, timeout=10) as smtp:
-                smtp.ehlo()
-                smtp.starttls()
-                smtp.login(self.user, self.password)
-                smtp.sendmail(self.user, self.notify_email, msg.as_string())
+            self._smtp_send(subject, body_text, body_html)
             logger.info(f"[EMAIL] Sent {action} alert for {symbol}")
         except Exception as e:
             logger.warning(f"[EMAIL] Failed to send trade email: {e}")
 
+    def send_confirmation(self) -> bool:
+        """Send a confirmation email when notifications are first enabled. Returns True on success."""
+        if not self.is_configured:
+            return False
+        subject = "✅ Email notifications confirmed — NYSE Algo Trading Engine"
+        text = (
+            "Your email notifications are now active.\n\n"
+            "You will receive a message each time the trading engine executes a BUY or SELL.\n\n"
+            "To disable notifications, go to Settings and toggle Email Notifications off.\n\n"
+            "— NYSE Algo Trading Engine"
+        )
+        html = """<!DOCTYPE html>
+<html><body style="background:#07090f;font-family:Inter,'Segoe UI',Arial,sans-serif;color:#eaf0fb;margin:0;padding:32px">
+<div style="max-width:480px;margin:0 auto">
+  <div style="background:#10b981;color:#fff;display:inline-block;padding:5px 16px;border-radius:20px;font-size:12px;font-weight:700;letter-spacing:.6px;margin-bottom:20px">CONFIRMED</div>
+  <h1 style="font-size:26px;font-weight:800;margin:0 0 8px;letter-spacing:-0.5px">Email notifications active</h1>
+  <p style="color:#8898b8;font-size:14px;line-height:1.6;margin:0 0 24px">
+    You'll receive an email each time the trading engine executes a <strong style="color:#10b981">BUY</strong>
+    or <strong style="color:#ef4444">SELL</strong> — including the signal score, indicators, and P&amp;L.
+  </p>
+  <div style="background:#0d1220;border:1px solid #1a2540;border-radius:12px;padding:20px;font-size:13px;color:#8898b8">
+    To disable notifications, go to <strong style="color:#eaf0fb">Settings</strong> and toggle
+    <strong style="color:#eaf0fb">Email Notifications</strong> off.
+  </div>
+  <p style="color:#4a5568;font-size:11px;margin-top:24px">NYSE Algo Trading Engine</p>
+</div>
+</body></html>"""
+        try:
+            self._smtp_send(subject, text, html)
+            logger.info(f"[EMAIL] Confirmation sent to {self.notify_email}")
+            return True
+        except Exception as e:
+            logger.warning(f"[EMAIL] Failed to send confirmation email: {e}")
+            return False
+
     # ── Private helpers ───────────────────────────────────────────────────────
+
+    def _smtp_send(self, subject: str, body_text: str, body_html: str) -> None:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = self.user
+        msg["To"] = self.notify_email
+        msg.attach(MIMEText(body_text, "plain"))
+        msg.attach(MIMEText(body_html, "html"))
+        if self.port == 465:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(self.host, self.port, timeout=10, context=ctx) as smtp:
+                smtp.login(self.user, self.password)
+                smtp.sendmail(self.user, self.notify_email, msg.as_string())
+        else:
+            with smtplib.SMTP(self.host, self.port, timeout=10) as smtp:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+                smtp.login(self.user, self.password)
+                smtp.sendmail(self.user, self.notify_email, msg.as_string())
 
     def _build_email(self, action, symbol, shares, price, score, reasons, ind, pnl, pnl_pct):
         rsi        = ind.get("rsi")

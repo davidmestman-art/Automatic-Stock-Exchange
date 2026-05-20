@@ -558,5 +558,3 @@ def _exchange_breakdown(tickers: List[str], cats: Dict[str, str]) -> Dict[str, i
         else:
             bkd["NYSE"] += 1
     return bkd
-
-

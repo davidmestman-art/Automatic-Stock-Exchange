@@ -819,7 +819,7 @@ def _create_user_engine(user_id: int) -> TradingEngine:
     if not eng.dynamic_universe._last_result and _engine.dynamic_universe._last_result:
         eng.dynamic_universe._last_result = _engine.dynamic_universe._last_result
     if not eng.scanner.last_result and _engine.scanner.last_result:
-        eng.scanner.last_result = _engine.scanner.last_result
+        eng.scanner._last_result = _engine.scanner.last_result
     return eng
 
 
@@ -957,6 +957,8 @@ if _saved.get("risk_profile") in RISK_PROFILES:
 else:
     _current_profile = "moderate"
 _engine.emailer.active = bool(_saved.get("email_notifications", False))
+if _saved.get("notify_email"):
+    _engine.emailer.notify_email = _saved["notify_email"]
 
 # ── News feed cache ───────────────────────────────────────────────────────────
 _news_cache: dict = {}       # {symbol: {"items": [...], "fetched_at": datetime}}
@@ -2129,7 +2131,7 @@ def api_journal():
             try:
                 extra_trades = eng.executor.get_filled_orders(limit=200)
             except Exception as _e:
-                log.warning("[JOURNAL] Alpaca orders fetch failed: %s", _e)
+                log.debug("[JOURNAL] Alpaca orders fetch skipped: %s", _e)
         if not extra_trades:
             portfolio = eng.portfolio
             extra_trades = [
@@ -2332,7 +2334,9 @@ def api_settings():
     # Email notifications toggle
     if "email_notifications" in data:
         enabled = bool(data["email_notifications"])
-        _get_engine().emailer.active = enabled
+        emailer = _get_engine().emailer
+        was_active = emailer.active
+        emailer.active = enabled
         saved["email_notifications"] = enabled
         if _AUTH_ENABLED:
             user_id = session.get("user_id")
@@ -2342,6 +2346,10 @@ def api_settings():
                     _u.email_notifications_enabled = enabled
                     db.session.commit()
                     _invalidate_user_engine(user_id)
+        # Send confirmation email the first time notifications are turned on
+        if enabled and not was_active and emailer.notify_email:
+            import threading as _th
+            _th.Thread(target=emailer.send_confirmation, daemon=True).start()
     _save_user_settings(saved)
     return jsonify({
         "ok": True,
@@ -2378,13 +2386,20 @@ def api_alpaca_keys():
 @app.route("/api/user-email", methods=["POST"])
 def api_user_email():
     """Save per-user notification email address."""
+    data = request.get_json(silent=True) or {}
+    notify_email = (data.get("notify_email") or "").strip()
+
     if not _AUTH_ENABLED:
-        return jsonify({"ok": False, "error": "Auth not enabled"}), 400
+        # No user DB — save to settings JSON and update live engine
+        _engine.emailer.notify_email = notify_email
+        saved = _load_user_settings()
+        saved["notify_email"] = notify_email
+        _save_user_settings(saved)
+        return jsonify({"ok": True})
+
     user_id = session.get("user_id")
     if not user_id:
         return jsonify({"ok": False, "error": "Not logged in"}), 401
-    data = request.get_json(silent=True) or {}
-    notify_email = (data.get("notify_email") or "").strip()
     user = db.session.get(User, user_id)
     if not user:
         return jsonify({"ok": False, "error": "User not found"}), 404
@@ -2392,6 +2407,44 @@ def api_user_email():
     db.session.commit()
     _invalidate_user_engine(user_id)
     return jsonify({"ok": True})
+
+
+@app.route("/api/test-email", methods=["POST"])
+def api_test_email():
+    """Send a test email immediately and return success/error details."""
+    emailer = _get_engine().emailer
+    debug = {
+        "host": emailer.host or "(empty)",
+        "port": emailer.port,
+        "user": emailer.user or "(empty)",
+        "password_set": bool(emailer.password),
+        "notify_email": emailer.notify_email or "(empty)",
+    }
+    if not emailer.host or not emailer.user or not emailer.password:
+        return jsonify({"ok": False, "error": "SMTP not configured", "debug": debug})
+    if not emailer.notify_email:
+        return jsonify({"ok": False, "error": "No recipient email — enter and save your email address first", "debug": debug})
+    try:
+        import smtplib, ssl as _ssl
+        if emailer.port == 465:
+            ctx = _ssl.create_default_context()
+            with smtplib.SMTP_SSL(emailer.host, emailer.port, timeout=15, context=ctx) as smtp:
+                smtp.login(emailer.user, emailer.password)
+                refused = smtp.sendmail(emailer.user, emailer.notify_email,
+                    f"Subject: Test email — NYSE Trading Engine\r\nFrom: {emailer.user}\r\nTo: {emailer.notify_email}\r\n\r\nThis is a test email from your trading engine.")
+        else:
+            with smtplib.SMTP(emailer.host, emailer.port, timeout=15) as smtp:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+                smtp.login(emailer.user, emailer.password)
+                refused = smtp.sendmail(emailer.user, emailer.notify_email,
+                    f"Subject: Test email — NYSE Trading Engine\r\nFrom: {emailer.user}\r\nTo: {emailer.notify_email}\r\n\r\nThis is a test email from your trading engine.")
+        if refused:
+            return jsonify({"ok": False, "error": f"Recipient refused: {refused}", "debug": debug})
+        return jsonify({"ok": True, "debug": debug})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}", "debug": debug})
 
 
 @app.route("/api/news")
@@ -3586,6 +3639,7 @@ body.light .simple-verdict strong{color:#0f172a}
           <input id="st-email-input" type="email" placeholder="your@email.com" autocomplete="email"
                  style="flex:1;padding:8px 12px;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
           <button onclick="stSaveEmail()" style="padding:8px 14px;background:#1f6feb;color:#fff;border:none;border-radius:6px;font-size:13px;cursor:pointer">Save</button>
+          <button onclick="stTestEmail()" style="padding:8px 14px;background:#2d333b;color:#c9d1d9;border:1px solid #444c56;border-radius:6px;font-size:13px;cursor:pointer">Test</button>
         </div>
         <span id="st-email-status" style="font-size:12px;display:none"></span>
       </div>
@@ -4294,7 +4348,33 @@ async function pollPnl() {
   try {
     const res  = await fetch('/api/pnl');
     const data = await res.json();
-    if (data.ok) updatePnlTicker(data.unrealized_pnl, data.unrealized_pnl_pct, data.open_positions);
+    if (!data.ok) return;
+    updatePnlTicker(data.unrealized_pnl, data.unrealized_pnl_pct, data.open_positions);
+
+    // Live-update dashboard P&L cards
+    const fmt2 = v => Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const sign  = v => v >= 0 ? '+' : '-';
+    const col   = v => v > 0 ? '#22c55e' : v < 0 ? '#ef4444' : '#94a3b8';
+
+    // Total P&L card
+    const pnlEl = document.getElementById('c-pnl');
+    if (pnlEl && data.total_pnl != null) {
+      pnlEl.textContent = sign(data.total_pnl) + '$' + fmt2(data.total_pnl);
+      pnlEl.className = 'card-value ' + (data.total_pnl > 0 ? 'pos' : data.total_pnl < 0 ? 'neg' : 'neu');
+      const pctEl = document.getElementById('c-pnl-pct');
+      if (pctEl && data.total_pnl_pct != null)
+        pctEl.textContent = sign(data.total_pnl_pct) + fmt2(data.total_pnl_pct) + '%';
+    }
+
+    // Today's P&L strip — live unrealized value
+    const dayEl = document.getElementById('td-pnl');
+    if (dayEl && data.unrealized_pnl != null) {
+      dayEl.textContent = sign(data.unrealized_pnl) + '$' + fmt2(data.unrealized_pnl);
+      dayEl.className = 'today-val ' + (data.unrealized_pnl > 0 ? 'pos' : data.unrealized_pnl < 0 ? 'neg' : 'neu');
+      const dayPctEl = document.getElementById('td-pnl-pct');
+      if (dayPctEl && data.unrealized_pnl_pct != null)
+        dayPctEl.textContent = sign(data.unrealized_pnl_pct) + fmt2(data.unrealized_pnl_pct) + '%';
+    }
   } catch(_) {}
 }
 // Poll the lightweight pnl endpoint between full state refreshes
@@ -4487,11 +4567,33 @@ async function stSaveKeys() {
 async function stToggleEmail(enabled) {
   const tog = document.getElementById('st-email-toggle');
   const lbl = document.getElementById('st-email-label');
+  const status = document.getElementById('st-email-status');
+  const emailInput = document.getElementById('st-email-input');
+  // Require an email address before enabling
+  if (enabled && emailInput && !emailInput.value.trim()) {
+    tog.checked = false;
+    status.style.color = '#f87171';
+    status.textContent = 'Enter and save your email address first.';
+    status.style.display = 'block';
+    return;
+  }
   tog.disabled = true;
   try {
     const res = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email_notifications:enabled}) });
     const data = await res.json();
-    lbl.textContent = data.ok ? (enabled?'ON':'OFF') : (tog.checked=!enabled, !enabled?'ON':'OFF');
+    if (data.ok) {
+      lbl.textContent = enabled ? 'ON' : 'OFF';
+      if (enabled) {
+        status.style.color = '#10b981';
+        status.textContent = '✓ Notifications enabled — check your inbox for a confirmation email.';
+        status.style.display = 'block';
+      } else {
+        status.style.display = 'none';
+      }
+    } else {
+      tog.checked = !enabled;
+      lbl.textContent = !enabled ? 'ON' : 'OFF';
+    }
   } catch(e) { tog.checked=!enabled; lbl.textContent=!enabled?'ON':'OFF'; }
   finally { tog.disabled=false; }
 }
@@ -4507,6 +4609,22 @@ async function stSaveEmail() {
     status.textContent = data.ok ? (email?'✓ Email saved.':'✓ Cleared.') : ('Error: '+(data.error||'unknown'));
   } catch(e) { status.style.color='#f87171'; status.textContent='Network error: '+e; }
   status.style.display='block';
+}
+
+async function stTestEmail() {
+  const status = document.getElementById('st-email-status');
+  status.style.color = '#8b949e';
+  status.textContent = 'Sending test email…';
+  status.style.display = 'block';
+  try {
+    const res = await fetch('/api/test-email', { method:'POST' });
+    const data = await res.json();
+    const dbg = data.debug ? ` [host:${data.debug.host} port:${data.debug.port} user:${data.debug.user} to:${data.debug.notify_email}]` : '';
+    status.style.color = data.ok ? '#10b981' : '#f87171';
+    status.textContent = data.ok
+      ? `✓ Sent from ${(data.debug||{}).user||'?'} → ${(data.debug||{}).notify_email||'?'}`
+      : ('✗ ' + (data.error||'Unknown error') + dbg);
+  } catch(e) { status.style.color='#f87171'; status.textContent='Network error: '+e; }
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
