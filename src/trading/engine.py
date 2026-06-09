@@ -15,7 +15,6 @@ from ..utils.notifications import Notifier
 from ..utils.sectors import SECTOR_ETFS, get_sector, sector_position_count
 from .etf_rebalancer import ETFRebalancer
 from .executor import PaperExecutor
-from .etf_rebalancer import ETFRebalancer
 from .orb import (
     ORBSession,
     fetch_gap_pcts,

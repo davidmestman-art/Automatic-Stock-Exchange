@@ -1215,15 +1215,19 @@ def _build_state(signals=None, prices=None, ind_map=None, error=None) -> dict:
     if eng.config.use_alpaca:
         try:
             acct = eng.executor.get_account_summary()
-            total_pnl = acct["portfolio_value"] - eng.config.initial_capital
+            portfolio_value = acct["equity"]          # equity includes unrealized P&L
+            cash            = acct["cash"]
+            position_value  = portfolio_value - cash
+            baseline        = eng.config.initial_capital or portfolio_value
+            total_pnl       = portfolio_value - baseline
             summary = {
-                "total_value": acct["portfolio_value"],
-                "cash": acct["cash"],
-                "position_value": acct["portfolio_value"] - acct["cash"],
-                "total_pnl": total_pnl,
-                "total_pnl_pct": (total_pnl / eng.config.initial_capital * 100) if eng.config.initial_capital else 0,
+                "total_value":    portfolio_value,
+                "cash":           cash,
+                "position_value": position_value,
+                "total_pnl":      total_pnl,
+                "total_pnl_pct":  (total_pnl / baseline * 100) if baseline else 0,
                 "open_positions": len(pos_list),
-                "total_trades": len(trades_list),
+                "total_trades":   len(trades_list),
             }
         except Exception as e:
             log.warning(f"Alpaca account fetch failed: {e}")
