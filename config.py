@@ -26,17 +26,17 @@ class TradingConfig:
 
     # ── Portfolio settings ────────────────────────────────────────────────────
     initial_capital: float = 100_000.0
-    max_position_pct: float = 0.10
-    max_open_positions: int = 8
+    max_position_pct: float = 0.08          # 8% max per position (was 10%)
+    max_open_positions: int = 6             # 6 slots — keeps 20%+ cash free (was 8)
 
     # ── Risk management ───────────────────────────────────────────────────────
-    stop_loss_pct: float = 0.20
+    stop_loss_pct: float = 0.12             # 12% stop (was 20%)
     take_profit_pct: float = 0.40
-    daily_loss_limit_pct: float = 0.10     # 10% daily limit — wide enough for multi-month holds
+    daily_loss_limit_pct: float = 0.10
 
     # ── Trailing stop-loss ────────────────────────────────────────────────────
     use_trailing_stop: bool = True
-    trailing_stop_pct: float = 0.25        # stop ratchets to -25% below new highs
+    trailing_stop_pct: float = 0.15        # 15% trailing (was 25%)
 
     # ── Entry confirmation ────────────────────────────────────────────────────
     use_confirmation: bool = True
