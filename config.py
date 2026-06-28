@@ -117,9 +117,20 @@ class TradingConfig:
     regime_bull_vix_max: float = 25.0
     regime_bear_vix_min: float = 27.0
     regime_size_mult_bull: float = 1.0
-    regime_size_mult_choppy: float = 0.70
-    regime_size_mult_bear: float = 0.35
-    regime_bear_min_score_mult: float = 1.8   # BEAR: only trade if score > threshold × mult
+    regime_size_mult_choppy: float = 0.50   # 50% size in choppy (was 70%)
+    regime_size_mult_bear: float = 0.0      # no new buys in BEAR
+    regime_bear_min_score_mult: float = 1.8
+
+    # ── Strategy #2: Trend Following ──────────────────────────────────────────
+    trend_follow_bear_block_buys: bool = True    # block ALL new buys when SPY < SMA200
+    trend_follow_bear_sell_losers: bool = True   # sell positions down > 8% in BEAR regime
+    trend_follow_bear_loss_threshold: float = 0.08  # sell if position down this much in BEAR
+
+    # ── Strategy #3: Quality Factor ───────────────────────────────────────────
+    quality_pullback_filter: bool = True     # only buy on pullbacks, not at highs
+    quality_pullback_min_pct: float = 0.08  # must be at least 8% off 52-week high
+    quality_pullback_max_pct: float = 0.30  # skip if >30% off high (too broken)
+    quality_roe_min: float = 0.10           # min return on equity (10%)
 
     # ── Momentum signals ──────────────────────────────────────────────────────
     use_momentum_signals: bool = True   # ROC + StochRSI component in signal scoring

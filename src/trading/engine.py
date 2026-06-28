@@ -523,16 +523,32 @@ class TradingEngine:
 
                 corr_reduced = symbol in self._last_corr_blocked
 
+                # ── Strategy #2: Trend Following — block ALL buys in BEAR ────
                 if self._regime_result is not None and self._regime_result.regime == "BEAR":
-                    bear_min = self.config.buy_threshold * getattr(
-                        self.config, "regime_bear_min_score_mult", 1.8
-                    )
-                    if signal.score < bear_min:
-                        logger.info(
-                            f"  BEAR regime: skipping BUY {symbol} "
-                            f"(score={signal.score:.3f} < {bear_min:.3f})"
-                        )
+                    if getattr(self.config, "trend_follow_bear_block_buys", True):
+                        logger.info(f"  [TREND] BEAR regime: blocking BUY {symbol} (SPY below SMA200)")
                         continue
+
+                # ── Strategy #3: Quality Factor — pullback filter ─────────────
+                if getattr(self.config, "quality_pullback_filter", True):
+                    orb_state = self._orb_session.states.get(symbol)
+                    high_52w = orb_state.high_52w if orb_state else None
+                    if high_52w and high_52w > 0 and current_price > 0:
+                        pct_off_high = (high_52w - current_price) / high_52w
+                        min_pull = getattr(self.config, "quality_pullback_min_pct", 0.08)
+                        max_pull = getattr(self.config, "quality_pullback_max_pct", 0.30)
+                        if pct_off_high < min_pull:
+                            logger.info(
+                                f"  [QUALITY] {symbol}: only {pct_off_high:.1%} off 52w high"
+                                f" (need ≥{min_pull:.0%}) — skip (buying at peak)"
+                            )
+                            continue
+                        if pct_off_high > max_pull:
+                            logger.info(
+                                f"  [QUALITY] {symbol}: {pct_off_high:.1%} off 52w high"
+                                f" (>{max_pull:.0%}) — skip (too broken)"
+                            )
+                            continue
 
                 rc = self.risk.check_buy(
                     symbol=symbol,
@@ -1261,6 +1277,23 @@ class TradingEngine:
                 if price >= halfway and pos.stop_loss < pos.entry_price:
                     pos.stop_loss = pos.entry_price
                     logger.debug(f"  Breakeven stop set for {symbol} @ ${pos.entry_price:.2f}")
+
+            # Strategy #2: In BEAR regime, sell positions down more than threshold
+            if (
+                self._regime_result is not None
+                and self._regime_result.regime == "BEAR"
+                and getattr(self.config, "trend_follow_bear_sell_losers", True)
+                and pos.entry_price > 0
+            ):
+                loss_pct = (pos.entry_price - price) / pos.entry_price
+                threshold = getattr(self.config, "trend_follow_bear_loss_threshold", 0.08)
+                if loss_pct > threshold:
+                    logger.info(
+                        f"  [TREND] {symbol}: BEAR regime — cutting loser"
+                        f" {loss_pct:.1%} > {threshold:.0%} threshold"
+                    )
+                    exits.append((symbol, price, f"BEAR regime: cut loser ({loss_pct:.1%} down)"))
+                    continue
 
             stop_reason = (
                 "Trailing stop triggered" if self.risk.use_trailing_stop
